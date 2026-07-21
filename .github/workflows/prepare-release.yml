@@ -112,7 +112,7 @@ jobs:
 
           release_sha="$(git rev-parse HEAD)"
           tag="v${RELEASE_VERSION}"
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null || true)"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null)" || existing_sha=""
           if [ -n "$existing_sha" ]; then
             if [ "$existing_sha" != "$release_sha" ]; then
               echo "::error::tag ${tag} already points to ${existing_sha}, not prepared commit ${release_sha}"
