@@ -1,0 +1,63 @@
+{
+  "name": "portler",
+  "version": "0.2.0",
+  "description": "Local development process runner with automatic port assignment and env resolution.",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "portler": "dist/bin/portler.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc -p tsconfig.test.json",
+    "clean": "rm -rf dist",
+    "dev": "node ./bin/portler.ts",
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\"",
+    "smoke": "node ./dist/bin/portler.js --help",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "verify": "npm run check && npm test && npm run build && npm run smoke",
+    "prepublishOnly": "npm run verify"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "typescript": "^5.8.3",
+    "vitepress": "^1.6.4"
+  },
+  "overrides": {
+    "vite": "^6.4.3",
+    "esbuild": "^0.25.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YJJosh/Portler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YJJosh/Portler/issues"
+  },
+  "homepage": "https://github.com/YJJosh/Portler#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

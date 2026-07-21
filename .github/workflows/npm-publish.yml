@@ -1,0 +1,96 @@
+name: npm publish
+
+# The prepare-release workflow creates a draft GitHub Release with generated
+# notes. Publishing that reviewed draft is the deliberate human action that
+# starts npm publishing; a tag push or branch push alone cannot publish.
+#
+# There is deliberately no workflow_dispatch trigger here: every npm package
+# must correspond to a published release tag whose version matches package.json.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Check both the version and the commit recorded when the draft release
+      # was prepared. Moving a release tag after review must never change what
+      # npm receives.
+      - name: Verify the prepared release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::release tag ${GITHUB_REF_NAME} does not match package.json version ${pkg_version}"
+            exit 1
+          fi
+
+          body="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .body)"
+          expected_sha="$(printf '%s\n' "$body" | sed -nE 's/.*<!-- release-sha:([0-9a-f]{40}) -->.*/\1/p' | head -n 1)"
+          actual_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [ -z "$expected_sha" ]; then
+            echo "::error::release is missing the commit marker created by the prepare-release workflow"
+            exit 1
+          fi
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq .object.sha)"
+          if [ "$remote_sha" != "$expected_sha" ]; then
+            echo "::error::release tag now points to ${remote_sha}, but the reviewed draft was prepared from ${expected_sha}"
+            exit 1
+          fi
+          if [ "$actual_sha" != "$expected_sha" ]; then
+            echo "::error::checked-out commit is ${actual_sha}, but the reviewed draft was prepared from ${expected_sha}"
+            exit 1
+          fi
+          echo "publishing portler ${pkg_version} from ${GITHUB_REF_NAME} at ${actual_sha}"
+
+      - name: Install npm with trusted publishing support
+        run: npm install -g npm@11.15.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Full verification, not a subset: typecheck (including tests), the test
+      # suite, a real build, and a smoke run of the built binary.
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test
+        run: npm run smoke
+
+      - name: Check package contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --access public

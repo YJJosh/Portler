@@ -1,0 +1,147 @@
+name: prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example 0.2.0, without the v)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate release request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from the main branch, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+          node <<'NODE'
+          const current = require('./package.json').version;
+          const target = process.env.RELEASE_VERSION;
+          const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+          if (!stable.test(target)) {
+            console.error(`::error::${target} is not a stable semantic version such as 0.2.0`);
+            process.exit(1);
+          }
+
+          if (stable.test(current)) {
+            const currentParts = current.split('.').map(Number);
+            const targetParts = target.split('.').map(Number);
+            for (let i = 0; i < targetParts.length; i += 1) {
+              if (targetParts[i] === currentParts[i]) continue;
+              if (targetParts[i] < currentParts[i]) {
+                console.error(`::error::release version ${target} is lower than package version ${current}`);
+                process.exit(1);
+              }
+              break;
+            }
+          }
+          NODE
+
+          tag="v${RELEASE_VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::a GitHub Release for ${tag} already exists; review/publish its draft or delete it before retrying"
+            exit 1
+          fi
+
+      - name: Set package version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release contents
+        run: |
+          npm run verify
+          npm run docs:build
+          npm pack --dry-run
+
+      - name: Commit the release version
+        id: release_commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+
+          if git diff --cached --quiet; then
+            echo "package files already contain version ${RELEASE_VERSION}"
+          else
+            git commit -m "Release v${RELEASE_VERSION}"
+          fi
+
+          # This also fails safely if main moved while verification was running.
+          git push origin HEAD:main
+
+          release_sha="$(git rev-parse HEAD)"
+          tag="v${RELEASE_VERSION}"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing_sha" ]; then
+            if [ "$existing_sha" != "$release_sha" ]; then
+              echo "::error::tag ${tag} already points to ${existing_sha}, not prepared commit ${release_sha}"
+              exit 1
+            fi
+            echo "reusing ${tag} at ${release_sha} from an earlier partial run"
+          else
+            git tag "$tag" "$release_sha"
+            # A tag created by another actor after this check makes the push
+            # fail; release tags are never moved or force-pushed.
+            git push origin "refs/tags/${tag}"
+          fi
+          echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          gh release create "$tag" \
+            --verify-tag \
+            --title "Portler ${tag}" \
+            --notes "<!-- release-sha:${RELEASE_SHA} -->" \
+            --generate-notes \
+            --draft
+
+          url="$(gh release view "$tag" --json url --jq .url)"
+          echo "Draft release: ${url}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Review the generated notes without removing the hidden release-sha comment, then publish the release to start npm publishing." >> "$GITHUB_STEP_SUMMARY"
