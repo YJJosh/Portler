@@ -1,25 +1,24 @@
-import { VERSION } from '../constants.ts';
-import { SAMPLE_PORTLER_YML } from './sample.ts';
+import { PACKAGE_NAME, VERSION } from '../constants.ts';
 
 export function printHelp(): void {
-  process.stdout.write(`portler ${VERSION}
+  process.stdout.write(`${PACKAGE_NAME} ${VERSION}
 
 Usage:
-  portler up [service...] [--detach] [--volume-set <name>]
-  portler up docker [service...] [--detach] [--volume-set <name>]
-  portler up k8s [service...] [--detach]
-  portler down [docker|k8s] [service...] [--volumes] [--force]
-  portler k8s render [service...]
-  portler restart [docker] [service...]
-  portler ps [service...]
-  portler logs [service...] [-f|--follow]
-  portler ports
-  portler env [service]
-  portler clean [--ports] [--global] [--force]
-  portler volumes [list]
-  portler volumes fork <volume> <new-set>
-  portler volumes remove <volume> [--force]
-  portler init
+  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>]
+  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>]
+  ${PACKAGE_NAME} up k8s [service...] [--detach]
+  ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
+  ${PACKAGE_NAME} k8s render [service...]
+  ${PACKAGE_NAME} restart [docker] [service...]
+  ${PACKAGE_NAME} ps [service...]
+  ${PACKAGE_NAME} logs [service...] [-f|--follow]
+  ${PACKAGE_NAME} ports
+  ${PACKAGE_NAME} env [service]
+  ${PACKAGE_NAME} clean [--ports] [--global] [--force]
+  ${PACKAGE_NAME} volumes [list]
+  ${PACKAGE_NAME} volumes fork <volume> <new-set>
+  ${PACKAGE_NAME} volumes remove <volume> [--force]
+  ${PACKAGE_NAME} init
 
 Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
@@ -31,9 +30,8 @@ Options:
       --force             For "clean": stop running services first (also recovers
                           from a corrupt .portler/); for "volumes remove": bypass
                           only the in-use check (ownership is always required);
-                          for "down": DANGEROUS
-                          last resort — signal pids whose identity cannot be
-                          verified (see below)
+                          for "down": DANGEROUS last resort — signal pids
+                          whose identity cannot be verified
   -f, --follow            Keep streaming new output for "logs"
       --volumes           For "down k8s": ALSO delete PersistentVolumeClaims.
                           Without it, stored data survives a down/up cycle.
@@ -41,54 +39,14 @@ Options:
                           (env fallback: PORTLER_VOLUME_SET)
   -h, --help              Show help
 
-"restart" stops the named services (all by default) and starts them again in
-the background, keeping their assigned ports whenever they are still free.
-It supports local and docker mode; for Kubernetes run "down k8s" then "up k8s".
+"down" only signals a process group whose leader's recorded start token still
+matches, so a recycled pid is never killed. "--force" also signals groups whose
+identity cannot be proven (legacy entries, unreadable tokens) — never one that
+provably belongs to someone else. Inspect the pid first with
+"ps -o pid,ppid,lstart,command -p <pid>".
 
-Note: "docker" and "k8s" are reserved words selecting the Docker and
-Kubernetes run modes and cannot be used as service names.
+Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 
-Stopping is fail-closed: "down" signals a recorded pid only when the OS start
-time captured at spawn still matches, so a pid the OS recycled onto an unrelated
-process is never killed (nor is its process group). A PID entry written before
-start tokens existed, or one whose token could not be captured, is therefore NOT
-signalled: it is reported, kept, and left for you. A service counts as stopped
-only once its process group is confirmed gone; anything else makes "down" exit
-non-zero. A pid PROVEN to belong to another process is never signalled, with or
-without --force.
-
-"down --force" is a dangerous last resort, not a routine flag: it signals the
-process GROUP of a pid Portler cannot identify, so if the OS recycled that pid,
-it kills an unrelated process tree. Inspect the pid first
-("ps -o pid,ppid,lstart,command -p <pid>") and prefer stopping the process
-yourself.
-
-Kubernetes: Portler only acts on a local cluster (kind, k3d, minikube, Docker
-Desktop, Rancher Desktop, OrbStack, colima); it refuses an unrecognized kubectl
-context, and it refuses an API server endpoint that is not plainly on this
-machine. Only loopback endpoints are accepted outright; a private/LAN address
-(minikube's VM lives there — but so does the cluster down the hall) needs
-PORTLER_ALLOW_K8S_ENDPOINT="<exact url>", and an endpoint that cannot be read at
-all is refused with no override. It only ever creates/deletes namespaces it
-labelled itself, and never deletes PersistentVolumeClaims unless
-"down k8s --volumes" says so.
-
-Proxy: a top-level proxy block serves the whole project behind one URL.
-Routes use longest-prefix matching and prefixes are not stripped before
-forwarding. "proxy" is then reserved as a service name. The proxy only answers
-for localhost/loopback Host headers (DNS-rebinding protection); add others with
-allowed_hosts.
-
-  proxy:
-    port: auto
-    allowed_hosts: [myapp.test]
-    routes:
-      /api: backend
-      /: frontend
-
-Portler supports Linux and macOS (on Windows, use WSL2).
-
-Example portler.yml:
-
-${SAMPLE_PORTLER_YML}`);
+Documentation: https://yjjosh.github.io/Portler
+`);
 }
