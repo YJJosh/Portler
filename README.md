@@ -57,22 +57,14 @@ Portler assigns an available host port to each service. Local processes receive 
 
 ## Highlights
 
-- [Automatic ports](https://yjjosh.github.io/Portler/guide/ports) let multiple projects and checkouts run side by side.
-- [Service references](https://yjjosh.github.io/Portler/guide/services) keep URLs and environment variables in sync.
-- [Dependency and health checks](https://yjjosh.github.io/Portler/guide/dependencies) control startup order.
-- [Docker](https://yjjosh.github.io/Portler/guide/docker) and [local Kubernetes](https://yjjosh.github.io/Portler/guide/kubernetes) modes use the same configuration.
-- [Managed volumes](https://yjjosh.github.io/Portler/guide/volumes) make it easy to fork local data between checkouts.
-- An optional [reverse proxy](https://yjjosh.github.io/Portler/guide/proxy) serves the stack through one local origin.
+- **[Automatic ports](https://yjjosh.github.io/Portler/guide/ports)** — let multiple projects and checkouts run side by side.
+- **[Service references](https://yjjosh.github.io/Portler/guide/services)** — keep URLs and environment variables in sync.
+- **[Dependency and health checks](https://yjjosh.github.io/Portler/guide/dependencies)** — control startup order.
+- **[Docker](https://yjjosh.github.io/Portler/guide/docker) and [local Kubernetes](https://yjjosh.github.io/Portler/guide/kubernetes)** — use the same configuration.
+- **[Managed volumes](https://yjjosh.github.io/Portler/guide/volumes)** — make it easy to fork local data between checkouts.
+- **[Reverse proxy](https://yjjosh.github.io/Portler/guide/proxy)** — serves the stack through one local origin when enabled.
 
 Portler is designed for local development and verifies resource ownership before stopping processes or removing managed resources.
-
-## Development
-
-```sh
-npm install
-npm run verify
-npm run docs:dev
-```
 
 ## License
 

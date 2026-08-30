@@ -24,6 +24,8 @@
     "check": "tsc -p tsconfig.test.json",
     "clean": "rm -rf dist",
     "dev": "node ./bin/portler.ts",
+    "dev:link": "npm run build --silent && chmod +x ./dist/bin/portler.js && ln -sfn \"$PWD/dist/bin/portler.js\" \"$(npm prefix --global)/bin/devportler\"",
+    "dev:watch": "tsc --watch",
     "test": "node --experimental-strip-types --test \"test/*.test.ts\"",
     "smoke": "node ./dist/bin/portler.js --help",
     "docs:dev": "vitepress dev docs",
