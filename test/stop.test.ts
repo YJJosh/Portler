@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -257,44 +258,71 @@ describe('stopServices', () => {
     assert.deepEqual(Object.keys(remaining?.services ?? {}), ['keep']);
   });
 
-  it('kills a service whose group leader exits but whose children live on', async () => {
-    // The `sh -c` wrapper pattern: the leader forks a child and exits, leaving
-    // the process group alive. Ownership is proven while the leader is still up,
-    // so the group stays signallable afterwards.
+  it('kills a service whose group leader exits but whose children live on', { timeout: 10_000 }, async (t) => {
+    // The leader must stay alive until stopServices reads its real start token.
+    // A timed exit races CI scheduling: if it exits before that read, refusing
+    // the unproven group is correct. IPC also proves the grandchild is ready,
+    // so this cannot pass just by killing the leader before it forks.
+    const grandchildScript = `
+      process.on('SIGTERM', () => {});
+      setTimeout(() => {}, 60_000);
+      process.send('ready');
+    `;
     const child = spawn(
       process.execPath,
-      [
-        '-e',
-        // Spawn a grandchild in the same group, then exit the leader.
-        "const{spawn}=require('node:child_process');" +
-          "spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'ignore'}).unref();" +
-          'setTimeout(()=>process.exit(0),50);',
-      ],
-      { detached: true, stdio: 'ignore' },
+      ['-e', `
+        const { spawn } = require('node:child_process');
+        const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildScript)}], {
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        });
+        grandchild.once('message', () => process.send(grandchild.pid));
+        process.once('message', () => process.exit(0));
+      `],
+      { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] },
     );
     spawned.push(child);
-    await new Promise((resolve) => child.once('spawn', resolve));
+    const [grandchildPid] = await once(child, 'message', { signal: t.signal });
+    assert.equal(typeof grandchildPid, 'number');
 
     const pid = child.pid!;
-    await writePidsFile({ api: pidInfo(pid, (await readProcessStartToken(pid)) ?? undefined) });
+    const token = await readProcessStartToken(pid);
+    assert.ok(token, 'this test needs a real start token');
+    await writePidsFile({ api: pidInfo(pid, token) });
 
-    const result = await stopServices(projectDir);
+    const signals: NodeJS.Signals[] = [];
+    const result = await stopServices(projectDir, undefined, {}, {
+      // The grandchild ignores SIGTERM, so no long grace period is needed.
+      graceMs: 20,
+      readStartToken: async (leaderPid) => {
+        assert.equal(leaderPid, pid);
+        const current = await readProcessStartToken(leaderPid);
+        assert.equal(current, token, 'ownership must be verified while the leader is alive');
 
+        // Hold the first verification open until the leader has really exited
+        // and been reaped. Return the real token just read, not a mocked one.
+        const exited = once(child, 'exit', { signal: t.signal });
+        child.send('exit');
+        assert.deepEqual(await exited, [0, null]);
+        return current;
+      },
+      sendSignal: (groupPid, signal) => {
+        assert.equal(groupPid, pid);
+        assert.equal(isPidRunning(pid), false, 'the leader must already be gone');
+        assert.ok(isPidRunning(grandchildPid), 'the grandchild must survive until SIGKILL');
+        signals.push(signal);
+        process.kill(-groupPid, signal);
+        return { status: 'sent' };
+      },
+    });
+
+    // SIGKILL must exercise the gone-leader/proven-group path, not merely
+    // signal a still-live leader or succeed before a grandchild ever existed.
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
     assert.deepEqual(result.stopped, ['api']);
-    // The whole group must be gone: leader and grandchild alike.
-    const groupGone = await (async () => {
-      const deadline = Date.now() + 5_000;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(-pid, 0);
-        } catch {
-          return true;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      return false;
-    })();
-    assert.ok(groupGone, 'the surviving grandchild must be killed with the group');
+    assert.deepEqual(result.unverified, []);
+    assert.deepEqual(result.failures, []);
+    assert.throws(() => process.kill(-pid, 0), { code: 'ESRCH' }, 'the whole group must be gone');
+    assert.equal(await readPids(projectDir), null, 'the confirmed teardown must remove the PID file');
   });
 
   it('returns nothing when there is no PID file', async () => {

@@ -1,10 +1,12 @@
 name: prepare release
 
+# Merge the package version bump through a PR first. This workflow only tags
+# the verified main commit and creates a draft; it never writes to main.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version (for example 0.2.0, without the v)
+        description: Version already merged into main (for example 0.2.1, without the v)
         required: true
         type: string
 
@@ -47,6 +49,7 @@ jobs:
 
           node <<'NODE'
           const current = require('./package.json').version;
+          const lock = require('./package-lock.json');
           const target = process.env.RELEASE_VERSION;
           const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
@@ -55,17 +58,14 @@ jobs:
             process.exit(1);
           }
 
-          if (stable.test(current)) {
-            const currentParts = current.split('.').map(Number);
-            const targetParts = target.split('.').map(Number);
-            for (let i = 0; i < targetParts.length; i += 1) {
-              if (targetParts[i] === currentParts[i]) continue;
-              if (targetParts[i] < currentParts[i]) {
-                console.error(`::error::release version ${target} is lower than package version ${current}`);
-                process.exit(1);
-              }
-              break;
-            }
+          if (target !== current) {
+            console.error(`::error::release version ${target} does not match package.json version ${current}. Merge a version-bump PR before preparing the release.`);
+            process.exit(1);
+          }
+
+          if (lock.version !== target || lock.packages?.['']?.version !== target) {
+            console.error(`::error::package-lock.json does not match release version ${target}. Run npm version with --no-git-tag-version --ignore-scripts and merge both package files through a PR.`);
+            process.exit(1);
           }
           NODE
 
@@ -74,11 +74,6 @@ jobs:
             echo "::error::a GitHub Release for ${tag} already exists; review/publish its draft or delete it before retrying"
             exit 1
           fi
-
-      - name: Set package version
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
 
       - name: Install dependencies
         run: npm ci
@@ -89,27 +84,18 @@ jobs:
           npm run docs:build
           npm pack --dry-run
 
-      - name: Commit the release version
-        id: release_commit
+      - name: Tag the verified main commit
+        id: release_tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # Verification must not change the tracked contents being released.
+          git diff --exit-code
+          git diff --cached --exit-code
+
           gh auth setup-git
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-
-          if git diff --cached --quiet; then
-            echo "package files already contain version ${RELEASE_VERSION}"
-          else
-            git commit -m "Release v${RELEASE_VERSION}"
-          fi
-
-          # This also fails safely if main moved while verification was running.
-          git push origin HEAD:main
-
           release_sha="$(git rev-parse HEAD)"
           tag="v${RELEASE_VERSION}"
           existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null)" || existing_sha=""
@@ -131,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ steps.release_commit.outputs.sha }}
+          RELEASE_SHA: ${{ steps.release_tag.outputs.sha }}
         run: |
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
