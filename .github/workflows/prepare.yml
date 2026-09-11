@@ -1,4 +1,4 @@
-name: prepare
+name: 1. Prepare version PR
 
 # First stage: open a version-bump PR. After it is merged, run prepare release.
 on:
@@ -126,7 +126,7 @@ jobs:
 
             url="$(gh pr create --base main --head "$branch" \
               --title "Release v${RELEASE_VERSION}" \
-              --body "Version bump prepared by the prepare workflow. Wait for CI, review, and merge this PR. Then run prepare release on main with version ${RELEASE_VERSION} to create the tag and draft. This PR does not publish to npm.")"
+              --body "Version bump prepared by the '1. Prepare version PR' workflow. Wait for CI, review, and merge this PR. Then run prepare release on main with version ${RELEASE_VERSION} to create the tag and draft. This PR does not publish to npm.")"
           fi
           echo "branch=${branch}" >> "$GITHUB_OUTPUT"
           echo "url=${url}" >> "$GITHUB_OUTPUT"
@@ -137,7 +137,7 @@ jobs:
           RELEASE_BRANCH: ${{ steps.version_pr.outputs.branch }}
         # GITHUB_TOKEN-created pushes/PRs do not start normal push/PR workflows.
         # An explicit workflow_dispatch does, and runs the existing full suite.
-        # Retry prepare with the same version if dispatch fails after PR creation.
+        # Retry "1. Prepare version PR" if dispatch fails after PR creation.
         run: gh workflow run ci.yml --ref "$RELEASE_BRANCH"
 
       - name: Show next steps
@@ -147,5 +147,5 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           echo "Version PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Wait for CI, review, and merge the PR. If CI dispatch failed, rerun prepare with the same version." >> "$GITHUB_STEP_SUMMARY"
+          echo "Wait for CI, review, and merge the PR. If CI dispatch failed, rerun **1. Prepare version PR** with the same version." >> "$GITHUB_STEP_SUMMARY"
           echo "After merging, run prepare release on main with version ${RELEASE_VERSION}. Nothing has been tagged or published by this workflow." >> "$GITHUB_STEP_SUMMARY"
