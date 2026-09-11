@@ -1,0 +1,151 @@
+name: 1. Prepare version PR
+
+# First stage: open a version-bump PR. After it is merged, run prepare release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Next stable version (for example 0.2.1, without the v)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: prepare-version-pr
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate version request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+          node <<'NODE'
+          const current = require('./package.json').version;
+          const lock = require('./package-lock.json');
+          const target = process.env.RELEASE_VERSION;
+          const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+          if (!stable.test(target) || target.trim() !== target || !stable.test(current)) {
+            console.error('::error::Both the current and requested versions must be stable semantic versions such as 0.2.1.');
+            process.exit(1);
+          }
+          const currentParts = current.split('.').map(BigInt);
+          const targetParts = target.split('.').map(BigInt);
+          const changed = targetParts.findIndex((part, i) => part !== currentParts[i]);
+          if (changed === -1 || targetParts[changed] < currentParts[changed]) {
+            console.error(`::error::Requested version ${target} must be newer than main's ${current}. If the version PR is already merged, run prepare release instead.`);
+            process.exit(1);
+          }
+          if (lock.version !== current || lock.packages?.['']?.version !== current) {
+            console.error('::error::The package files on main disagree. Fix package-lock.json through a PR before preparing a version.');
+            process.exit(1);
+          }
+          NODE
+
+          tag="v${RELEASE_VERSION}"
+          if git show-ref --verify --quiet "refs/tags/${tag}"; then
+            echo "::error::Tag ${tag} already exists. Release tags must never be moved."
+            exit 1
+          fi
+          # Listing fails closed on API/auth errors, rather than treating them
+          # as proof that a release does not exist. Include drafts and all pages.
+          releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].tag_name')"
+          if grep -Fxq "$tag" <<< "$releases"; then
+            echo "::error::A release for ${tag} already exists. Review that release instead."
+            exit 1
+          fi
+
+      - name: Open the version PR
+        id: version_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          branch="release/v${RELEASE_VERSION}"
+          prs="$(gh pr list --base main --head "$branch" --state all --limit 100 \
+            --json state,url,isCrossRepository --jq '[.[] | select(.isCrossRepository == false)]')"
+          url="$(jq -r '[.[] | select(.state == "OPEN")][0].url // empty' <<< "$prs")"
+          if [ -n "$url" ]; then
+            echo "Reusing the existing PR without overwriting its branch: ${url}"
+          else
+            if [ "$(jq length <<< "$prs")" != "0" ]; then
+              echo "::error::A closed or merged PR already exists for ${branch}. Review it before retrying; this workflow does not reopen PRs."
+              exit 1
+            fi
+
+            npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts
+            git add package.json package-lock.json
+            git diff --exit-code
+            gh auth setup-git
+
+            existing="$(git ls-remote --heads origin "refs/heads/${branch}")"
+            if [ -n "$existing" ]; then
+              # Recover a run that pushed its branch but failed to open the PR,
+              # only if its complete tree matches the version bump on this main.
+              git fetch origin "refs/heads/${branch}"
+              if [ "$(git rev-parse 'FETCH_HEAD^{tree}')" != "$(git write-tree)" ]; then
+                echo "::error::Branch ${branch} already exists with different contents. Inspect it manually; it will not be overwritten."
+                exit 1
+              fi
+              echo "Reusing the matching branch from an earlier partial run."
+            else
+              git switch -c "$branch"
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -m "Release v${RELEASE_VERSION}"
+              git push origin "HEAD:refs/heads/${branch}"
+            fi
+
+            url="$(gh pr create --base main --head "$branch" \
+              --title "Release v${RELEASE_VERSION}" \
+              --body "Version bump prepared by the '1. Prepare version PR' workflow. Wait for CI, review, and merge this PR. Then run prepare release on main with version ${RELEASE_VERSION} to create the tag and draft. This PR does not publish to npm.")"
+          fi
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+
+      - name: Start CI for the version branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ steps.version_pr.outputs.branch }}
+        # GITHUB_TOKEN-created pushes/PRs do not start normal push/PR workflows.
+        # An explicit workflow_dispatch does, and runs the existing full suite.
+        # Retry "1. Prepare version PR" if dispatch fails after PR creation.
+        run: gh workflow run ci.yml --ref "$RELEASE_BRANCH"
+
+      - name: Show next steps
+        if: always() && steps.version_pr.outputs.url != ''
+        env:
+          PR_URL: ${{ steps.version_pr.outputs.url }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          echo "Version PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Wait for CI, review, and merge the PR. If CI dispatch failed, rerun **1. Prepare version PR** with the same version." >> "$GITHUB_STEP_SUMMARY"
+          echo "After merging, run prepare release on main with version ${RELEASE_VERSION}. Nothing has been tagged or published by this workflow." >> "$GITHUB_STEP_SUMMARY"
