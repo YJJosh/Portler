@@ -66,6 +66,10 @@ Portler assigns an available host port to each service. Local processes receive 
 
 Portler is designed for local development and verifies resource ownership before stopping processes or removing managed resources.
 
+## Releasing
+
+Maintainers: see the [release guide](RELEASING.md) for the PR-first release process.
+
 ## License
 
 [MIT](LICENSE)
