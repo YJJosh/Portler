@@ -16,6 +16,8 @@ function readPackageVersion(): string {
 
 export const VERSION: string = readPackageVersion();
 
+export const PACKAGE_NAME = 'portler';
+
 export const DEFAULT_PORT_RANGE: PortRange = { start: 51000, end: 59999 };
 export const DEFAULT_HEALTHCHECK_TIMEOUT_MS = 60_000;
 export const DEFAULT_HEALTHCHECK_INTERVAL_MS = 500;
