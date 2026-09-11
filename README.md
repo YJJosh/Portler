@@ -68,7 +68,11 @@ Portler is designed for local development and verifies resource ownership before
 
 ## Releasing
 
-Maintainers: see the [release guide](RELEASING.md) for the PR-first release process.
+1. On a branch from `main`, run `npm version <version> --no-git-tag-version --ignore-scripts`. Commit `package.json` and `package-lock.json` in a PR, wait for CI, and merge it.
+2. Run **prepare release** in GitHub Actions on `main` with that same version (without `v`). It verifies the committed version and creates a tag and draft release without changing `main`.
+3. Review the draft notes, keeping the hidden `release-sha` comment. Publish the draft when ready to trigger npm publishing; preparation alone does not publish to npm.
+
+If a draft already exists, use it rather than preparing it again. Never move or force-push release tags.
 
 ## License
 
