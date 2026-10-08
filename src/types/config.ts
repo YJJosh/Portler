@@ -47,7 +47,15 @@ export interface K8sConfig {
   volume?: K8sVolumeConfig;
 }
 
+export interface ProductionConfig {
+  setup?: string[];
+  command?: string;
+  env: UnknownMap;
+}
+
 export interface ServiceConfig {
+  setup?: string[];
+  prod?: ProductionConfig;
   name: string;
   command?: string;
   cwd: string;
@@ -112,6 +120,8 @@ export interface DeclaredVolume {
 }
 
 export interface PortlerConfig {
+  setup?: string[];
+  prod?: ProductionConfig;
   filePath: string;
   projectDir: string;
   useEnv: string[];

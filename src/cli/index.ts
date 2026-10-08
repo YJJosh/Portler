@@ -11,6 +11,7 @@ import { commandLogs } from './commands/logs.ts';
 import { commandPorts } from './commands/ports.ts';
 import { commandPs } from './commands/ps.ts';
 import { commandRestart } from './commands/restart.ts';
+import { commandSetup } from './commands/setup.ts';
 import { commandUp } from './commands/up.ts';
 import { commandVolumes } from './commands/volumes.ts';
 import { printHelp } from './help.ts';
@@ -36,6 +37,8 @@ function ensureSupportedPlatform(): void {
 
 function validateCommandFlags(command: string, args: ParsedArgs): void {
   const used = [
+    ...(args.prod ? ['--prod'] : []),
+    ...(args.setup !== undefined ? [args.setup ? '--setup' : '--no-setup'] : []),
     ...(args.detach ? ['--detach'] : []),
     ...(args.follow ? ['--follow'] : []),
     ...(args.global ? ['--global'] : []),
@@ -46,14 +49,16 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     ...(args.file !== undefined ? ['--file'] : []),
   ];
   const allowed: Record<string, ReadonlySet<string>> = {
-    up: new Set(['--detach', '--volume-set', '--file']),
+    up: new Set(['--detach', '--volume-set', '--file', '--prod', '--setup', '--no-setup']),
+    setup: new Set(['--file', '--prod']),
+    start: new Set(['--file', '--prod']),
     down: new Set(['--force', '--volumes', '--file']),
     restart: new Set(['--volume-set', '--file']),
     clean: new Set(['--global', '--ports', '--force', '--file']),
     ps: new Set(['--file']),
     logs: new Set(['--follow', '--file']),
     ports: new Set(['--file']),
-    env: new Set(['--file']),
+    env: new Set(['--file', '--prod']),
     volumes: new Set(['--force', '--volume-set', '--file']),
     k8s: new Set(['--file']),
     init: new Set(),
@@ -103,6 +108,8 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
   validateCommandFlags(command, args);
 
   switch (command) {
+    case 'setup':
+      return commandSetup(args);
     case 'up':
       return commandUp(args);
     case 'down':
