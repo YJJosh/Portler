@@ -258,7 +258,7 @@ export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing
 
     if (!(await pathExists(filePath))) {
       if (options.allowMissing) {
-        process.stderr.write(`[portler] env file "${envFile}" not found; using the process environment\n`);
+        process.stderr.write(`[portler] env file "${envFile}" not found; skipping it\n`);
         continue;
       }
       throw new Error(

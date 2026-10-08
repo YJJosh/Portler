@@ -52,7 +52,7 @@ Ensure Portler and your package manager are installed in both build and runtime 
 
 Vercel can use `portler setup --prod` as its **Build Command**. Vercel's usual framework/serverless deployments do not run an arbitrary persistent start command: use its framework adapter/output settings rather than `portler start`. Only map `portler start api --prod` on hosting products that actually support a long-running process.
 
-Build-time env follows ordinary Portler precedence (config overrides process env). Avoid putting production secrets/public URL defaults in config that should come from the build platform; Deploys usually start from a fresh checkout without the gitignored env files, so `--prod` and `portler start` skip a missing `use_env` file (with a notice) and rely on the platform env; dev runs still fail on a missing file.
+Build-time env follows ordinary Portler precedence (config overrides process env). Avoid putting production secrets/public URL defaults in config that should come from the build platform; Deploys usually start from a fresh checkout without the gitignored env files, so `--prod` and `portler start` skip a missing `use_env` file (with a notice) and rely on the platform env; dev runs still fail on a missing file. Containers in `up docker --prod` only receive variables from env files and config, not the whole shell environment, so put their secrets in an env file on the server.
 
 ## Production overrides and run modes
 
