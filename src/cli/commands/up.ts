@@ -1,4 +1,6 @@
 import { configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyProduction } from '../../config/production.ts';
+import { buildProjectEnv, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -145,6 +147,8 @@ export class IncompleteTeardownError extends Error {
 }
 
 export interface StartOptions {
+  prod?: boolean;
+  setup?: boolean;
   /** Start services in the background instead of attaching to them. */
   detach: boolean;
   /** Skip already-running services instead of failing (used by restart). */
@@ -182,7 +186,7 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const config = configForRunMode(rawConfig, mode);
+  const config = applyProduction(configForRunMode(rawConfig, mode), options.prod);
   const runningNames = new Set(runningServices(await readPids(config.projectDir)));
 
   let selectedNames: string[];
@@ -252,6 +256,11 @@ export async function startPhase(
       validateHealthcheckReferences(service, assignments);
     }
 
+    const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
+    if (options.setup !== false) {
+      await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, options.setup);
+    }
+
     // Start level by level: services within a level are independent, so they
     // spawn together and their readiness checks run concurrently; the next
     // level only starts once the whole level is up.
@@ -261,6 +270,9 @@ export async function startPhase(
       for (const serviceName of level) {
         const service = config.services[serviceName]!;
         const { env: serviceEnv, explicitKeys } = serviceEnvs.get(serviceName)!;
+        if (options.setup !== false) {
+          await runSetupStep(config, service, serviceEnv, setupMode, options.setup);
+        }
         let childExited = false;
         const logFilePath = options.detach ? serviceLogPath(config.projectDir, serviceName) : undefined;
         const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath);
@@ -368,11 +380,12 @@ export async function startServices(
 export async function commandUp(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   if (mode === 'k8s') {
+    if (args.prod || args.setup !== undefined) throw new Error('--prod, --setup and --no-setup do not apply to k8s mode; build images separately');
     if (args.volumeSet !== undefined) throw new Error('--volume-set applies to Docker volumes, not "portler up k8s"');
     return commandUpK8s(args, requested);
   }
 
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const requestedRootNames = selectServiceNames(rawConfig, requested);
-  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach });
+  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup });
 }

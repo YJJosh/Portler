@@ -11,6 +11,7 @@ import { commandLogs } from './commands/logs.ts';
 import { commandPorts } from './commands/ports.ts';
 import { commandPs } from './commands/ps.ts';
 import { commandRestart } from './commands/restart.ts';
+import { commandStart } from './commands/start.ts';
 import { commandSetup } from './commands/setup.ts';
 import { commandUp } from './commands/up.ts';
 import { commandVolumes } from './commands/volumes.ts';
@@ -108,6 +109,8 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
   validateCommandFlags(command, args);
 
   switch (command) {
+    case 'start':
+      return commandStart(args);
     case 'setup':
       return commandSetup(args);
     case 'up':
