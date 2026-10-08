@@ -1,3 +1,4 @@
+import { applyProduction } from '../../config/production.ts';
 import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv, buildPrintableEnv } from '../../env/index.ts';
@@ -40,7 +41,7 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 }
 
 export async function commandEnv(args: ParsedArgs): Promise<number> {
-  const config = await loadConfig(process.cwd(), args.file);
+  const config = applyProduction(await loadConfig(process.cwd(), args.file), args.prod);
   if (args.positionals.length > 1) throw new Error('env accepts at most one service name');
 
   const serviceName = args.positionals[0];

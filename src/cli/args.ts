@@ -2,6 +2,8 @@ import { didYouMean } from '../util/suggest.ts';
 
 export interface ParsedArgs {
   file?: string;
+  prod?: boolean;
+  setup?: boolean;
   detach: boolean;
   follow: boolean;
   help: boolean;
@@ -16,6 +18,9 @@ export interface ParsedArgs {
 
 /** Every flag the CLI accepts, for unknown-flag rejection and suggestions. */
 const KNOWN_FLAGS = [
+  '--prod',
+  '--setup',
+  '--no-setup',
   '--help',
   '--detach',
   '--global',
@@ -68,6 +73,18 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
 
     if (arg === '-d' || arg === '--detach') {
       parsed.detach = true;
+      continue;
+    }
+
+    if (arg === '--prod') {
+      parsed.prod = true;
+      continue;
+    }
+
+    if (arg === '--setup' || arg === '--no-setup') {
+      const setup = arg === '--setup';
+      if (parsed.setup !== undefined && parsed.setup !== setup) throw new Error('--setup and --no-setup cannot be combined');
+      parsed.setup = setup;
       continue;
     }
 

@@ -3,13 +3,15 @@
 Start services: assign ports, resolve env, and launch in dependency order.
 
 ```bash
-portler up [service...] [--detach] [--volume-set <name>]
+portler up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup]
 portler up docker [service...] [--detach] [--volume-set <name>]
 portler up k8s [service...] [--detach]
 ```
 
 ## Behavior
 
+- Runs never-successful or changed setup definitions automatically: root setup before any starts, service setup just before its service starts, after dependency readiness. Success receipts live in `.portler/setup.json`, separately for dev/prod and local/Docker modes. See [Setup & production](/guide/setup-and-production).
+- Existing running-service overlaps are rejected. Use `down` before another `up`, including when switching dev/prod; Portler does not implicitly restart existing processes.
 - Assigns a free port to every service that declares one (see [Ports](/guide/ports)) and prints the `SERVICE / PORT / URL` table.
 - Starts services in [dependency order](/guide/dependencies), waiting for each dependency's healthcheck.
 - With service names, starts only those services **plus their dependencies**.
@@ -28,6 +30,9 @@ portler up k8s [service...] [--detach]
 
 | Flag | Description |
 | --- | --- |
+| `--prod` | Use production setup, command and env overrides (local/Docker only) |
+| `--setup` | Force all selected setup steps, including dependencies and root, to run |
+| `--no-setup` | Skip setup entirely; cannot be combined with `--setup` |
 | `-d, --detach` | Start in the background; local service output is captured to `.portler/logs/` |
 | `--volume-set <name>` | Run against the `--<name>` variants of all managed `@` volumes ([volume sets](/guide/volumes#volume-sets)); env fallback `PORTLER_VOLUME_SET` |
 | `-f, --file <path>` | Use a specific portler.yml |
@@ -41,3 +46,5 @@ portler up backend               # backend + its dependencies
 portler up docker -d             # full Docker mode, detached
 portler up --volume-set my-branch   # forked data variants
 ```
+
+Kubernetes mode ignores setup definitions and rejects `--prod`, `--setup` and `--no-setup`. Source files, lockfiles, ports and env values are not part of setup fingerprints: force setup after changing these inputs when needed.

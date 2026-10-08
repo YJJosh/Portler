@@ -10,6 +10,7 @@ import { normalizeDockerModeConfig, normalizeTopLevelDockerConfig } from './dock
 import { normalizeHealthcheck } from './healthcheck.ts';
 import { normalizeK8sConfig } from './k8s.ts';
 import { defaultDockerNetwork, defaultK8sNamespace, k8sName } from './naming.ts';
+import { normalizeProduction, normalizeSetup } from './production.ts';
 import { normalizeProxyConfig } from './proxy.ts';
 import { collectDeclaredVolumes, normalizeVolumeSet, resolveVolumeRoot } from './volumes.ts';
 import {
@@ -136,6 +137,8 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
   const config: PortlerConfig = {
     filePath,
     projectDir,
+    setup: normalizeSetup(root.setup, 'setup'),
+    prod: normalizeProduction(root.prod, 'prod', false),
     useEnv: normalizeEnvFiles(root.use_env ?? root.env_file),
     env: normalizeEnvObject(root.env, 'env'),
     host,
@@ -187,6 +190,8 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
 
     const service: ServiceConfig = {
       name: serviceName,
+      setup: normalizeSetup(rawService.setup, `services.${serviceName}.setup`),
+      prod: normalizeProduction(rawService.prod, `services.${serviceName}.prod`, true),
       command,
       cwd,
       port,
@@ -240,13 +245,22 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
   return config;
 }
 
-export async function loadBaseEnv(config: PortlerConfig): Promise<EnvMap> {
+/**
+ * Production runs (`--prod`, `start`) usually deploy from a fresh checkout or
+ * source archive that never contains the gitignored env files; the platform
+ * injects that env instead, so missing files are skipped there.
+ */
+export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing?: boolean } = {}): Promise<EnvMap> {
   const env: EnvMap = {};
 
   for (const envFile of config.useEnv) {
     const filePath = path.resolve(config.projectDir, envFile);
 
     if (!(await pathExists(filePath))) {
+      if (options.allowMissing) {
+        process.stderr.write(`[portler] env file "${envFile}" not found; skipping it\n`);
+        continue;
+      }
       throw new Error(
         `env file "${envFile}" listed in use_env was not found at ${filePath}. ` +
           `Create the file or remove it from use_env in ${path.basename(config.filePath)}.`,
