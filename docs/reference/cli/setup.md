@@ -15,7 +15,7 @@ portler setup docker [service...] [--prod]
 - Writes successful step fingerprints to [`.portler/setup.json`](/reference/generated-files), so a subsequent `up` skips unchanged setup. Explicit `setup` **always reruns**, even with a receipt.
 - With `--prod`, uses production setup and env overrides. With `docker`, resolves Docker-mode env; setup still runs **on the host**, never inside containers.
 
-`use_env` files are read **before** the top-level setup runs, so a setup step cannot create or refresh a listed env file for the same invocation; such files must already exist.
+`use_env` files are read **before** the top-level setup runs, so a setup step cannot create or refresh a listed env file for the same invocation; such files must already exist (with `--prod`, a missing file is skipped and the process environment is used instead).
 
 Steps run in their own process group without a controlling terminal, so Ctrl+C reaches the whole step. Prompts that read stdin still work, but anything opening `/dev/tty` directly (SSH passphrase prompts, `sudo`, `gpg`) fails; use an agent (`ssh-agent`, `gpg-agent`) or run that step yourself.
 

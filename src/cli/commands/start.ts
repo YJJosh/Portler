@@ -78,6 +78,6 @@ export async function buildStartEnv(
 export async function commandStart(args: ParsedArgs): Promise<number> {
   const config = applyProduction(await loadConfig(process.cwd(), args.file), args.prod);
   const service = selectStartService(config, args.positionals);
-  const env = await buildStartEnv(config, service, await loadBaseEnv(config));
+  const env = await buildStartEnv(config, service, await loadBaseEnv(config, { allowMissing: true }));
   return runShell(service.command!, resolveServiceCwd(config, service), env);
 }

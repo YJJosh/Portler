@@ -205,7 +205,7 @@ export async function startPhase(
   const readinessNames = servicesNeedingReadiness(config, selectedNames, requestedRootNames);
   const assignments = await allocateAssignments(config, state, reserveNames, runningNames);
   const generatedEnv = buildGeneratedEnv(assignments);
-  const baseEnv = await loadBaseEnv(config);
+  const baseEnv = await loadBaseEnv(config, { allowMissing: options.prod });
 
   await writeState(config.projectDir, assignments);
   await writeRuntimeEnv(config.projectDir, generatedEnv);

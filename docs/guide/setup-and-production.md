@@ -52,12 +52,12 @@ Ensure Portler and your package manager are installed in both build and runtime 
 
 Vercel can use `portler setup --prod` as its **Build Command**. Vercel's usual framework/serverless deployments do not run an arbitrary persistent start command: use its framework adapter/output settings rather than `portler start`. Only map `portler start api --prod` on hosting products that actually support a long-running process.
 
-Build-time env follows ordinary Portler precedence (config overrides process env). Avoid putting production secrets/public URL defaults in config that should come from the build platform; `use_env` files must exist if listed.
+Build-time env follows ordinary Portler precedence (config overrides process env). Avoid putting production secrets/public URL defaults in config that should come from the build platform; Deploys usually start from a fresh checkout without the gitignored env files, so `--prod` and `portler start` skip a missing `use_env` file (with a notice) and rely on the platform env; dev runs still fail on a missing file.
 
 ## Production overrides and run modes
 
 `--prod` replaces setup/command definitions and merges env; missing overrides fall back to dev definitions. An empty setup list disables inherited setup. `prod` is an ordinary service name, not a positional mode token.
 
-For Docker services, `prod.command` replaces the container's shell command and `prod.env` applies to its env. `portler setup docker --prod` runs host setup with Docker-mode env; it does not execute setup inside images. Kubernetes keeps its existing image-build/manifests flow, ignores setup definitions, and rejects `up k8s --prod`, `--setup` and `--no-setup` rather than silently applying partial overrides.
+`prod.env` also applies to Docker containers. `prod.command` replaces `command`, so it only changes a container that runs `command` (a service with a top-level `image`/`build`); a `docker:` block keeps its own `docker.command` or the image's `CMD`, since the local `prod.command` usually assumes the host checkout and `cwd`. `portler setup docker --prod` runs host setup with Docker-mode env; it does not execute setup inside images. Kubernetes keeps its existing image-build/manifests flow, ignores setup definitions, and rejects `up k8s --prod`, `--setup` and `--no-setup` rather than silently applying partial overrides.
 
 Like existing `up`, an invocation overlapping running services fails with an explicit `down` instruction. Stop services before switching dev/prod or forcing setup; Portler never silently keeps dev processes running under a production invocation. `restart` retains dev-mode behavior; use `down` then `up --prod` for production.

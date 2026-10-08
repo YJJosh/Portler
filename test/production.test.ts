@@ -70,10 +70,28 @@ services:
       command: node server.js
       env: {LOG_LEVEL: info}
 `);
-    for (const prod of [applyProduction(dev, true), applyProduction(applyDockerMode(dev), true)]) {
-      assert.equal(prod.services.api?.docker?.command, 'node server.js');
-      assert.equal(prod.services.api?.env.LOG_LEVEL, 'info');
-    }
+    const local = applyProduction(dev, true);
+    const docker = applyProduction(applyDockerMode(dev), true);
+    // The always-Docker container runs `command`, so prod replaces it; the
+    // `docker:` block describes its own container and keeps its command.
+    assert.equal(local.services.api?.docker?.command, 'node server.js');
+    assert.equal(docker.services.api?.docker?.command, 'docker-dev');
+    for (const prod of [local, docker]) assert.equal(prod.services.api?.env.LOG_LEVEL, 'info');
+  });
+
+  it('keeps the image command for a docker block without one in prod Docker mode', async () => {
+    const dev = await config(`services:
+  web:
+    command: next dev
+    cwd: apps/web
+    docker:
+      build: .
+    prod:
+      command: next start
+`);
+    const prod = applyProduction(applyDockerMode(dev), true);
+    assert.equal(prod.services.web?.command, 'next start');
+    assert.equal(prod.services.web?.docker?.command, undefined);
   });
 
   for (const [text, error] of [

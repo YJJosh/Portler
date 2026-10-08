@@ -16,7 +16,7 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
   if (mode === 'docker') validateDockerMode(config, names);
   return withLifecycleLock(config.projectDir, async () => {
     const { assignments, generatedEnv } = await ensureAssignments(config);
-    const baseEnv = await loadBaseEnv(config);
+    const baseEnv = await loadBaseEnv(config, { allowMissing: args.prod });
     const setupMode = `${mode}:${args.prod ? 'prod' : 'dev'}`;
     await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, true);
     for (const name of names) {

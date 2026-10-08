@@ -16,7 +16,7 @@ portler start [service] [--prod]
 
 The service port is `PORT` from the environment, otherwise the declared `port`, otherwise a free ephemeral port. Invalid `PORT` values are errors. The chosen port is exposed through the service's `port_env` names; add `port_env: PORT` for apps that read it. Unlike `up`, there is no global registry and no preferred-port probing for declared/platform ports.
 
-Existing process environment values win over `.env` and config values, including production overrides, generated values and `port_env` names. This lets platform secrets and settings override local development defaults. Remaining values layer `use_env`, root env, then service env; production env is merged at each respective level.
+Existing process environment values win over `.env` and config values, including production overrides, generated values and `port_env` names. This lets platform secrets and settings override local development defaults. Remaining values layer `use_env` (a missing file is skipped, since deploys rarely ship it), root env, then service env; production env is merged at each respective level.
 
 Service references resolve against **declared** ports/hosts, not saved development assignments. The selected service uses its chosen port. An unresolved reference fails with the variable's name, unless that variable is already provided by the platform. Services without declared ports cannot be reference targets (except the selected service); a proxy reference must be replaced by a platform env value because `start` runs no proxy.
 

@@ -65,7 +65,7 @@ A service becomes a **Docker service** (runs in Docker even under plain `portler
 
 Top-level `prod` accepts only `setup` and `env`; service `prod` additionally accepts `command`. Unknown keys are rejected. With `--prod`, setup and command replace their ordinary definitions, while env merges over env at the same level. Omitted overrides inherit ordinary values; `setup: []` disables an inherited setup.
 
-For Docker services, `prod.command` replaces the container shell command and `prod.env` wins over Docker-mode env. Kubernetes does not apply production overrides or setup; production/setup flags are rejected in `up k8s`. `prod` is a config key but **not** a reserved service name or positional mode; use `--prod`. See [Setup & production](/guide/setup-and-production).
+`prod.env` wins over Docker-mode env. `prod.command` only replaces a container command that comes from `command` (top-level `image`/`build` services); a `docker:` block keeps `docker.command` or the image `CMD`. With `--prod` and in `portler start`, a missing `use_env` file is skipped so platform env can replace it. Kubernetes does not apply production overrides or setup; production/setup flags are rejected in `up k8s`. `prod` is a config key but **not** a reserved service name or positional mode; use `--prod`. See [Setup & production](/guide/setup-and-production).
 
 ## depends_on
 
