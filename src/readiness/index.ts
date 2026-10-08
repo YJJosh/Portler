@@ -6,19 +6,37 @@ import { resolveEnvValue } from '../env/index.ts';
 import { sleep } from '../util/sleep.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-export function isTcpReady(host: string, port: number, timeoutMs = 1_000): Promise<boolean> {
+/**
+ * Docker's port proxy accepts every connection on a published port, then
+ * closes it straight away while nothing listens inside the container yet.
+ * A container port only counts as ready once a connection stays open.
+ */
+export const DOCKER_TCP_HOLD_MS = 200;
+
+export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0): Promise<boolean> {
   return new Promise((resolve) => {
+    let settled = false;
+    let holdTimer: NodeJS.Timeout | undefined;
     const socket = net.createConnection({ host, port });
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(holdTimer);
+      socket.destroy();
+      resolve(ready);
+    };
     socket.setTimeout(Math.max(1, timeoutMs));
     socket.on('connect', () => {
-      socket.destroy();
-      resolve(true);
+      if (holdMs <= 0) return finish(true);
+      socket.setTimeout(0);
+      // Drain any banner so a peer close is noticed rather than buffered.
+      socket.resume();
+      holdTimer = setTimeout(() => finish(true), holdMs);
     });
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.on('error', () => resolve(false));
+    socket.on('end', () => finish(false));
+    socket.on('close', () => finish(false));
+    socket.on('timeout', () => finish(false));
+    socket.on('error', () => finish(false));
   });
 }
 
@@ -91,13 +109,14 @@ async function checkReady(
   assignment: ServiceAssignment | undefined,
   healthcheck: HealthcheckConfig,
   attemptTimeoutMs: number,
+  tcpHoldMs: number,
 ): Promise<boolean> {
   switch (healthcheck.type) {
     case 'none':
       return true;
     case 'tcp':
       if (!assignment) return true;
-      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs);
+      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs);
     case 'http': {
       const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
       if (!url) return true;
@@ -142,6 +161,8 @@ export async function waitForServiceReady(
   assignments: Assignments,
   assignment: ServiceAssignment | undefined,
   childHasExited: () => boolean,
+  /** How long a TCP connection must stay open to count; see DOCKER_TCP_HOLD_MS. */
+  tcpHoldMs = 0,
 ): Promise<void> {
   const healthcheck = service.healthcheck ?? defaultHealthcheck(service, assignment);
   if (healthcheck.type === 'none') return;
@@ -159,7 +180,7 @@ export async function waitForServiceReady(
     }
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
-    if (await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs)) {
+    if (await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs)) {
       process.stdout.write(`[portler] ${service.name} is ready\n`);
       return;
     }
