@@ -66,11 +66,13 @@ services:
   it('names unresolved variables but lets platform overrides bypass resolution', async () => {
     const cfg = await config('env: {URL: missing.url}\nservices: {api: {command: echo}}');
     const api = cfg.services.api!;
-    await assert.rejects(buildStartEnv(cfg, api, {}, {}), /services.api.env.URL: cannot resolve "missing.url"/);
+    await assert.rejects(buildStartEnv(cfg, api, {}, {}), /^Error: env\.URL: cannot resolve "missing.url"/);
     const env = await buildStartEnv(cfg, api, {}, { URL: 'https://managed.example' });
     assert.equal(env.URL, 'https://managed.example');
     api.env.URL = 'https://service.example';
     assert.equal((await buildStartEnv(cfg, api, {}, {})).URL, 'https://service.example');
+    api.env.DB = 'missing.url';
+    await assert.rejects(buildStartEnv(cfg, api, {}, {}), /^Error: services\.api\.env\.DB: cannot resolve/);
   });
 
   it('rejects references to services without declared ports', async () => {

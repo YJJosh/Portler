@@ -4,7 +4,7 @@ import { buildServiceEnv } from '../../env/index.ts';
 import { buildProjectEnv, runSetupStep } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import { expandAndOrderServices, parseRunMode } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, validateDockerMode } from '../services.ts';
 import { ensureAssignments } from './env.ts';
 
 export async function commandSetup(args: ParsedArgs): Promise<number> {
@@ -13,6 +13,7 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
   const rawConfig = await loadConfig(process.cwd(), args.file);
   const config = applyProduction(configForRunMode(rawConfig, mode), args.prod);
   const names = expandAndOrderServices(config, requested);
+  if (mode === 'docker') validateDockerMode(config, names);
   return withLifecycleLock(config.projectDir, async () => {
     const { assignments, generatedEnv } = await ensureAssignments(config);
     const baseEnv = await loadBaseEnv(config);

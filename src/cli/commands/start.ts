@@ -63,7 +63,8 @@ export async function buildStartEnv(
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
       env[key] = resolveEnvValue(value, assignments);
     } catch (error) {
-      throw new Error(`services.${service.name}.env.${key}: ${(error as Error).message}`);
+      const source = key in service.env ? `services.${service.name}.env` : key in config.env ? 'env' : 'use_env';
+      throw new Error(`${source}.${key}: ${(error as Error).message}`);
     }
   }
   Object.assign(env, buildGeneratedEnv(assignments), { PORTLER_SERVICE_NAME: service.name });

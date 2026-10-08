@@ -3,8 +3,8 @@
 ```text
 portler setup [docker] [service...] [--prod]
 portler start [service] [--prod]
-portler up [service...] [--detach] [--volume-set <name>]
-portler up docker [service...] [--detach] [--volume-set <name>]
+portler up [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>]
+portler up docker [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>]
 portler up k8s [service...] [--detach]
 portler down [docker|k8s] [service...]
 portler k8s render [service...]

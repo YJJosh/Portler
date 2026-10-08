@@ -8,6 +8,7 @@ portler start [service] [--prod]
 
 - Uses the service's `command` (or `prod.command` with `--prod`) in its `cwd`.
 - Inherits stdin, stdout and stderr; forwards SIGINT/SIGTERM to the shell and its process group. Returns the child's exit code (or `128 + signal number` if the shell is terminated by a signal).
+- The command must stay in the **foreground**. A command that backgrounds (`node server.js &`) or daemonizes exits immediately, so `start` returns success while the real process is no longer supervised, which looks like a crash loop on most platforms. Like `setup`, the command has no controlling terminal (`/dev/tty`).
 - Writes **no state**, starts no dependencies or proxy, performs no setup, and uses no supervisor. Run `portler setup --prod` separately as the build step.
 - If the service is omitted, selects the only local service with a command. Otherwise the error lists candidates. Docker services are rejected.
 

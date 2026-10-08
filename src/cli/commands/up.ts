@@ -33,16 +33,8 @@ import {
   selectServiceNames,
   servicesNeedingReadiness,
   servicesWithPorts,
+  validateDockerMode,
 } from '../services.ts';
-
-function validateDockerMode(config: PortlerConfig, selectedNames: string[]): void {
-  for (const serviceName of selectedNames) {
-    const service = config.services[serviceName]!;
-    if (!service.docker) {
-      throw new Error(`service "${serviceName}" has no Docker config. Add image, build, dockerfile, or docker: {...}`);
-    }
-  }
-}
 
 function warnMissingPortEnv(config: PortlerConfig, selectedNames: string[]): void {
   for (const serviceName of selectedNames) {
