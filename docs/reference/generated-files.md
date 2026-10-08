@@ -5,6 +5,7 @@
 Portler writes runtime files to `.portler/` in the project directory:
 
 ```text
+.portler/setup.json          successful setup fingerprints, per step and mode
 .portler/state.json          last assignments and run metadata
 .portler/runtime.env         resolved env snapshot
 .portler/pids.json           pids of detached services and the proxy
@@ -33,3 +34,9 @@ Notes:
 ```
 
 The registry records which project/service reserved which port and bind host, so concurrent `portler up` runs in different projects never hand out the same port. Stale entries (port free again on the recorded host, reservation old enough) are pruned automatically; `portler clean --global` forces a prune, and `portler clean --ports` releases the current project's reservations. If the registry itself is malformed, ordinary commands fail closed rather than discard unknown reservations; `portler clean --global --force` is the explicit reset path.
+
+## Setup receipts
+
+`setup.json` stores version 1, the absolute project identity, and SHA-256 fingerprints keyed by run mode (`local`/`docker`), environment (`dev`/`prod`) and step (`project` or `service:<name>`). Each fingerprint includes the ordered commands, resolved cwd and mode. Only fully successful steps are recorded; a failed forced rerun clears its old success first. Writes are atomic and serialized by the lifecycle lock. Receipts copied from another checkout are not reused.
+
+Deleting this file (or running `clean`) makes the next `up` run setup again. `down` preserves receipts. Source files, lockfiles, env values and port assignments are not fingerprinted; force setup when these inputs require a rebuild.

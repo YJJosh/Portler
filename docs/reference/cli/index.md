@@ -1,6 +1,8 @@
 # CLI overview
 
 ```text
+portler setup [docker] [service...] [--prod]
+portler start [service] [--prod]
 portler up [service...] [--detach] [--volume-set <name>]
 portler up docker [service...] [--detach] [--volume-set <name>]
 portler up k8s [service...] [--detach]
@@ -10,7 +12,7 @@ portler restart [docker] [service...]
 portler ps [service...]
 portler logs [service...] [--follow]
 portler ports
-portler env [service]
+portler env [service] [--prod]
 portler clean [--ports] [--global] [--force]
 portler volumes [list]
 portler volumes fork <volume> <new-set>
@@ -29,6 +31,8 @@ portler init
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
+| `--prod` | `setup`, `start`, `up`, `env` | Use production overrides (not Kubernetes) |
+| `--setup` / `--no-setup` | `up` | Force / skip setup (not Kubernetes) |
 | `-d, --detach` | `up` | Start services in the background |
 | `--follow` | `logs` | Keep streaming new output |
 | `--ports` | `clean` | Only release this project's ports |
@@ -50,6 +54,8 @@ portler up k8s         # everything runs in a local Kubernetes cluster
 
 | Command | Description |
 | --- | --- |
+| [`portler setup`](/reference/cli/setup) | Run installation/build/generation without starting services |
+| [`portler start`](/reference/cli/start) | Run one foreground local process for deployment |
 | [`portler up`](/reference/cli/up) | Start services (local, Docker, or Kubernetes mode) |
 | [`portler down`](/reference/cli/down) | Stop services started by Portler |
 | [`portler restart`](/reference/cli/restart) | Restart services in the background |

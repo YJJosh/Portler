@@ -10,6 +10,8 @@ Portler uses its own hand-rolled YAML parser covering a practical subset: mappin
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
+| `setup` | string \| list of strings | — | Host shell commands run from the project root; see [Setup and prod](#setup-and-prod) |
+| `prod` | object | — | Production `setup` replacement and `env` overrides, used with `--prod` |
 | `services` | mapping | — (required) | The services to run; see [Service options](#service-options) |
 | `use_env` | string \| list | `[]` | `.env` file(s) loaded for all services, later files win. Alias: `env_file` |
 | `env` | mapping \| list | `{}` | Env values shared by all services; [references](#service-references) resolve |
@@ -29,6 +31,8 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
+| `setup` | string \| list of strings | — | Host shell commands in service cwd, with resolved service env |
+| `prod` | object | — | Production `setup`, `command` replacements and `env` overrides |
 | `command` | string | — | Shell command that starts the service (local mode) |
 | `cwd` | string | `.` | Working directory, relative to the project root |
 | `port` | integer | — | Preferred port (local) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
@@ -54,6 +58,14 @@ A service becomes a **Docker service** (runs in Docker even under plain `portler
 ::: warning Reserved service names
 `docker` and `k8s` are always reserved (they select run modes on the command line). `proxy` is reserved when a `proxy:` block exists.
 :::
+
+## Setup and prod
+
+`setup` accepts a string or list of strings; each entry runs sequentially through the shell, stopping on the first non-zero exit. Root setup runs from the project root; service setup runs in its `cwd`. Setup is always on the host, even for Docker services.
+
+Top-level `prod` accepts only `setup` and `env`; service `prod` additionally accepts `command`. Unknown keys are rejected. With `--prod`, setup and command replace their ordinary definitions, while env merges over env at the same level. Omitted overrides inherit ordinary values; `setup: []` disables an inherited setup.
+
+For Docker services, `prod.command` replaces the container shell command and `prod.env` wins over Docker-mode env. Kubernetes does not apply production overrides or setup; production/setup flags are rejected in `up k8s`. `prod` is a config key but **not** a reserved service name or positional mode; use `--prod`. See [Setup & production](/guide/setup-and-production).
 
 ## depends_on
 
@@ -183,6 +195,14 @@ Env values (top-level and per-service) can reference other services, either as t
 ## Complete example
 
 ```yaml
+setup: npm install
+prod:
+  setup:
+    - npm ci
+    - npm run build
+  env:
+    NODE_ENV: production
+
 use_env: .env
 prefer_declared_port: false
 port_range: {start: 51000, end: 59999}
@@ -212,6 +232,12 @@ services:
 
   backend:
     command: npm run dev
+    setup: npm run generate
+    prod:
+      command: npm start
+      setup: []
+      env:
+        LOG_LEVEL: info
     cwd: backend
     port: 4000
     port_env: PORT

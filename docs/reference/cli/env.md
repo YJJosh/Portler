@@ -3,8 +3,10 @@
 Print generated and resolved environment values.
 
 ```bash
-portler env [service]
+portler env [service] [--prod]
 ```
+
+`--prod` prints production env overrides. Port assignment and precedence remain development-style, unlike deployment-oriented `start`.
 
 ## Behavior
 

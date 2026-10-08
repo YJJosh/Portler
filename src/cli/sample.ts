@@ -2,7 +2,12 @@
  * Canonical starter `portler.yml`, shared by `portler init` and the help text
  * so they never drift apart.
  */
-export const SAMPLE_PORTLER_YML = `use_env: .env
+export const SAMPLE_PORTLER_YML = `# Optional setup runs once per definition on up; force with up --setup.
+# setup: npm install
+# prod:
+#   setup: [npm ci, npm run build]
+#   env: {NODE_ENV: production}
+use_env: .env
 
 services:
   postgres:
@@ -19,6 +24,9 @@ services:
 
   backend:
     command: npm run dev
+    # setup: npm run generate
+    # prod:
+    #   command: npm start
     cwd: backend
     port: 4000
     port_env: PORT

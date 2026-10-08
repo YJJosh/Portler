@@ -46,6 +46,7 @@ export default defineConfig({
         {
           text: 'Features',
           items: [
+            { text: 'Setup & production', link: '/guide/setup-and-production' },
             { text: 'Docker services', link: '/guide/docker' },
             { text: 'Volumes', link: '/guide/volumes' },
             { text: 'Proxy: one project URL', link: '/guide/proxy' },
@@ -67,6 +68,8 @@ export default defineConfig({
           text: 'CLI commands',
           items: [
             { text: 'Overview', link: '/reference/cli/' },
+            { text: 'portler setup', link: '/reference/cli/setup' },
+            { text: 'portler start', link: '/reference/cli/start' },
             { text: 'portler up', link: '/reference/cli/up' },
             { text: 'portler down', link: '/reference/cli/down' },
             { text: 'portler restart', link: '/reference/cli/restart' },
