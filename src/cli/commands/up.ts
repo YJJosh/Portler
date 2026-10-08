@@ -15,7 +15,7 @@ import {
 } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
-import { waitForServiceReady } from '../../readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
@@ -273,7 +273,15 @@ export async function startPhase(
         await recordPidEntry(config, serviceName, await pidInfoFor(config, service, child, assignments[serviceName]));
         if (readinessNames.has(serviceName)) {
           readinessWaits.push(() =>
-            waitForServiceReady(config, service, serviceEnv, assignments, assignments[serviceName], () => childExited),
+            waitForServiceReady(
+              config,
+              service,
+              serviceEnv,
+              assignments,
+              assignments[serviceName],
+              () => childExited,
+              service.docker ? DOCKER_TCP_HOLD_MS : 0,
+            ),
           );
         }
       }

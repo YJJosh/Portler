@@ -5,7 +5,7 @@ import os from 'node:os';
 import { describe, it } from 'node:test';
 import { normalizeHealthcheck } from '../src/config/healthcheck.ts';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../src/constants.ts';
-import { waitForServiceReady } from '../src/readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, isTcpReady, waitForServiceReady } from '../src/readiness/index.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment, ServiceConfig } from '../src/types/index.ts';
 
 describe('normalizeHealthcheck', () => {
@@ -174,6 +174,43 @@ describe('waitForServiceReady', () => {
       waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true),
       /exited before it became ready/,
     );
+  });
+
+  it('does not count a Docker port as ready while the proxy closes every connection', async () => {
+    // Docker's port proxy accepts on the published port and closes at once
+    // while nothing listens inside the container.
+    const proxy = net.createServer((socket) => socket.destroy());
+    const port = await listen(proxy);
+    try {
+      assert.equal(await isTcpReady('127.0.0.1', port), true, 'a plain connect is fooled by the proxy');
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, 100), false);
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 300, intervalMs: 25 },
+      });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS),
+        /service "api" was not ready after/,
+      );
+    } finally {
+      await new Promise((resolve) => proxy.close(resolve));
+    }
+  });
+
+  it('passes a Docker tcp check once a connection stays open', async () => {
+    const server = net.createServer((socket) => socket.write('ready\n'));
+    const port = await listen(server);
+    try {
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 },
+      });
+      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('passes an http check for responses below 500', async () => {

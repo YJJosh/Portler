@@ -87,7 +87,7 @@ healthcheck:                  # object form
   interval_ms: 500            # default 500
 ```
 
-Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
+Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. For services that run in a container, the connection must also stay open for a moment, because Docker's port proxy accepts connections even while nothing listens inside the container. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
 
 ## build
 
