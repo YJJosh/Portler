@@ -75,7 +75,7 @@ setup:
 
 | Step | When it runs |
 | --- | --- |
-| `<command>` or `{run: <command>}` | Once per checkout. A receipt in `.portler/setup.json` records the success; the step runs again when its command or cwd changes, with `up --setup`, or on `portler setup`. |
+| `<command>` or `{run: <command>}` | Once per checkout. A receipt in `.portler/setup.json` records the success; the step runs again when its command or cwd changes, with `up --setup`, or on `portler setup`. Identical commands in one list are separate steps, and a step that is removed loses its receipt. |
 | `{run, if_missing: <path>}` | Only while nothing exists at `<path>`, resolved against the step's cwd. A file, a folder, or a link whose target exists all count. No receipt: the path is the receipt, so deleting what the step produced runs it again, and `--setup` does not override it. |
 | `{run, always: true}` | On every `up` (unless `--no-setup`) and every `setup`. No receipt. |
 

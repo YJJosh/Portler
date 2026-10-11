@@ -41,6 +41,8 @@ describe('setup', () => {
     assert.notEqual(first, setupFingerprint('b', '/one', 'local:dev'));
     assert.notEqual(first, setupFingerprint('a', '/two', 'local:dev'));
     assert.notEqual(first, setupFingerprint('a', '/one', 'local:prod'));
+    assert.equal(first, setupFingerprint('a', '/one', 'local:dev', 0));
+    assert.notEqual(first, setupFingerprint('a', '/one', 'local:dev', 1));
     assert.equal(isPlainSetupStep({ run: 'a' }), true);
     assert.equal(isPlainSetupStep({ run: 'a', ifMissing: 'x' }), false);
     assert.equal(isPlainSetupStep({ run: 'a', always: true }), false);
@@ -91,6 +93,41 @@ describe('setup', () => {
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['a', 'b', 'b']);
     assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).version, 2);
+  });
+
+  it('gives identical commands in one list their own receipts', async () => {
+    const cfg = await config('setup: [echo same >> steps, echo same >> steps]\nservices: {api: {command: echo}}');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['same', 'same']);
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['same', 'same']);
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(state.steps['local:dev:project'], [
+      setupFingerprint('echo same >> steps', dir, 'local:dev', 0),
+      setupFingerprint('echo same >> steps', dir, 'local:dev', 1),
+    ]);
+    await runSetupStep(cfg, null, {}, 'local:dev', true);
+    assert.deepEqual(await lines(), ['same', 'same', 'same', 'same']);
+  });
+
+  it('drops the receipts of a definition that lost all its steps, so a step added back runs again', async () => {
+    const cfg = await config('setup: echo a >> steps\nservices: {api: {command: echo}}');
+    const statePath = path.join(dir, '.portler/setup.json');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await runSetupStep(cfg, { ...cfg.services.api!, setup: undefined }, {}, 'local:dev');
+    assert.equal(Object.keys(JSON.parse(await fs.readFile(statePath, 'utf8')).steps).length, 1);
+    cfg.setup = [];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, {});
+    cfg.setup = [{ run: 'echo a >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['a', 'a']);
+
+    // Without steps and without receipts nothing is written.
+    await fs.rm(statePath);
+    cfg.setup = undefined;
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await assert.rejects(fs.access(statePath));
   });
 
   it('if_missing steps run only while the path is absent, with or without force', async () => {

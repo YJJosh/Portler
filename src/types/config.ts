@@ -31,6 +31,13 @@ export interface DockerConfig {
   volumes: string[];
   env: UnknownMap;
   command?: string;
+  /**
+   * The container runs the service's `command` (a service with top-level
+   * `image`/`build`), so `prod.command` reaches it. Absent for a `docker:`
+   * block, which sets its own command or leaves the image CMD, even when the
+   * text it sets happens to match `command`.
+   */
+  commandFromService?: true;
 }
 
 export interface K8sVolumeConfig {

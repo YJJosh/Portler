@@ -94,6 +94,33 @@ services:
     assert.equal(prod.services.web?.docker?.command, undefined);
   });
 
+  it('keeps an explicit docker command even when it is spelled like the local one', async () => {
+    const dev = await config(`services:
+  api:
+    command: npm run dev
+    docker:
+      image: node:22-alpine
+      command: npm run dev
+    prod:
+      command: node server.js
+`);
+    const prod = applyProduction(applyDockerMode(dev), true);
+    assert.equal(prod.services.api?.command, 'node server.js');
+    assert.equal(prod.services.api?.docker?.command, 'npm run dev');
+
+    // `docker: true` points at the always-Docker config, whose container
+    // runs `command`, so there prod replaces it.
+    const inherited = await config(`services:
+  api:
+    command: npm run dev
+    image: node:22
+    docker: true
+    prod:
+      command: node server.js
+`);
+    assert.equal(applyProduction(applyDockerMode(inherited), true).services.api?.docker?.command, 'node server.js');
+  });
+
   it('accepts if_missing and always steps next to plain commands', async () => {
     const cfg = await config(`setup:
   - pnpm install

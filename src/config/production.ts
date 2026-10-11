@@ -63,8 +63,9 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
       docker: service.docker ? {
         ...service.docker,
         // `prod.command` replaces `command`, so it only reaches containers that run
-        // `command`; a `docker:` block's own command (or the image CMD) is kept.
-        command: service.docker.command === service.command
+        // `command` (flagged at normalization); a `docker:` block's own command,
+        // even one spelled like `command`, or the image CMD is kept.
+        command: service.docker.commandFromService
           ? service.prod?.command ?? service.docker.command
           : service.docker.command,
         env: { ...service.docker.env, ...service.prod?.env },
