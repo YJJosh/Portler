@@ -32,11 +32,13 @@ function isSetupState(value: unknown): value is SetupState {
 
 /**
  * What a plain step's receipt stands for: this command, in this cwd, in this
- * mode; `occurrence` tells identical commands in one list apart: how many
- * earlier entries of the list, of any kind, run the same command.
+ * mode, as entry number `occurrence` of the `total` entries of its list, of
+ * any kind, that run the same command. Carrying the total means adding or
+ * removing a duplicate of a command invalidates every receipt of that
+ * command, so an old receipt is never handed to a newly inserted entry.
  */
-export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0): string {
-  return createHash('sha256').update(JSON.stringify({ command, cwd, mode, occurrence })).digest('hex');
+export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1): string {
+  return createHash('sha256').update(JSON.stringify({ command, cwd, mode, occurrence, total })).digest('hex');
 }
 
 /** A step that keeps a receipt: neither guarded by a path nor marked `always`. */
@@ -46,16 +48,21 @@ export function isPlainSetupStep(step: SetupStep): boolean {
 
 /**
  * Fingerprints of the plain steps of one list, in list order; `undefined` for
- * guarded and `always` entries. The occurrence counts every earlier entry
- * with the same command, whatever its kind, so a receipt stays with its own
- * entry when a neighbour changes kind instead of moving to another one.
+ * guarded and `always` entries. Identical commands are told apart by their
+ * rank among the entries with that command, of any kind, and each fingerprint
+ * carries how many such entries the list has. So a receipt stays with its own
+ * entry when a neighbour changes kind, and a duplicate inserted before an
+ * entry cannot take over its receipt: the count changed, so every entry with
+ * that command runs again. Receipts never move between entries.
  */
 function plainFingerprints(steps: SetupStep[], cwd: string, mode: string): (string | undefined)[] {
+  const totals = new Map<string, number>();
+  for (const step of steps) totals.set(step.run, (totals.get(step.run) ?? 0) + 1);
   const seen = new Map<string, number>();
   return steps.map((step) => {
     const occurrence = seen.get(step.run) ?? 0;
     seen.set(step.run, occurrence + 1);
-    return isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode, occurrence) : undefined;
+    return isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode, occurrence, totals.get(step.run)) : undefined;
   });
 }
 

@@ -45,6 +45,8 @@ describe('setup', () => {
     assert.notEqual(first, setupFingerprint('a', '/one', 'local:prod'));
     assert.equal(first, setupFingerprint('a', '/one', 'local:dev', 0));
     assert.notEqual(first, setupFingerprint('a', '/one', 'local:dev', 1));
+    assert.equal(first, setupFingerprint('a', '/one', 'local:dev', 0, 1));
+    assert.notEqual(first, setupFingerprint('a', '/one', 'local:dev', 0, 2));
     assert.equal(isPlainSetupStep({ run: 'a' }), true);
     assert.equal(isPlainSetupStep({ run: 'a', ifMissing: 'x' }), false);
     assert.equal(isPlainSetupStep({ run: 'a', always: true }), false);
@@ -104,14 +106,14 @@ describe('setup', () => {
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['same']);
     const statePath = path.join(dir, '.portler/setup.json');
-    const second = setupFingerprint('echo same >> steps', dir, 'local:dev', 1);
+    const second = setupFingerprint('echo same >> steps', dir, 'local:dev', 1, 2);
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, { 'local:dev:project': [second] });
     // Dropping the guard enables the first entry: it runs as occurrence 0,
     // while the second entry keeps its receipt instead of handing it over.
     cfg.setup = [{ run: 'echo same >> steps' }, { run: 'echo same >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['same', 'same']);
-    const first = setupFingerprint('echo same >> steps', dir, 'local:dev', 0);
+    const first = setupFingerprint('echo same >> steps', dir, 'local:dev', 0, 2);
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps['local:dev:project'].sort(), [first, second].sort());
   });
 
@@ -130,6 +132,29 @@ describe('setup', () => {
     assert.deepEqual(await lines(), ['A', 'A']);
   });
 
+  it('re-runs every entry of a command when a duplicate of it is added or removed', async () => {
+    const cfg = await config('setup: echo x >> steps\nservices: {api: {command: echo}}');
+    const statePath = path.join(dir, '.portler/setup.json');
+    cfg.setup = [{ run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['y', 'x']);
+    // A duplicate of x prepended: the old receipt must not go to the new first
+    // entry, which would skip it and run y before the other x. The count of x
+    // entries changed, so both run, in list order.
+    cfg.setup = [{ run: 'echo x >> steps' }, { run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['y', 'x', 'x', 'y', 'x']);
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps['local:dev:project'], [
+      setupFingerprint('echo x >> steps', dir, 'local:dev', 0, 2),
+      setupFingerprint('echo x >> steps', dir, 'local:dev', 1, 2),
+    ]);
+    // Removing a duplicate changes the count again: the remaining x runs once more.
+    cfg.setup = [{ run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['y', 'x', 'x', 'y', 'x', 'y', 'x']);
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, { 'local:dev:project': [setupFingerprint('echo x >> steps', dir, 'local:dev')] });
+  });
+
   it('gives identical commands in one list their own receipts', async () => {
     const cfg = await config('setup: [echo same >> steps, echo same >> steps]\nservices: {api: {command: echo}}');
     await runSetupStep(cfg, null, {}, 'local:dev');
@@ -138,8 +163,8 @@ describe('setup', () => {
     assert.deepEqual(await lines(), ['same', 'same']);
     const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
     assert.deepEqual(state.steps['local:dev:project'], [
-      setupFingerprint('echo same >> steps', dir, 'local:dev', 0),
-      setupFingerprint('echo same >> steps', dir, 'local:dev', 1),
+      setupFingerprint('echo same >> steps', dir, 'local:dev', 0, 2),
+      setupFingerprint('echo same >> steps', dir, 'local:dev', 1, 2),
     ]);
     await runSetupStep(cfg, null, {}, 'local:dev', true);
     assert.deepEqual(await lines(), ['same', 'same', 'same', 'same']);
