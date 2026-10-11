@@ -8,7 +8,7 @@ portler up docker [service...] [--detach] [--prod] [--setup|--no-setup] [--volum
 portler up k8s [service...] [--detach]
 portler down [docker|k8s] [service...]
 portler k8s render [service...]
-portler restart [docker] [service...]
+portler restart [docker] [service...] [--prod]
 portler ps [service...]
 portler logs [service...] [--follow]
 portler ports
@@ -31,7 +31,7 @@ portler init
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--prod` | `setup`, `start`, `up`, `env` | Use production overrides (not Kubernetes) |
+| `--prod` | `setup`, `start`, `up`, `restart`, `env` | Use production overrides (not Kubernetes; `restart` refuses to change a running service's mode) |
 | `--setup` / `--no-setup` | `up` | Force / skip setup (not Kubernetes) |
 | `-d, --detach` | `up` | Start services in the background |
 | `--follow` | `logs` | Keep streaming new output |
