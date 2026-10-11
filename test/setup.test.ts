@@ -8,6 +8,7 @@ import { commandUp } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
+import { applyProduction } from '../src/config/production.ts';
 import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
 let dir: string;
@@ -291,6 +292,17 @@ services:
     const env = buildProjectEnv(cfg, { KEY: 'file', ONLY_FILE: 'value' }, {});
     assert.equal(env.KEY, 'root');
     assert.equal(env.ONLY_FILE, 'value');
+    // Production: the deployment wins over config, and the process env over the file.
+    assert.equal(buildProjectEnv(applyProduction(cfg, true), { KEY: 'file' }, {}).KEY, 'file');
+    const saved = process.env.KEY;
+    process.env.KEY = 'shell';
+    try {
+      assert.equal(buildProjectEnv(applyProduction(cfg, true), { KEY: 'file' }, {}).KEY, 'shell');
+      assert.equal(buildProjectEnv(cfg, { KEY: 'file' }, {}).KEY, 'root');
+    } finally {
+      if (saved === undefined) delete process.env.KEY;
+      else process.env.KEY = saved;
+    }
   });
 
   it('does not reuse success receipts copied from another checkout', async () => {

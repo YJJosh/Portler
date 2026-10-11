@@ -6,7 +6,7 @@ Print generated and resolved environment values.
 portler env [service] [--prod]
 ```
 
-`--prod` prints production env overrides. Port assignment and precedence remain development-style, unlike deployment-oriented `start`.
+`--prod` prints production env overrides as `portler.yml` defines them. Port assignment stays development-style, and the deployment-side precedence of `up --prod` and `start`, where process env and `use_env` win over config, is not applied here.
 
 ## Behavior
 

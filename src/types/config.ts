@@ -142,6 +142,8 @@ export interface DeclaredVolume {
 export interface PortlerConfig {
   setup?: SetupStep[];
   prod?: ProductionConfig;
+  /** Set by applyProduction: the deployment (process env, then use_env files) wins over config env. */
+  production?: boolean;
   filePath: string;
   projectDir: string;
   useEnv: string[];

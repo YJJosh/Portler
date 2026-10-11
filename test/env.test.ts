@@ -203,6 +203,39 @@ describe('buildServiceEnv', () => {
     assert.equal(env.DB, 'localhost:52002');
   });
 
+  it('lets the deployment win over portler.yml in production, except for generated values', () => {
+    const service = makeService({ env: { FROM_SERVICE: 'service', SHARED: 'service', SHELL_WINS: 'service' } });
+    const config = makeConfig({ api: service }, { FROM_ROOT: 'root', SHARED: 'root' });
+    const baseEnv = { SHARED: 'file', SHELL_WINS: 'file', FROM_FILE: 'file' };
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const saved = { SHELL_WINS: process.env.SHELL_WINS, PORTLER_API_PORT: process.env.PORTLER_API_PORT, PORT: process.env.PORT };
+    process.env.SHELL_WINS = 'shell';
+    process.env.PORTLER_API_PORT = 'shell';
+    process.env.PORT = '1';
+    try {
+      const dev = buildServiceEnv(config, service, baseEnv, generated, assignments);
+      assert.equal(dev.env.SHARED, 'service', 'development: config wins');
+      assert.equal(dev.env.SHELL_WINS, 'service');
+
+      const prod = buildServiceEnv({ ...config, production: true }, service, baseEnv, generated, assignments);
+      assert.equal(prod.env.SHELL_WINS, 'shell', 'production: the process env wins over file and config');
+      assert.equal(prod.env.SHARED, 'file', 'production: the use_env file wins over config');
+      assert.equal(prod.env.FROM_ROOT, 'root');
+      assert.equal(prod.env.FROM_SERVICE, 'service');
+      assert.equal(prod.env.FROM_FILE, 'file');
+      assert.equal(prod.env.PORTLER_API_PORT, '52001', 'generated values stay Portler\'s');
+      assert.equal(prod.env.PORT, '52001', 'port_env stays Portler\'s');
+      assert.equal(prod.env.PORTLER_SERVICE_NAME, 'api');
+      assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].sort(), 'containers get the same keys');
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('gives Docker services their declared internal port in port_env', () => {
     const service = makeService({
       port: 5432,

@@ -56,6 +56,7 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
   if (!prod) return config;
   return {
     ...config,
+    production: true,
     setup: config.prod?.setup ?? config.setup,
     env: { ...config.env, ...config.prod?.env },
     services: Object.fromEntries(Object.entries(config.services).map(([name, service]) => [name, {

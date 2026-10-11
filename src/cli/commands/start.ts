@@ -55,7 +55,8 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  const configured = { ...baseEnv, ...config.env, ...service.env };
+  // The deployment wins: the platform env (applied below), then the use_env file, then config.
+  const configured = { ...config.env, ...service.env, ...baseEnv };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
     if (platformEnv[key] !== undefined) continue;
@@ -63,7 +64,7 @@ export async function buildStartEnv(
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
       env[key] = resolveEnvValue(value, assignments);
     } catch (error) {
-      const source = key in service.env ? `services.${service.name}.env` : key in config.env ? 'env' : 'use_env';
+      const source = key in baseEnv ? 'use_env' : key in service.env ? `services.${service.name}.env` : 'env';
       throw new Error(`${source}.${key}: ${(error as Error).message}`);
     }
   }

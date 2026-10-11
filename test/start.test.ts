@@ -54,6 +54,27 @@ services:
     await assert.rejects(fs.access(path.join(cfg.projectDir, '.portler')));
   });
 
+  it('lets a use_env file win over config but not over the platform', async () => {
+    const cfg = await config(`env: {FROM_ROOT: root, SHARED: root}
+services:
+  api:
+    command: echo
+    port: 4000
+    port_env: PORT
+    env: {SHARED: service, PLATFORM_WINS: service}
+`);
+    const api = cfg.services.api!;
+    const file = { SHARED: 'file', PLATFORM_WINS: 'file', FROM_FILE: 'file' };
+    const env = await buildStartEnv(cfg, api, file, { PLATFORM_WINS: 'platform' });
+    assert.equal(env.PLATFORM_WINS, 'platform');
+    assert.equal(env.SHARED, 'file');
+    assert.equal(env.FROM_ROOT, 'root');
+    assert.equal(env.FROM_FILE, 'file');
+    assert.equal(env.PORT, '4000');
+    // A bad value is attributed to the layer it came from.
+    await assert.rejects(buildStartEnv(cfg, api, { SHARED: 'missing.url' }, {}), /^Error: use_env\.SHARED: cannot resolve/);
+  });
+
   it('falls back to the declared port and then a free port', async () => {
     const cfg = await config('services: {api: {command: echo, port: 4000, port_env: PORT}}');
     const api = cfg.services.api!;

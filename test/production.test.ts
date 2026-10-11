@@ -38,6 +38,8 @@ services:
       env: {LOG_LEVEL: info}
 `);
     const prod = applyProduction(dev, true);
+    assert.equal(prod.production, true);
+    assert.equal(dev.production, undefined);
     assert.deepEqual(dev.setup, [{ run: 'npm install' }]);
     assert.equal(applyProduction(dev), dev);
     assert.deepEqual(prod.setup, [{ run: 'npm ci' }, { run: 'npm run build' }]);

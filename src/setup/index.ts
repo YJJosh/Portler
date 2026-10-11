@@ -108,8 +108,16 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
   if (changed) await writeJsonFile(filePath, previous);
 }
 
+/**
+ * Environment for top-level setup steps: the process env, base `.env` files,
+ * then root config env. In production the deployment wins instead: root config
+ * env, base `.env` files, then the process env.
+ */
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
-  return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
+  const rootEnv = resolveEnvMap(config.env, assignments);
+  return (config.production
+    ? { ...rootEnv, ...baseEnv, ...process.env }
+    : { ...process.env, ...baseEnv, ...rootEnv }) as EnvMap;
 }
 
 /**
