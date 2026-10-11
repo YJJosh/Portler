@@ -213,6 +213,27 @@ describe('waitForServiceReady', () => {
     }
   });
 
+  it('does not let the Docker hold run past the attempt deadline', async () => {
+    // A connect that lands with less than the hold window left cannot prove the
+    // port is held open before the deadline, so it is not ready, and it says so
+    // at once instead of resolving after the hold would have ended.
+    const server = net.createServer((socket) => {
+      // The probe may have destroyed its end already; a reset here is expected.
+      socket.on('error', () => {});
+      socket.write('ready\n');
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      assert.equal(await isTcpReady('127.0.0.1', port, 25, 200), false);
+      const elapsed = Date.now() - startedAt;
+      assert.ok(elapsed < 150, `answered after ${elapsed}ms, the hold would have ended at 200ms`);
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, 100), true, 'with room for the hold the same port is ready');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it('passes an http check for responses below 500', async () => {
     const server = http.createServer((_request, response) => {
       response.statusCode = 404;

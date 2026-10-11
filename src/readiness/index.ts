@@ -17,6 +17,7 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
   return new Promise((resolve) => {
     let settled = false;
     let holdTimer: NodeJS.Timeout | undefined;
+    const deadline = Date.now() + Math.max(1, timeoutMs);
     const socket = net.createConnection({ host, port });
     const finish = (ready: boolean): void => {
       if (settled) return;
@@ -28,6 +29,10 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
     socket.setTimeout(Math.max(1, timeoutMs));
     socket.on('connect', () => {
       if (holdMs <= 0) return finish(true);
+      // The hold must end inside this attempt's deadline. A connect that lands
+      // too late to be held for the whole window is not ready yet; the caller
+      // decides whether its overall timeout leaves room for another attempt.
+      if (deadline - Date.now() <= holdMs) return finish(false);
       socket.setTimeout(0);
       // Drain any banner so a peer close is noticed rather than buffered.
       socket.resume();
