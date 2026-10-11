@@ -57,6 +57,7 @@ async function writeCorruptPids(): Promise<string> {
 describe('CLI command contracts', () => {
   it('rejects flags and positional arguments a command would otherwise silently ignore', async () => {
     await assert.rejects(main(['ports', '--force']), /--force does not apply to "portler ports"/);
+    await assert.rejects(main(['down', '--image', 'api=img']), /--image does not apply to "portler down"/);
     await assert.rejects(main(['ports', 'api']), /ports does not accept positional arguments/);
     await assert.rejects(main(['init', 'extra']), /init does not accept positional arguments/);
     await assert.rejects(main(['volumes', 'list', '--force']), /--force only applies to "portler volumes remove"/);

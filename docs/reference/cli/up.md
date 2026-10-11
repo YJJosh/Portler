@@ -3,9 +3,9 @@
 Start services: assign ports, resolve env, and launch in dependency order.
 
 ```bash
-portler up [service...] [--detach] [--volume-set <name>]
-portler up docker [service...] [--detach] [--volume-set <name>]
-portler up k8s [service...] [--detach]
+portler up [service...] [--detach] [--volume-set <name>] [--image <service>=<image>]
+portler up docker [service...] [--detach] [--volume-set <name>] [--image <service>=<image>]
+portler up k8s [service...] [--detach] [--image <service>=<image>]
 ```
 
 ## Behavior
@@ -30,6 +30,7 @@ portler up k8s [service...] [--detach]
 | --- | --- |
 | `-d, --detach` | Start in the background; local service output is captured to `.portler/logs/` |
 | `--volume-set <name>` | Run against the `--<name>` variants of all managed `@` volumes ([volume sets](/guide/volumes#volume-sets)); env fallback `PORTLER_VOLUME_SET` |
+| `--image <service>=<image>` | Run that Docker service from this image instead of building it; repeatable ([prebuilt images](/guide/docker#prebuilt-images)) |
 | `-f, --file <path>` | Use a specific portler.yml |
 
 ## Examples
@@ -40,4 +41,5 @@ portler up -d                    # everything, background
 portler up backend               # backend + its dependencies
 portler up docker -d             # full Docker mode, detached
 portler up --volume-set my-branch   # forked data variants
+portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…   # CI-built image, nothing built
 ```

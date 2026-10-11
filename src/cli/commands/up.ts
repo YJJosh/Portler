@@ -1,4 +1,4 @@
-import { configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -28,6 +28,7 @@ import {
   ensureNoOverlap,
   expandAndOrderServices,
   parseRunMode,
+  reportImageOverrides,
   selectServiceNames,
   servicesNeedingReadiness,
   servicesWithPorts,
@@ -149,6 +150,8 @@ export interface StartOptions {
   detach: boolean;
   /** Skip already-running services instead of failing (used by restart). */
   skipRunning?: boolean;
+  /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
+  images?: Readonly<Record<string, string>>;
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -182,7 +185,9 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const config = configForRunMode(rawConfig, mode);
+  const modeConfig = configForRunMode(rawConfig, mode);
+  const config = applyImageOverrides(modeConfig, options.images ?? {});
+  reportImageOverrides(modeConfig, options.images ?? {});
   const runningNames = new Set(runningServices(await readPids(config.projectDir)));
 
   let selectedNames: string[];
@@ -374,5 +379,5 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
 
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const requestedRootNames = selectServiceNames(rawConfig, requested);
-  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach });
+  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, images: args.images });
 }

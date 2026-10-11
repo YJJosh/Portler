@@ -59,7 +59,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true });
+    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, images: args.images });
 
     return 0;
   });

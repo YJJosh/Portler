@@ -120,3 +120,11 @@ export function servicesNeedingReadiness(config: PortlerConfig, serviceNames: st
 
   return names;
 }
+
+/** Say which services run from a pinned `--image`, and whether that skipped a build. */
+export function reportImageOverrides(modeConfig: PortlerConfig, images: Readonly<Record<string, string>>): void {
+  for (const [serviceName, image] of Object.entries(images)) {
+    const hadBuild = modeConfig.services[serviceName]?.docker?.build !== undefined;
+    process.stdout.write(`[portler] ${serviceName}: using image ${image}${hadBuild ? ' (build skipped)' : ''}\n`);
+  }
+}

@@ -109,6 +109,18 @@ Env values under `docker:` are merged **over** the service's env in Docker mode,
 `docker` is a reserved word on the command line (`portler up docker`) and cannot be used as a service name.
 :::
 
+## Prebuilt images
+
+`portler up` builds a `build:` service's image every time. When the image already exists, for example because CI built and pushed it, pin it instead of building:
+
+```bash
+portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…
+```
+
+`--image <service>=<image>` replaces that service's `image` and drops its `build`, so nothing is built and Docker pulls the reference when it is not present locally. Everything else still comes from `portler.yml`: the command, env, ports, volumes, dependencies and healthchecks. The flag is repeatable, works with `up`, `up docker`, `up k8s` and `restart`, and can also pin a plain `image:` service to a digest. The service must run in Docker in the chosen mode, so a service whose only Docker configuration is a `docker:` block takes the flag under `up docker`, not under plain `up`.
+
+This is how a server runs exactly what CI built, with no toolchain on the host: check out the commit the images were built from, so `portler.yml` matches, then start the stack from the pinned references. A digest reference is immutable, so the same command starts the same bytes every time. Docker pulls with the daemon's credentials, so log in to a private registry first. Under `up k8s` a pinned image is not loaded into the cluster; the cluster pulls it, so it must be reachable from there.
+
 ## Requirements & failure behavior
 
 Docker services need the Docker daemon; when it is not running, commands that need it fail with a clear error. `portler down` stops and removes the project's containers.
