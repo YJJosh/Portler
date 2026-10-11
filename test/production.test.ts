@@ -38,9 +38,9 @@ services:
       env: {LOG_LEVEL: info}
 `);
     const prod = applyProduction(dev, true);
-    assert.deepEqual(dev.setup, ['npm install']);
+    assert.deepEqual(dev.setup, [{ run: 'npm install' }]);
     assert.equal(applyProduction(dev), dev);
-    assert.deepEqual(prod.setup, ['npm ci', 'npm run build']);
+    assert.deepEqual(prod.setup, [{ run: 'npm ci' }, { run: 'npm run build' }]);
     assert.deepEqual(prod.env, { KEEP: 'yes', NODE_ENV: 'production' });
     assert.equal(prod.services.api?.command, 'npm start');
     assert.deepEqual(prod.services.api?.setup, []);
@@ -53,7 +53,7 @@ services:
     const prod = applyProduction(dev, true);
     assert.deepEqual(prod.setup, dev.setup);
     assert.equal(prod.services.prod?.command, 'echo dev');
-    assert.deepEqual(prod.services.prod?.setup, ['echo service']);
+    assert.deepEqual(prod.services.prod?.setup, [{ run: 'echo service' }]);
     assert.deepEqual(parseArgs(['prod', '--prod'], 'up').positionals, ['prod']);
   });
 
@@ -94,9 +94,40 @@ services:
     assert.equal(prod.services.web?.docker?.command, undefined);
   });
 
+  it('accepts if_missing and always steps next to plain commands', async () => {
+    const cfg = await config(`setup:
+  - pnpm install
+  - run: pnpm install
+    if_missing: node_modules
+  - {run: pnpm build, always: true}
+  - {run: pnpm generate, always: false}
+prod:
+  setup: {run: pnpm build, always: true}
+services:
+  api:
+    command: echo
+    setup: {run: pnpm generate, if_missing: src/generated}
+`);
+    assert.deepEqual(cfg.setup, [
+      { run: 'pnpm install' },
+      { run: 'pnpm install', ifMissing: 'node_modules' },
+      { run: 'pnpm build', always: true },
+      { run: 'pnpm generate' },
+    ]);
+    assert.deepEqual(cfg.prod?.setup, [{ run: 'pnpm build', always: true }]);
+    assert.deepEqual(cfg.services.api?.setup, [{ run: 'pnpm generate', ifMissing: 'src/generated' }]);
+  });
+
   for (const [text, error] of [
     ['setup: 42\nservices: {api: {command: echo}}', /setup must be a string or a list/],
-    ['services: {api: {setup: [echo, 42]}}', /services.api.setup must be a string or a list/],
+    ['services: {api: {setup: [echo, 42]}}', /services.api.setup\[1\] must be a command string or a \{run, if_missing, always\} step/],
+    ['setup: [{if_missing: node_modules}]\nservices: {api: {command: echo}}', /setup\[0\].run must be a shell command/],
+    ['setup: [{run: "", always: true}]\nservices: {api: {command: echo}}', /setup\[0\].run must be a shell command/],
+    ['setup: [{run: x, if_missing: ""}]\nservices: {api: {command: echo}}', /setup\[0\].if_missing must be a path/],
+    ['setup: [{run: x, if_missing: y, always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine if_missing with always/],
+    ['setup: [{run: x, always: yes}]\nservices: {api: {command: echo}}', /setup\[0\].always must be true or false/],
+    ['setup: [{run: x, cwd: y}]\nservices: {api: {command: echo}}', /unknown key "setup\[0\].cwd"; allowed keys: run, if_missing, always/],
+    ['services: {api: {prod: {setup: [{run: x, when: y}]}}}', /unknown key "services.api.prod.setup\[0\].when"/],
     ['prod: nope\nservices: {api: {command: echo}}', /prod must be an object/],
     ['prod: {command: echo}\nservices: {api: {command: echo}}', /unknown key "prod.command"/],
     ['services: {api: {prod: {cwd: other}}}', /unknown key "services.api.prod.cwd"/],

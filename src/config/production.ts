@@ -1,11 +1,37 @@
-import { isObject, normalizeEnvObject, optionalString } from './scalars.ts';
-import type { PortlerConfig, ProductionConfig } from '../types/index.ts';
+import { isObject, normalizeEnvObject, optionalBoolean, optionalString } from './scalars.ts';
+import type { PortlerConfig, ProductionConfig, SetupStep } from '../types/index.ts';
 
-export function normalizeSetup(value: unknown, name: string): string[] | undefined {
+const SETUP_STEP_KEYS = ['run', 'if_missing', 'always'];
+
+/**
+ * `setup` is a command, a step object, or a list of either: `{run, if_missing}`
+ * runs only while the path is absent, `{run, always}` on every up and setup.
+ * A bare command is a `{run}` step.
+ */
+export function normalizeSetup(value: unknown, name: string): SetupStep[] | undefined {
   if (value === undefined) return undefined;
-  if (typeof value === 'string') return [value];
-  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value;
-  throw new Error(`${name} must be a string or a list of strings`);
+  if (typeof value === 'string') return [{ run: value }];
+  if (isObject(value)) return [normalizeSetupStep(value, name)];
+  if (!Array.isArray(value)) throw new Error(`${name} must be a string or a list of commands and {run, if_missing, always} steps`);
+  return value.map((item, index) => normalizeSetupStep(item, `${name}[${index}]`));
+}
+
+function normalizeSetupStep(item: unknown, name: string): SetupStep {
+  if (typeof item === 'string') return { run: item };
+  if (!isObject(item)) throw new Error(`${name} must be a command string or a {run, if_missing, always} step`);
+  for (const key of Object.keys(item)) {
+    if (!SETUP_STEP_KEYS.includes(key)) throw new Error(`unknown key "${name}.${key}"; allowed keys: ${SETUP_STEP_KEYS.join(', ')}`);
+  }
+  const run = optionalString(item.run, `${name}.run`);
+  if (run === undefined || run.trim() === '') throw new Error(`${name}.run must be a shell command`);
+  const ifMissing = optionalString(item.if_missing, `${name}.if_missing`);
+  if (ifMissing !== undefined && ifMissing.trim() === '') throw new Error(`${name}.if_missing must be a path`);
+  const always = optionalBoolean(item.always, `${name}.always`, false);
+  if (ifMissing !== undefined && always) throw new Error(`${name} cannot combine if_missing with always; pick one`);
+  const step: SetupStep = { run };
+  if (ifMissing !== undefined) step.ifMissing = ifMissing;
+  if (always) step.always = true;
+  return step;
 }
 
 export function normalizeProduction(value: unknown, name: string, service: boolean): ProductionConfig | undefined {

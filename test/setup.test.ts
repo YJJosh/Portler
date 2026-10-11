@@ -8,7 +8,7 @@ import { commandUp } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
-import { buildProjectEnv, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
+import { buildProjectEnv, isPlainSetupStep, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
@@ -35,12 +35,15 @@ async function lines() {
 }
 
 describe('setup', () => {
-  it('fingerprints commands, their order, cwd and mode', () => {
-    const first = setupFingerprint(['a', 'b'], '/one', 'local:dev');
-    assert.equal(first, setupFingerprint(['a', 'b'], '/one', 'local:dev'));
-    assert.notEqual(first, setupFingerprint(['b', 'a'], '/one', 'local:dev'));
-    assert.notEqual(first, setupFingerprint(['a', 'b'], '/two', 'local:dev'));
-    assert.notEqual(first, setupFingerprint(['a', 'b'], '/one', 'local:prod'));
+  it('fingerprints one command with its cwd and mode', () => {
+    const first = setupFingerprint('a', '/one', 'local:dev');
+    assert.equal(first, setupFingerprint('a', '/one', 'local:dev'));
+    assert.notEqual(first, setupFingerprint('b', '/one', 'local:dev'));
+    assert.notEqual(first, setupFingerprint('a', '/two', 'local:dev'));
+    assert.notEqual(first, setupFingerprint('a', '/one', 'local:prod'));
+    assert.equal(isPlainSetupStep({ run: 'a' }), true);
+    assert.equal(isPlainSetupStep({ run: 'a', ifMissing: 'x' }), false);
+    assert.equal(isPlainSetupStep({ run: 'a', always: true }), false);
   });
 
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {
@@ -50,19 +53,98 @@ describe('setup', () => {
     assert.deepEqual(await lines(), ['root']);
     await runSetupStep(cfg, null, {}, 'local:prod');
     await runSetupStep(cfg, null, {}, 'local:dev', true);
-    cfg.setup = ['echo changed >> steps'];
+    cfg.setup = [{ run: 'echo changed >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['root', 'root', 'root', 'changed']);
   });
 
-  it('stops at the first failed command and does not cache failure', async () => {
+  it('stops at the first failed command, keeps the receipts of the steps before it, and does not cache failure', async () => {
     const cfg = await config('setup: ["echo first >> steps", "exit 7", "echo last >> steps"]\nservices: {api: {command: echo}}');
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await assert.rejects(runSetupStep(cfg, null, {}, 'local:dev'), /setup project: command "exit 7" failed \(exit code 7\)/);
     }
-    assert.deepEqual(await lines(), ['first', 'first']);
+    // The first step succeeded once and is not run again; the failed one and
+    // the one after it have no receipt.
+    assert.deepEqual(await lines(), ['first']);
     const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
-    assert.deepEqual(state.steps, {});
+    assert.equal(state.version, 2);
+    assert.deepEqual(state.steps, { 'local:dev:project': [setupFingerprint('echo first >> steps', dir, 'local:dev')] });
+    // A forced run drops the receipts before running, so the first step runs
+    // again; only its fresh success is recorded, nothing for the failed step.
+    await assert.rejects(runSetupStep(cfg, null, {}, 'local:dev', true), /exit code 7/);
+    assert.deepEqual(await lines(), ['first', 'first']);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8')).steps, {
+      'local:dev:project': [setupFingerprint('echo first >> steps', dir, 'local:dev')],
+    });
+  });
+
+  it('drops the receipt of a step that left the definition, and ignores version 1 receipts', async () => {
+    const cfg = await config('setup: [echo a >> steps, echo b >> steps]\nservices: {api: {command: echo}}');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    cfg.setup = [{ run: 'echo b >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['a', 'b']);
+    const statePath = path.join(dir, '.portler/setup.json');
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, { 'local:dev:project': [setupFingerprint('echo b >> steps', dir, 'local:dev')] });
+
+    await fs.writeFile(statePath, JSON.stringify({ version: 1, project: dir, steps: { 'local:dev:project': 'old' } }));
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['a', 'b', 'b']);
+    assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).version, 2);
+  });
+
+  it('if_missing steps run only while the path is absent, with or without force', async () => {
+    await fs.mkdir(path.join(dir, 'app'));
+    const cfg = await config(`setup:
+  - run: echo install >> steps
+    if_missing: node_modules
+  - echo plain >> steps
+services:
+  app:
+    cwd: app
+    command: echo
+    setup: [{run: 'echo generate >> ../steps', if_missing: generated/client.ts}]
+`);
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await runSetupStep(cfg, cfg.services.app!, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['install', 'plain', 'generate']);
+
+    // Once the paths exist the guarded steps are skipped; the plain step has
+    // its receipt. Force reruns the plain step but not the guarded ones.
+    await fs.mkdir(path.join(dir, 'node_modules'));
+    await fs.mkdir(path.join(dir, 'app', 'generated'));
+    await fs.writeFile(path.join(dir, 'app', 'generated', 'client.ts'), '');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await runSetupStep(cfg, cfg.services.app!, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['install', 'plain', 'generate']);
+    await runSetupStep(cfg, null, {}, 'local:dev', true);
+    await runSetupStep(cfg, cfg.services.app!, {}, 'local:dev', true);
+    assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain']);
+
+    // Deleting what a guarded step produced makes it run again; a file at the
+    // path counts as much as a directory.
+    await fs.rm(path.join(dir, 'node_modules'), { recursive: true });
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain', 'install']);
+    await fs.writeFile(path.join(dir, 'node_modules'), '');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain', 'install']);
+    // Guarded steps never get a receipt: the service, which has nothing else,
+    // has no entry at all.
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(state.steps, { 'local:dev:project': [setupFingerprint('echo plain >> steps', dir, 'local:dev')] });
+  });
+
+  it('always steps run on every up and setup, next to receipt-tracked ones', async () => {
+    const cfg = await config(`setup:
+  - echo once >> steps
+  - {run: echo every >> steps, always: true}
+services: {api: {command: echo}}
+`);
+    for (let attempt = 0; attempt < 3; attempt += 1) await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['once', 'every', 'every', 'every']);
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(state.steps, { 'local:dev:project': [setupFingerprint('echo once >> steps', dir, 'local:dev')] });
   });
 
   it('invalidates a prior receipt when a forced run fails', async () => {

@@ -10,7 +10,7 @@ Portler uses its own hand-rolled YAML parser covering a practical subset: mappin
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `setup` | string \| list of strings | — | Host shell commands run from the project root; see [Setup and prod](#setup-and-prod) |
+| `setup` | string \| list of commands and steps | — | Host shell commands run from the project root; a step object adds `if_missing` or `always`. See [Setup and prod](#setup-and-prod) |
 | `prod` | object | — | Production `setup` replacement and `env` overrides, used with `--prod` |
 | `services` | mapping | — (required) | The services to run; see [Service options](#service-options) |
 | `use_env` | string \| list | `[]` | `.env` file(s) loaded for all services, later files win. Alias: `env_file` |
@@ -31,7 +31,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `setup` | string \| list of strings | — | Host shell commands in service cwd, with resolved service env |
+| `setup` | string \| list of commands and steps | — | Host shell commands in service cwd, with resolved service env; steps as at the top level |
 | `prod` | object | — | Production `setup`, `command` replacements and `env` overrides |
 | `command` | string | — | Shell command that starts the service (local mode) |
 | `cwd` | string | `.` | Working directory, relative to the project root |
@@ -61,7 +61,25 @@ A service becomes a **Docker service** (runs in Docker even under plain `portler
 
 ## Setup and prod
 
-`setup` accepts a string or list of strings; each entry runs sequentially through the shell, stopping on the first non-zero exit. Root setup runs from the project root; service setup runs in its `cwd`. Setup is always on the host, even for Docker services.
+`setup` accepts a command or a list; each entry runs sequentially through the shell, stopping on the first non-zero exit. Root setup runs from the project root; service setup runs in its `cwd`. Setup is always on the host, even for Docker services.
+
+`setup` may also be a single step object. A list entry is a command string or a step object with `run` and one of two modifiers:
+
+```yaml
+setup:
+  - pnpm install                          # once per checkout; again when the line or cwd changes
+  - run: pnpm install
+    if_missing: node_modules              # only while nothing exists at this path
+  - {run: pnpm run codegen, always: true} # on every up and setup
+```
+
+| Step | When it runs |
+| --- | --- |
+| `<command>` or `{run: <command>}` | Once per checkout. A receipt in `.portler/setup.json` records the success; the step runs again when its command or cwd changes, with `up --setup`, or on `portler setup`. |
+| `{run, if_missing: <path>}` | Only while nothing exists at `<path>`, resolved against the step's cwd. A file, a folder, or a link whose target exists all count. No receipt: the path is the receipt, so deleting what the step produced runs it again, and `--setup` does not override it. |
+| `{run, always: true}` | On every `up` (unless `--no-setup`) and every `setup`. No receipt. |
+
+`run` must be a non-empty command; `if_missing` and `always` cannot be combined; other keys are rejected.
 
 Top-level `prod` accepts only `setup` and `env`; service `prod` additionally accepts `command`. Unknown keys are rejected. With `--prod`, setup and command replace their ordinary definitions, while env merges over env at the same level. Omitted overrides inherit ordinary values; `setup: []` disables an inherited setup.
 

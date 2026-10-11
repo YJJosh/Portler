@@ -5,7 +5,7 @@
 Portler writes runtime files to `.portler/` in the project directory:
 
 ```text
-.portler/setup.json          successful setup fingerprints, per step and mode
+.portler/setup.json          receipts of the plain setup steps that succeeded, per owner and mode
 .portler/state.json          last assignments and run metadata
 .portler/runtime.env         resolved env snapshot
 .portler/pids.json           pids of detached services and the proxy
@@ -37,6 +37,6 @@ The registry records which project/service reserved which port and bind host, so
 
 ## Setup receipts
 
-`setup.json` stores version 1, the absolute project identity, and SHA-256 fingerprints keyed by run mode (`local`/`docker`), environment (`dev`/`prod`) and step (`project` or `service:<name>`). Each fingerprint includes the ordered commands, resolved cwd and mode. Only fully successful steps are recorded; a failed forced rerun clears its old success first. Writes are atomic and serialized by the lifecycle lock. Receipts copied from another checkout are not reused.
+`setup.json` stores version 2, the absolute project identity, and per owner (keyed by run mode `local`/`docker`, environment `dev`/`prod`, and `project` or `service:<name>`) the SHA-256 fingerprints of the plain setup steps that succeeded. A fingerprint covers one step's command, resolved cwd and mode. A receipt is written as soon as its step succeeds; a step that left the definition loses its receipt, and a forced run clears every receipt of the owner before running. `if_missing` and `always` steps never get one. Writes are atomic and serialized by the lifecycle lock. Receipts copied from another checkout are not reused, and a version 1 file (one fingerprint per owner) is treated as empty.
 
-Deleting this file (or running `clean`) makes the next `up` run setup again. `down` preserves receipts. Source files, lockfiles, env values and port assignments are not fingerprinted; force setup when these inputs require a rebuild.
+Deleting this file (or running `clean`) makes the next `up` run every plain step again. `down` preserves receipts. Source files, lockfiles, env values and port assignments are not fingerprinted; use `if_missing` or `always` steps, or force setup, when these inputs require a rerun.

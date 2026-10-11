@@ -2,10 +2,13 @@
  * Canonical starter `portler.yml`, shared by `portler init` and the help text
  * so they never drift apart.
  */
-export const SAMPLE_PORTLER_YML = `# Optional setup runs once per definition on up; force with up --setup.
-# setup: npm install
+export const SAMPLE_PORTLER_YML = `# Optional setup runs on up. A plain step runs once per checkout (again when it
+# changes, or with up --setup); if_missing runs only while that path is absent;
+# always runs every time.
+# setup:
+#   - {run: npm install, if_missing: node_modules}
 # prod:
-#   setup: [npm ci, npm run build]
+#   setup: [npm ci, {run: npm run build, always: true}]
 #   env: {NODE_ENV: production}
 use_env: .env
 

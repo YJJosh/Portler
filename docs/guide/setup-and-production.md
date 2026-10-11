@@ -3,11 +3,14 @@
 Keep installation, generation, development and production commands together:
 
 ```yaml
-setup: pnpm install
+setup:
+  - run: pnpm install
+    if_missing: node_modules    # only while nothing is there yet
 prod:
   setup:
     - pnpm install --frozen-lockfile
-    - pnpm build
+    - run: pnpm build
+      always: true              # every deploy, not once per checkout
   env:
     NODE_ENV: production
 
@@ -25,6 +28,8 @@ services:
         LOG_LEVEL: info
 ```
 
+Each `setup` entry is a shell command, or a step object with `run` plus one modifier. A plain command runs once per checkout and keeps a receipt; `if_missing: <path>` runs only while nothing exists at that path; `always: true` runs every time. See [the configuration reference](/reference/configuration#setup-and-prod).
+
 ## Fresh checkouts and workspaces
 
 ```bash
@@ -33,11 +38,11 @@ cd <repository>
 portler up
 ```
 
-On a fresh checkout, `up` runs top-level setup before starting anything. Each service's setup runs just before that service starts, after its dependencies reach their configured readiness condition. A successful setup is remembered per checkout, step and mode. Later down/up cycles skip unchanged commands; changing commands or cwd invalidates the receipt. `--setup` forces a rerun; `--no-setup` skips it.
+On a fresh checkout, `up` runs top-level setup before starting anything. Each service's setup runs just before that service starts, after its dependencies reach their configured readiness condition. Every plain step that succeeds is remembered per checkout and mode, so later down/up cycles skip it; changing a step's command or cwd runs that step again. `--setup` forces every plain step; `--no-setup` skips setup entirely. The first failure stops the run, and the steps before it keep their receipts, so fixing the cause and running `up` again continues from the failed step.
 
-Only definitions are fingerprinted, **not** lockfiles, source files, environment values or ports. After changing those inputs, run `portler setup` or `portler up --setup`. Use idempotent setup commands; an interrupted or failed step is retried in full.
+Only definitions are fingerprinted, **not** lockfiles, source files, environment values or ports. A step that must follow those inputs is better expressed with a modifier: `if_missing: node_modules` makes an install run exactly when the folder is gone, and `always: true` makes a build or code generator run on every `up`. For the rest, run `portler setup` or `portler up --setup` after changing such inputs. Use idempotent setup commands.
 
-Workler can create a workspace and hand off to `portler setup`. This performs setup only, in dependency order, without starting any service. A later `portler up` reuses the success receipts. Setup requiring a live database must have an external database available, or be deferred to `up`'s dependency-aware startup.
+Workler can create a workspace and hand off to `portler setup`. This performs setup only, in dependency order, without starting any service. A later `portler up` reuses the success receipts. A Workler workspace whose `link node_modules` rule found something to link to already has its dependencies: an install step guarded with `if_missing: node_modules` is skipped there and runs only in a workspace (or checkout) that has none. Setup requiring a live database must have an external database available, or be deferred to `up`'s dependency-aware startup.
 
 ## Build and start on platforms
 
@@ -47,6 +52,8 @@ For Cloudler or a platform that supports a build command and a long-running star
 | --- | --- |
 | Build / workspace preparation | `portler setup --prod` |
 | Start | `portler start api --prod` |
+
+A platform that runs `portler setup --prod` as its build step gets every plain step every time, since explicit `setup` ignores receipts. A platform that runs `portler up --prod` instead (a host without Docker images that just needs a long-running process) only gets plain steps once per checkout: mark the install and build steps `always: true` there, or the second deploy onto the same checkout skips them.
 
 Ensure Portler and your package manager are installed in both build and runtime environments. Bind the application to the platform's required interface (usually `0.0.0.0`), and use `port_env: PORT`. Platform `PORT` and secrets override the file during `start`. Set production database URLs and public build-time URLs through appropriate config/env settings; `setup` uses development-style assigned ports, whereas `start` resolves declared endpoints unless platform values replace them.
 

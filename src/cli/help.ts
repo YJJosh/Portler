@@ -27,7 +27,9 @@ Options:
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
       --prod              Use production overrides for setup, start, up and env
-      --setup             For "up": force setup steps to run (local/Docker)
+      --setup             For "up": run setup steps again, ignoring their receipts
+                          (local/Docker; an if_missing step still skips while its
+                          path exists)
       --no-setup          For "up": skip setup entirely (local/Docker)
       --ports             For "clean": only release this project's ports
       --global            For "clean": prune stale entries from the global registry

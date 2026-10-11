@@ -4,25 +4,60 @@ import { resolveServiceCwd } from '../config/index.ts';
 import { resolveEnvMap } from '../env/resolve.ts';
 import { runShell } from '../process/shell.ts';
 import { portlerDir } from '../state/index.ts';
+import { pathExists } from '../util/fs.ts';
 import { isObject } from '../util/guards.ts';
 import { readValidatedJsonFile, writeJsonFile } from '../util/json-file.ts';
-import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../types/index.ts';
+import type { Assignments, EnvMap, PortlerConfig, ServiceConfig, SetupStep } from '../types/index.ts';
 
+/**
+ * Receipts of the plain setup steps that succeeded in this checkout, keyed by
+ * run mode and step owner (`local:dev:project`, `local:prod:service:api`).
+ * Version 1 kept one fingerprint per owner for the whole command list; a file
+ * in that shape is accepted and treated as empty, so the steps run once more.
+ */
 interface SetupState {
-  version: 1;
+  version: 1 | 2;
   project: string;
-  steps: Record<string, string>;
+  steps: Record<string, string | string[]>;
 }
 
-export function setupFingerprint(commands: string[], cwd: string, mode: string): string {
-  return createHash('sha256').update(JSON.stringify({ commands, cwd, mode })).digest('hex');
+function isSetupState(value: unknown): value is SetupState {
+  if (!isObject(value) || typeof value.project !== 'string' || !isObject(value.steps)) return false;
+  if (value.version === 1) return Object.values(value.steps).every((entry) => typeof entry === 'string');
+  if (value.version === 2) {
+    return Object.values(value.steps).every((entry) => Array.isArray(entry) && entry.every((item) => typeof item === 'string'));
+  }
+  return false;
+}
+
+/** What a plain step's receipt stands for: this command, in this cwd, in this mode. */
+export function setupFingerprint(command: string, cwd: string, mode: string): string {
+  return createHash('sha256').update(JSON.stringify({ command, cwd, mode })).digest('hex');
+}
+
+/** A step that keeps a receipt: neither guarded by a path nor marked `always`. */
+export function isPlainSetupStep(step: SetupStep): boolean {
+  return step.ifMissing === undefined && step.always !== true;
 }
 
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
   return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
 }
 
-/** Caller holds the lifecycle lock; only a fully successful step gets a receipt. */
+/**
+ * Runs the setup steps of the project (service null) or of one service, in
+ * order. Per step:
+ *
+ * - `if_missing`: skipped while something exists at the path (resolved
+ *   against the step's cwd); runs otherwise. The path is the receipt, so
+ *   `force` does not override it.
+ * - `always`: runs every time.
+ * - plain: runs once per checkout; again when its command or cwd changed, or
+ *   with `force`. Each success is written to `.portler/setup.json` right away,
+ *   so a later failure does not make the earlier steps run again.
+ *
+ * The first failure stops the run. Caller holds the lifecycle lock.
+ */
 export async function runSetupStep(
   config: PortlerConfig,
   service: ServiceConfig | null,
@@ -30,32 +65,47 @@ export async function runSetupStep(
   mode: string,
   force = false,
 ): Promise<void> {
-  const commands = service ? service.setup : config.setup;
-  if (!commands?.length) return;
+  const steps = service ? service.setup : config.setup;
+  if (!steps?.length) return;
   const cwd = service ? resolveServiceCwd(config, service) : config.projectDir;
   const name = service ? `service:${service.name}` : 'project';
   const key = `${mode}:${name}`;
   const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
-  const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', (value): value is SetupState =>
-    isObject(value) && value.version === 1 && typeof value.project === 'string' &&
-    isObject(value.steps) && Object.values(value.steps).every((entry) => typeof entry === 'string'),
-  );
-  const state: SetupState = previous?.project === config.projectDir ? previous : {
-    version: 1, project: config.projectDir, steps: {},
+  const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
+  const state: SetupState & { version: 2; steps: Record<string, string[]> } =
+    previous?.project === config.projectDir && previous.version === 2
+      ? (previous as SetupState & { version: 2; steps: Record<string, string[]> })
+      : { version: 2, project: config.projectDir, steps: {} };
+
+  // Receipts of steps that are no longer defined are dropped, and a forced
+  // run drops every receipt BEFORE anything runs, so a failure in a forced
+  // rerun cannot leave an old success masking it.
+  const fingerprints = steps.map((step) => (isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode) : undefined));
+  const recorded = force ? new Set<string>() : new Set(state.steps[key] ?? []);
+  const done = new Set(fingerprints.filter((fingerprint): fingerprint is string => fingerprint !== undefined && recorded.has(fingerprint)));
+  const persist = async (): Promise<void> => {
+    state.steps[key] = [...done];
+    await writeJsonFile(filePath, state);
   };
-  const fingerprint = setupFingerprint(commands, cwd, mode);
-  if (!force && state.steps[key] === fingerprint) {
-    process.stdout.write(`[portler] setup ${name}: unchanged, skipping\n`);
-    return;
+  if (previous !== state || done.size !== (state.steps[key] ?? []).length) await persist();
+
+  let ran = 0;
+  for (const [index, step] of steps.entries()) {
+    if (step.ifMissing !== undefined && (await pathExists(path.resolve(cwd, step.ifMissing)))) {
+      process.stdout.write(`[portler] setup ${name}: skip "${step.run}" (${step.ifMissing} exists)\n`);
+      continue;
+    }
+    const fingerprint = fingerprints[index];
+    if (fingerprint !== undefined && done.has(fingerprint)) continue;
+
+    process.stdout.write(`[portler] setup ${name}: ${step.run}\n`);
+    ran += 1;
+    const code = await runShell(step.run, cwd, env);
+    if (code !== 0) throw new Error(`setup ${name}: command "${step.run}" failed (exit code ${code})`);
+    if (fingerprint !== undefined) {
+      done.add(fingerprint);
+      await persist();
+    }
   }
-  // A failed forced rerun must not leave an old success masking that failure.
-  delete state.steps[key];
-  await writeJsonFile(filePath, state);
-  for (const command of commands) {
-    process.stdout.write(`[portler] setup ${name}: ${command}\n`);
-    const code = await runShell(command, cwd, env);
-    if (code !== 0) throw new Error(`setup ${name}: command "${command}" failed (exit code ${code})`);
-  }
-  state.steps[key] = fingerprint;
-  await writeJsonFile(filePath, state);
+  if (ran === 0) process.stdout.write(`[portler] setup ${name}: nothing to run\n`);
 }

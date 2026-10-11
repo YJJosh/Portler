@@ -47,14 +47,27 @@ export interface K8sConfig {
   volume?: K8sVolumeConfig;
 }
 
+/**
+ * One setup command. A plain string in portler.yml is the same as `{ run }`:
+ * it runs once per checkout and again when its command or cwd changes (the
+ * receipt lives in `.portler/setup.json`). `if_missing` runs it only while
+ * nothing exists at that path, relative to the step's cwd; `always` runs it on
+ * every `up` and `setup`. Neither of those two keeps a receipt.
+ */
+export interface SetupStep {
+  run: string;
+  ifMissing?: string;
+  always?: boolean;
+}
+
 export interface ProductionConfig {
-  setup?: string[];
+  setup?: SetupStep[];
   command?: string;
   env: UnknownMap;
 }
 
 export interface ServiceConfig {
-  setup?: string[];
+  setup?: SetupStep[];
   prod?: ProductionConfig;
   name: string;
   command?: string;
@@ -120,7 +133,7 @@ export interface DeclaredVolume {
 }
 
 export interface PortlerConfig {
-  setup?: string[];
+  setup?: SetupStep[];
   prod?: ProductionConfig;
   filePath: string;
   projectDir: string;
