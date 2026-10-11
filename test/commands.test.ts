@@ -15,7 +15,7 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { writePids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
 
@@ -64,6 +64,21 @@ describe('CLI command contracts', () => {
     await assert.rejects(commandClean(parseArgs(['--global', '--file', 'other.yml'], 'clean')), /--file does not apply/);
   });
 
+  it('rejects --image for a service the command does not start', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  web:', '    image: example/web', '  api:', '    command: node -e ""', '    port: 3000', ''].join('\n'),
+      'utf8',
+    );
+
+    // web is a Docker service, so the override itself is valid; it is just not part of `up api`.
+    await assert.rejects(
+      commandUp(parseArgs(['api', '--image', 'web=example/web@sha256:abc'], 'up')),
+      /--image: service "web" is not started by this command/,
+    );
+    assert.equal(await pathExists(path.join(projectDir, '.portler', 'state.json')), false);
+  });
+
   it('rejects a Docker-only volume set in Kubernetes mode before touching a cluster', async () => {
     await assert.rejects(commandUp(parseArgs(['k8s', '--volume-set', 'branch'], 'up')), /applies to Docker volumes/);
   });
@@ -99,6 +114,33 @@ describe('restart', () => {
       commandRestart(parseArgs(['k8s'], 'restart')),
       /restart does not support Kubernetes mode/,
     );
+  });
+
+  it('rejects --image for a dependency the restart leaves running, before stopping anything', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  db:', '    image: example/db', '  api:', '    command: node -e ""', '    port: 3000', '    depends_on: db', ''].join('\n'),
+      'utf8',
+    );
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        // db is alive (this process stands in for it) and not named, so `restart api` leaves it running.
+        db: { pid: process.pid, command: 'db', cwd: projectDir, startedAt },
+        // api is a stale entry; a restart that got as far as stopping would have pruned it.
+        api: { pid: 4_194_303, command: 'api', cwd: projectDir, startedAt },
+      },
+    });
+
+    await assert.rejects(
+      commandRestart(parseArgs(['api', '--image', 'db=example/db@sha256:abc'], 'restart')),
+      /--image: service "db" is already running and this command leaves it running/,
+    );
+    const pids = await readPids(projectDir);
+    assert.ok(pids?.services.api, 'the rejection came before the stop: the stale api entry is still there');
   });
 
   it('points the user at the down/up sequence that does work', async () => {

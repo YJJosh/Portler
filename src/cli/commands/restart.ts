@@ -1,8 +1,8 @@
-import { loadConfig } from '../../config/index.ts';
-import { stopServices } from '../../process/index.ts';
+import { applyImageOverrides, configForRunMode, loadConfig } from '../../config/index.ts';
+import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import { parseRunMode, selectServiceNames } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { startPhase } from './up.ts';
 
 /**
@@ -36,6 +36,20 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
   // stopped and starts them itself, and this restart then starts them again.
   // restart always detaches, so the lock is released as soon as startup is done.
   return withLifecycleLock(rawConfig.projectDir, async () => {
+    // Check --image before anything is stopped. applyImageOverrides rejects an unknown
+    // service or one that does not run in Docker in this mode, and a target this restart
+    // leaves running would keep its old image. Either failure after the stop would leave
+    // the requested services down with nothing restarted.
+    if (args.images) {
+      applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
+      const running = new Set(runningServices(await readPids(rawConfig.projectDir)));
+      const stopping = requested.length > 0 ? new Set(requestedRootNames) : running;
+      const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
+        (serviceName) => !running.has(serviceName) || stopping.has(serviceName),
+      );
+      validateImageOverrideTargets(args.images, starting, running);
+    }
+
     // With no names, stop everything in pids.json (like `portler down`) so
     // services removed from the config do not linger; otherwise stop only the
     // requested roots.

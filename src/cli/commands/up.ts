@@ -32,6 +32,7 @@ import {
   selectServiceNames,
   servicesNeedingReadiness,
   servicesWithPorts,
+  validateImageOverrideTargets,
 } from '../services.ts';
 
 function validateDockerMode(config: PortlerConfig, selectedNames: string[]): void {
@@ -186,8 +187,8 @@ export async function startPhase(
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
   const modeConfig = configForRunMode(rawConfig, mode);
-  const config = applyImageOverrides(modeConfig, options.images ?? {});
-  reportImageOverrides(modeConfig, options.images ?? {});
+  const images = options.images ?? {};
+  const config = applyImageOverrides(modeConfig, images);
   const runningNames = new Set(runningServices(await readPids(config.projectDir)));
 
   let selectedNames: string[];
@@ -197,6 +198,10 @@ export async function startPhase(
     ensureNoOverlap(runningNames, orderedNames);
     selectedNames = orderedNames;
   }
+  // Only now is it known which services this run starts; a pinned image for any other
+  // service would be accepted and never used.
+  validateImageOverrideTargets(images, selectedNames, runningNames);
+  reportImageOverrides(modeConfig, images);
 
   if (mode === 'docker') validateDockerMode(config, selectedNames);
   validateCommands(config, selectedNames);

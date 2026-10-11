@@ -12,7 +12,7 @@ portler restart [docker] [service...] [--image <service>=<image>]
 - Restarted services keep their previously assigned ports whenever they are still free.
 - `portler restart api` restarts a single service: dependencies that are **not** running are started too; running ones are left untouched.
 - `portler restart docker api` restarts in [Docker mode](/guide/docker#docker-mode-portler-up-docker).
-- `--image <service>=<image>` works as in [`up`](/reference/cli/up): the restarted service runs from the pinned image instead of being rebuilt ([prebuilt images](/guide/docker#prebuilt-images)).
+- `--image <service>=<image>` works as in [`up`](/reference/cli/up): the restarted service runs from the pinned image instead of being rebuilt ([prebuilt images](/guide/docker#prebuilt-images)). A target this restart leaves running is rejected before anything is stopped.
 
 ::: warning No Kubernetes mode
 `portler restart k8s` is rejected. Restarting a Kubernetes stack has to re-apply manifests and re-establish port-forwards, which `restart` does not do. Run the two steps instead:

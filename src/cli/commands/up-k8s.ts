@@ -32,7 +32,7 @@ import { sleep } from '../../util/sleep.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { printPortTable } from '../table.ts';
-import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts } from '../services.ts';
+import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
 import { IncompleteTeardownError, reportIncompleteTeardown } from './up.ts';
 
 /** How long a namespace left Terminating by a previous down may take to clear. */
@@ -319,6 +319,7 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
   const selectedNames = expandAndOrderServices(rawConfig, requestedRootNames);
   const modeConfig = configForRunMode(rawConfig, 'k8s');
   const config = applyImageOverrides(modeConfig, args.images ?? {});
+  validateImageOverrideTargets(args.images ?? {}, selectedNames, new Set<string>());
   reportImageOverrides(modeConfig, args.images ?? {});
 
   validateK8sMode(config, selectedNames);
