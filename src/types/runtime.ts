@@ -27,6 +27,8 @@ export interface PidServiceInfo {
   url?: string;
   dockerContainer?: string;
   dockerNetwork?: string;
+  /** Started with `--prod`. A plain `restart` refuses such a service instead of relaunching it in dev mode. */
+  prod?: boolean;
   /**
    * Opaque OS start-time token for `pid`, captured at spawn. A pid can be
    * recycled onto an unrelated process; re-reading this token before signalling

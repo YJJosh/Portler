@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { parseArgs } from '../src/cli/args.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
+import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
+import { readPids } from '../src/process/pids.ts';
 import { applyProduction } from '../src/config/production.ts';
 import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
@@ -404,6 +406,39 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       await config(`setup: echo root >> steps\nservices:\n${app}`);
       await commandUp(parseArgs(['app', '-d'], 'up'));
       assert.deepEqual(await lines(), ['root', 'root'], 'the step added back runs again');
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('restart --prod keeps a production stack in production mode', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`services:
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`);
+    try {
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['prod']);
+      assert.equal((await readPids(dir))?.services.api?.prod, true, 'the run mode is recorded');
+
+      // A routine restart must not flip the stack to development.
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /started with --prod/);
+      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+
+      await commandRestart(parseArgs(['api', '--prod'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.api?.prod, true);
     } finally {
       await commandDown(parseArgs([], 'down'));
     }

@@ -15,7 +15,7 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { writePids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
 
@@ -98,6 +98,25 @@ describe('restart', () => {
       commandRestart(parseArgs(['k8s'], 'restart')),
       /restart does not support Kubernetes mode/,
     );
+  });
+
+  it('refuses a plain restart of a service started with --prod, before stopping anything', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: true, startedAt } },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api was started with --prod/);
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), /api was started with --prod/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+
+    // With the flag the guard passes and restart reaches the stop step, which refuses
+    // the unverified entry. Going through main proves the scope check accepts --prod.
+    await assert.rejects(main(['restart', 'api', '--prod']), /restart could not stop/);
   });
 
   it('points the user at the down/up sequence that does work', async () => {

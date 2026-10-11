@@ -1,5 +1,5 @@
 import { loadConfig } from '../../config/index.ts';
-import { stopServices } from '../../process/index.ts';
+import { readPids, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import { parseRunMode, selectServiceNames } from '../services.ts';
@@ -11,7 +11,10 @@ import { startPhase } from './up.ts';
  * between, so allocateAssignments reclaims the previous registry
  * reservations and services keep their ports whenever they are still free.
  * Dependencies that are not running are started too; dependencies that are
- * still running are left untouched.
+ * still running are left untouched. `--prod` restarts with the production
+ * overrides, exactly like `up --prod`; a service that was started with
+ * `--prod` refuses a plain restart so a routine restart cannot flip a
+ * production stack back to development.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -36,6 +39,20 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
   // stopped and starts them itself, and this restart then starts them again.
   // restart always detaches, so the lock is released as soon as startup is done.
   return withLifecycleLock(rawConfig.projectDir, async () => {
+    // A service started with --prod must not be relaunched in development mode
+    // by a routine restart: its dev command, setup and env would replace the
+    // production ones without a word. Checked before anything is stopped.
+    const before = await readPids(rawConfig.projectDir);
+    const stopping = requested.length > 0 ? requestedRootNames : Object.keys(before?.services ?? {});
+    const prodStarted = stopping.filter((name) => before?.services[name]?.prod === true);
+    if (!args.prod && prodStarted.length > 0) {
+      throw new Error(
+        `${prodStarted.join(', ')} ${prodStarted.length === 1 ? 'was' : 'were'} started with --prod; a plain restart would ` +
+          'relaunch in development mode. Pass --prod to restart in production mode, or run "portler down" and then ' +
+          '"portler up" to switch modes.',
+      );
+    }
+
     // With no names, stop everything in pids.json (like `portler down`) so
     // services removed from the config do not linger; otherwise stop only the
     // requested roots.
@@ -59,7 +76,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true });
+    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod });
 
     return 0;
   });

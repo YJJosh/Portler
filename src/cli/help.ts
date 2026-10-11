@@ -11,7 +11,7 @@ Usage:
   ${PACKAGE_NAME} up k8s [service...] [--detach]
   ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
   ${PACKAGE_NAME} k8s render [service...]
-  ${PACKAGE_NAME} restart [docker] [service...]
+  ${PACKAGE_NAME} restart [docker] [service...] [--prod]
   ${PACKAGE_NAME} ps [service...]
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports
@@ -26,7 +26,7 @@ Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
-      --prod              Use production overrides for setup, start, up and env
+      --prod              Use production overrides for setup, start, up, restart and env
       --setup             For "up": run setup steps again, ignoring their receipts
                           (local/Docker; an if_missing step still skips while its
                           path exists)
