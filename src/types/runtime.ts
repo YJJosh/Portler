@@ -27,7 +27,12 @@ export interface PidServiceInfo {
   url?: string;
   dockerContainer?: string;
   dockerNetwork?: string;
-  /** Started with `--prod`. A plain `restart` refuses such a service instead of relaunching it in dev mode. */
+  /**
+   * Whether the service was started with `--prod`. `restart` keeps this mode: a
+   * plain restart refuses a production service and `restart --prod` refuses a
+   * development one. Entries without the field predate it (a Portler without a
+   * production mode wrote them) and count as development.
+   */
   prod?: boolean;
   /**
    * Opaque OS start-time token for `pid`, captured at spawn. A pid can be

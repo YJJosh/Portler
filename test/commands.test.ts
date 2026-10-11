@@ -119,6 +119,24 @@ describe('restart', () => {
     await assert.rejects(main(['restart', 'api', '--prod']), /restart could not stop/);
   });
 
+  it('refuses restart --prod of a service running in development mode, before stopping anything', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt } },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /api was started in development mode/);
+    await assert.rejects(commandRestart(parseArgs(['--prod'], 'restart')), /api was started in development mode/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+
+    // Same mode: the guard passes and restart reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /restart could not stop/);
+  });
+
   it('points the user at the down/up sequence that does work', async () => {
     await assert.rejects(commandRestart(parseArgs(['k8s'], 'restart')), /portler down k8s.*portler up k8s/s);
   });

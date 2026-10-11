@@ -167,7 +167,7 @@ export async function pidInfoFor(
     url: assignment?.url,
     dockerContainer: service.docker?.containerName,
     dockerNetwork: service.docker ? config.dockerNetwork : undefined,
-    prod: config.production ? true : undefined,
+    prod: config.production === true,
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
   };

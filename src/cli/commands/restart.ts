@@ -2,7 +2,7 @@ import { loadConfig } from '../../config/index.ts';
 import { readPids, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import { parseRunMode, selectServiceNames } from '../services.ts';
+import { parseRunMode, expandAndOrderServices, selectServiceNames } from '../services.ts';
 import { startPhase } from './up.ts';
 
 /**
@@ -12,9 +12,10 @@ import { startPhase } from './up.ts';
  * reservations and services keep their ports whenever they are still free.
  * Dependencies that are not running are started too; dependencies that are
  * still running are left untouched. `--prod` restarts with the production
- * overrides, exactly like `up --prod`; a service that was started with
- * `--prod` refuses a plain restart so a routine restart cannot flip a
- * production stack back to development.
+ * overrides, exactly like `up --prod`. restart keeps the mode a service was
+ * started in: a production service refuses a plain restart and a development
+ * one refuses `restart --prod`, so a routine restart can neither flip a stack
+ * to the other mode nor mix the two modes in one dependency graph.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -39,17 +40,31 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
   // stopped and starts them itself, and this restart then starts them again.
   // restart always detaches, so the lock is released as soon as startup is done.
   return withLifecycleLock(rawConfig.projectDir, async () => {
-    // A service started with --prod must not be relaunched in development mode
-    // by a routine restart: its dev command, setup and env would replace the
-    // production ones without a word. Checked before anything is stopped.
+    // restart keeps the mode a service was started in. A service started with
+    // --prod must not be relaunched in development mode by a routine restart
+    // (its dev command, setup and env would replace the production ones
+    // without a word), and a development service must not be relaunched with
+    // --prod either: the dependencies this restart leaves running would stay
+    // in development next to it. The check covers every service the restart
+    // touches, the roots it stops and the running dependencies it skips, and
+    // runs before anything is stopped. Switching modes is down and then up.
+    // Entries without `prod` predate the field and count as development.
     const before = await readPids(rawConfig.projectDir);
-    const stopping = requested.length > 0 ? requestedRootNames : Object.keys(before?.services ?? {});
-    const prodStarted = stopping.filter((name) => before?.services[name]?.prod === true);
+    const running = before?.services ?? {};
+    const involved = expandAndOrderServices(rawConfig, requestedRootNames).filter((name) => running[name] !== undefined);
+    const prodStarted = involved.filter((name) => running[name]?.prod === true);
+    const devStarted = involved.filter((name) => running[name]?.prod !== true);
     if (!args.prod && prodStarted.length > 0) {
       throw new Error(
-        `${prodStarted.join(', ')} ${prodStarted.length === 1 ? 'was' : 'were'} started with --prod; a plain restart would ` +
-          'relaunch in development mode. Pass --prod to restart in production mode, or run "portler down" and then ' +
+        `${prodStarted.join(', ')} ${prodStarted.length === 1 ? 'was' : 'were'} started with --prod, and restart keeps the ` +
+          'mode a service was started in. Pass --prod to restart in production mode, or run "portler down" and then ' +
           '"portler up" to switch modes.',
+      );
+    }
+    if (args.prod && devStarted.length > 0) {
+      throw new Error(
+        `${devStarted.join(', ')} ${devStarted.length === 1 ? 'was' : 'were'} started in development mode, and restart keeps ` +
+          'the mode a service was started in. Run "portler down" and then "portler up --prod" to switch modes.',
       );
     }
 

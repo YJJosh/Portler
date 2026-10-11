@@ -12,7 +12,7 @@ portler restart [docker] [service...] [--prod]
 - Restarted services keep their previously assigned ports whenever they are still free.
 - `portler restart api` restarts a single service: dependencies that are **not** running are started too; running ones are left untouched.
 - `portler restart docker api` restarts in [Docker mode](/guide/docker#docker-mode-portler-up-docker).
-- `portler restart api --prod` restarts with the production overrides, like `up --prod`. A service that was started with `--prod` refuses a plain `restart` and asks for the flag, so a routine restart cannot flip a production stack back to development. Switching modes is `down` and then `up`.
+- `portler restart api --prod` restarts with the production overrides, like `up --prod`. `restart` keeps the mode a service was started in: a service started with `--prod` refuses a plain `restart`, and a service running in development mode refuses `restart --prod`. The check covers the dependencies a restart leaves running too, so a routine restart can neither flip a production stack back to development nor put a production service on top of development dependencies. Switching modes is `down` and then `up`.
 
 ::: warning No Kubernetes mode
 `portler restart k8s` is rejected. Restarting a Kubernetes stack has to re-apply manifests and re-establish port-forwards, which `restart` does not do. Run the two steps instead:

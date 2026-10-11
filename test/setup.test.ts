@@ -444,6 +444,48 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('restart --prod refuses to put a production service on top of development dependencies', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`);
+    try {
+      await commandUp(parseArgs(['api', '-d'], 'up'));
+      assert.deepEqual(await lines(), ['dev', 'dev']);
+      assert.equal((await readPids(dir))?.services.db?.prod, false, 'development is recorded explicitly');
+
+      // restart skips the running db, so db would stay in development while api
+      // came back in production: refused before anything is stopped.
+      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db, api were started in development mode/);
+      assert.deepEqual(await lines(), ['dev', 'dev'], 'nothing was restarted');
+
+      // Same mode: api restarts and db is left running.
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('auto-setup waits for dependencies and respects force/skip across up cycles', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import http from 'node:http';
