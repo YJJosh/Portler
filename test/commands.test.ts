@@ -129,7 +129,8 @@ describe('restart', () => {
       startedAt,
       services: {
         // db is alive (this process stands in for it) and not named, so `restart api` leaves it running.
-        db: { pid: process.pid, command: 'db', cwd: projectDir, startedAt },
+        // A top-level `image:` service always runs in Docker, so its entry carries the container name.
+        db: { pid: process.pid, command: 'db', cwd: projectDir, startedAt, dockerContainer: 'portler-test-db' },
         // api is a stale entry; a restart that got as far as stopping would have pruned it.
         api: { pid: 4_194_303, command: 'api', cwd: projectDir, startedAt },
       },
