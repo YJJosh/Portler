@@ -92,7 +92,7 @@ export async function runSetupStep(
   let ran = 0;
   for (const [index, step] of steps.entries()) {
     if (step.ifMissing !== undefined && (await pathExists(path.resolve(cwd, step.ifMissing)))) {
-      process.stdout.write(`[portler] setup ${name}: skip "${step.run}" (${step.ifMissing} exists)\n`);
+      process.stdout.write(`[portler] setup ${name}: skip ${step.run} (${step.ifMissing} exists)\n`);
       continue;
     }
     const fingerprint = fingerprints[index];

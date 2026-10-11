@@ -12,7 +12,7 @@ portler setup docker [service...] [--prod]
 - Each entry is a shell command, or a `{run, if_missing}` / `{run, always}` step; lists run sequentially. Output is inherited, with a heading naming each step and command. The first failure stops setup and reports its command and exit code.
 - Top-level setup receives process env, `use_env` files, then top-level `env`. Service setup receives the same resolved env and `port_env` values as `up`.
 - Allocates/reuses development port assignments like `env`. This writes `.portler/state.json` and may reserve ports, but starts no services, containers or proxy.
-- Writes a receipt per successful plain step to [`.portler/setup.json`](/reference/generated-files), so a subsequent `up` skips it. Explicit `setup` **ignores receipts**: every plain step and every `always` step runs. An `if_missing` step still skips while its path exists (`skip "<command>" (<path> exists)`); delete the path to run it again.
+- Writes a receipt per successful plain step to [`.portler/setup.json`](/reference/generated-files), so a subsequent `up` skips it. Explicit `setup` **ignores receipts**: every plain step and every `always` step runs. An `if_missing` step still skips while its path exists (`skip <command> (<path> exists)`); delete the path to run it again.
 - With `--prod`, uses production setup and env overrides. With `docker`, resolves Docker-mode env; setup still runs **on the host**, never inside containers.
 
 `use_env` files are read **before** the top-level setup runs, so a setup step cannot create or refresh a listed env file for the same invocation; such files must already exist (with `--prod`, a missing file is skipped).
