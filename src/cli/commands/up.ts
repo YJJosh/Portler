@@ -249,8 +249,10 @@ export async function startPhase(
     }
 
     const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
+    // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
+    // must not keep a receipt that a later normal up would trust.
+    await pruneSetupReceipts(config, setupMode);
     if (options.setup !== false) {
-      await pruneSetupReceipts(config, setupMode);
       await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, options.setup);
     }
 

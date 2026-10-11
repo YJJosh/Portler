@@ -60,7 +60,9 @@ function injectPortEnv(env: EnvMap, service: ServiceConfig, assignment: ServiceA
  * wins over portler.yml instead: root config env, the service's own env, base
  * `.env` files, then the current process env. Generated PORTLER_* values and
  * `port_env` keys stay Portler's own in both orders, and containers receive the
- * same set of keys; only the values differ.
+ * same set of keys; only the values differ. A key the deployment supplies is not
+ * resolved from config at all, so a reference that only works in development
+ * cannot block the deployment's value.
  */
 export function buildServiceEnv(
   config: PortlerConfig,
@@ -69,17 +71,23 @@ export function buildServiceEnv(
   generatedEnv: EnvMap,
   assignments: Assignments,
 ): ServiceEnv {
-  const rootEnv = resolveEnvMap(config.env, assignments);
-  const serviceEnv = resolveEnvMap(service.env, assignments);
+  const processEnv = processEnvAsMap();
+  // In production a key the deployment supplies (process env or use_env file) is left out
+  // of resolution: its config value never applies, and a reference that only resolves in
+  // development (a service with no assignment here) must not block the deployment's value.
+  const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]) : undefined;
+  const rootEnv = resolveEnvMap(config.env, assignments, overridden);
+  const serviceEnv = resolveEnvMap(service.env, assignments, overridden);
   const env: EnvMap = config.production
-    ? { ...rootEnv, ...serviceEnv, ...baseEnv, ...processEnvAsMap(), ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
-    : { ...processEnvAsMap(), ...baseEnv, ...rootEnv, ...generatedEnv, ...serviceEnv, PORTLER_SERVICE_NAME: service.name };
+    ? { ...rootEnv, ...serviceEnv, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
+    : { ...processEnv, ...baseEnv, ...rootEnv, ...generatedEnv, ...serviceEnv, PORTLER_SERVICE_NAME: service.name };
 
+  // Raw config keys, so an overridden key still reaches containers with the deployment's value.
   const explicitKeys = new Set<string>([
     ...Object.keys(baseEnv),
-    ...Object.keys(rootEnv),
+    ...Object.keys(config.env),
     ...Object.keys(generatedEnv),
-    ...Object.keys(serviceEnv),
+    ...Object.keys(service.env),
     'PORTLER_SERVICE_NAME',
   ]);
 

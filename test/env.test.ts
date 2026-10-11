@@ -236,6 +236,30 @@ describe('buildServiceEnv', () => {
     }
   });
 
+  it('does not resolve config values the deployment overrides in production', () => {
+    const service = makeService({ env: { DB_URL: 'missing.url', KEEP: 'api.url' } });
+    const config = makeConfig({ api: service }, { ROOT_URL: 'missing.url' });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    // Development: config wins, so the dangling reference is a config error even with a file value.
+    assert.throws(() => buildServiceEnv(config, service, { DB_URL: 'file', ROOT_URL: 'file' }, generated, assignments), /cannot resolve|no assigned port/);
+    const prod = { ...config, production: true };
+    // Production without anything overriding it: still a config error.
+    assert.throws(() => buildServiceEnv(prod, service, {}, generated, assignments), /cannot resolve|no assigned port/);
+    const saved = process.env.ROOT_URL;
+    process.env.ROOT_URL = 'shell';
+    try {
+      const { env, explicitKeys } = buildServiceEnv(prod, service, { DB_URL: 'file' }, generated, assignments);
+      assert.equal(env.DB_URL, 'file', 'the use_env file replaces the unresolvable config value');
+      assert.equal(env.ROOT_URL, 'shell', 'the process env replaces the unresolvable config value');
+      assert.equal(env.KEEP, 'http://localhost:52001', 'other config values still resolve');
+      assert.equal(explicitKeys.has('DB_URL') && explicitKeys.has('ROOT_URL'), true, 'overridden keys still reach containers');
+    } finally {
+      if (saved === undefined) delete process.env.ROOT_URL;
+      else process.env.ROOT_URL = saved;
+    }
+  });
+
   it('gives Docker services their declared internal port in port_env', () => {
     const service = makeService({
       port: 5432,

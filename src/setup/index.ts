@@ -111,13 +111,15 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
 /**
  * Environment for top-level setup steps: the process env, base `.env` files,
  * then root config env. In production the deployment wins instead: root config
- * env, base `.env` files, then the process env.
+ * env, base `.env` files, then the process env, and a key the deployment
+ * supplies is not resolved from config at all (see buildServiceEnv).
  */
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
-  const rootEnv = resolveEnvMap(config.env, assignments);
-  return (config.production
-    ? { ...rootEnv, ...baseEnv, ...process.env }
-    : { ...process.env, ...baseEnv, ...rootEnv }) as EnvMap;
+  if (config.production) {
+    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env)]);
+    return { ...resolveEnvMap(config.env, assignments, overridden), ...baseEnv, ...process.env } as EnvMap;
+  }
+  return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
 }
 
 /**

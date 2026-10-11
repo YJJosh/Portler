@@ -305,6 +305,13 @@ services:
     }
   });
 
+  it('does not resolve a project env value the deployment overrides in production', async () => {
+    const cfg = await config('env: {BAD: missing.url}\nservices: {api: {command: echo}}');
+    assert.throws(() => buildProjectEnv(cfg, { BAD: 'file' }, {}), /cannot resolve|no assigned port/);
+    assert.throws(() => buildProjectEnv(applyProduction(cfg, true), {}, {}), /cannot resolve|no assigned port/);
+    assert.equal(buildProjectEnv(applyProduction(cfg, true), { BAD: 'file' }, {}).BAD, 'file');
+  });
+
   it('does not reuse success receipts copied from another checkout', async () => {
     const cfg = await config('setup: echo root >> steps\nservices: {api: {command: echo}}');
     await runSetupStep(cfg, null, {}, 'local:dev');
@@ -368,6 +375,35 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       await config(`services:\n${api}${web}`);
       await commandUp(parseArgs(['api', '-d'], 'up'));
       assert.deepEqual(await lines(), ['api', 'api']);
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('reconciles receipts under --no-setup, so a step removed during such a run loses its receipt', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const app = '  app:\n    command: node server.mjs\n    port: 3000\n    port_env: PORT\n';
+    const statePath = path.join(dir, '.portler/setup.json');
+    const receipts = async () => JSON.parse(await fs.readFile(statePath, 'utf8')).steps['local:dev:project'] ?? [];
+    try {
+      await config(`setup: echo root >> steps\nservices:\n${app}`);
+      await commandUp(parseArgs(['app', '-d'], 'up'));
+      assert.deepEqual(await lines(), ['root']);
+      assert.equal((await receipts()).length, 1);
+      await commandDown(parseArgs([], 'down'));
+
+      await config(`services:\n${app}`);
+      await commandUp(parseArgs(['app', '-d', '--no-setup'], 'up'));
+      assert.deepEqual(await lines(), ['root'], 'no setup command ran');
+      assert.deepEqual(await receipts(), [], 'the removed step lost its receipt anyway');
+      await commandDown(parseArgs([], 'down'));
+
+      await config(`setup: echo root >> steps\nservices:\n${app}`);
+      await commandUp(parseArgs(['app', '-d'], 'up'));
+      assert.deepEqual(await lines(), ['root', 'root'], 'the step added back runs again');
     } finally {
       await commandDown(parseArgs([], 'down'));
     }

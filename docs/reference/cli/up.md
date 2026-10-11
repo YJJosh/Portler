@@ -32,7 +32,7 @@ portler up k8s [service...] [--detach]
 | --- | --- |
 | `--prod` | Use production setup, command and env overrides (local/Docker only) |
 | `--setup` | Run every plain setup step of the selection, dependencies and root included, ignoring receipts. `if_missing` steps still skip while their path exists |
-| `--no-setup` | Skip setup entirely; cannot be combined with `--setup` |
+| `--no-setup` | Run no setup command (receipts are still reconciled); cannot be combined with `--setup` |
 | `-d, --detach` | Start in the background; local service output is captured to `.portler/logs/` |
 | `--volume-set <name>` | Run against the `--<name>` variants of all managed `@` volumes ([volume sets](/guide/volumes#volume-sets)); env fallback `PORTLER_VOLUME_SET` |
 | `-f, --file <path>` | Use a specific portler.yml |
