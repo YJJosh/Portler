@@ -1,7 +1,7 @@
 import { configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { applyProduction } from '../../config/production.ts';
 import { buildServiceEnv } from '../../env/index.ts';
-import { buildProjectEnv, runSetupStep } from '../../setup/index.ts';
+import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, validateDockerMode } from '../services.ts';
@@ -18,6 +18,7 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     const { assignments, generatedEnv } = await ensureAssignments(config);
     const baseEnv = await loadBaseEnv(config, { allowMissing: args.prod });
     const setupMode = `${mode}:${args.prod ? 'prod' : 'dev'}`;
+    await pruneSetupReceipts(config, setupMode);
     await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, true);
     for (const name of names) {
       const service = config.services[name]!;

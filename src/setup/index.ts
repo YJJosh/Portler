@@ -44,6 +44,29 @@ export function isPlainSetupStep(step: SetupStep): boolean {
   return step.ifMissing === undefined && step.always !== true;
 }
 
+/**
+ * Drops the receipts in `mode` whose owner is gone: a service that left the
+ * config, or an owner with no steps left in this mode. Callers run it before
+ * the owners of a run, so a service that is removed and later re-added with the
+ * same step runs it again instead of inheriting its old success. Other modes'
+ * receipts are not touched; their step lists are not known here. Writes only
+ * when something was dropped. Caller holds the lifecycle lock.
+ */
+export async function pruneSetupReceipts(config: PortlerConfig, mode: string): Promise<void> {
+  const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
+  const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
+  if (previous?.version !== 2 || previous.project !== config.projectDir) return;
+  const live = new Set<string>();
+  if (config.setup?.length) live.add(`${mode}:project`);
+  for (const service of Object.values(config.services)) {
+    if (service.setup?.length) live.add(`${mode}:service:${service.name}`);
+  }
+  const stale = Object.keys(previous.steps).filter((key) => key.startsWith(`${mode}:`) && !live.has(key));
+  if (stale.length === 0) return;
+  for (const key of stale) delete previous.steps[key];
+  await writeJsonFile(filePath, previous);
+}
+
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
   return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
 }

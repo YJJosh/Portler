@@ -1,6 +1,6 @@
 import { configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction } from '../../config/production.ts';
-import { buildProjectEnv, runSetupStep } from '../../setup/index.ts';
+import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -250,6 +250,7 @@ export async function startPhase(
 
     const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
     if (options.setup !== false) {
+      await pruneSetupReceipts(config, setupMode);
       await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, options.setup);
     }
 

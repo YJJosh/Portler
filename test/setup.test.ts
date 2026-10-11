@@ -8,13 +8,15 @@ import { commandUp } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
-import { buildProjectEnv, isPlainSetupStep, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
+import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
 let oldGlobal: string | undefined;
 beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'portler-setup-'));
+  // Resolved path: process.cwd() resolves symlinks (macOS /var -> /private/var)
+  // and receipts are keyed by the checkout path the command resolved.
+  dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-setup-')));
   oldCwd = process.cwd();
   oldGlobal = process.env.PORTLER_GLOBAL_DIR;
   process.env.PORTLER_GLOBAL_DIR = path.join(dir, 'global');
@@ -242,6 +244,63 @@ services:
     await fs.writeFile(statePath, JSON.stringify(state));
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['root', 'root']);
+  });
+
+  it('prunes the receipts of owners that left the config, per mode', async () => {
+    const cfg = await config('setup: echo root >> steps\nservices: {api: {command: echo, setup: echo api >> steps}}');
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await runSetupStep(cfg, cfg.services.api!, {}, 'local:dev');
+    await runSetupStep(cfg, cfg.services.api!, {}, 'local:prod');
+    const statePath = path.join(dir, '.portler/setup.json');
+    const keys = async () => Object.keys(JSON.parse(await fs.readFile(statePath, 'utf8')).steps).sort();
+    assert.deepEqual(await keys(), ['local:dev:project', 'local:dev:service:api', 'local:prod:service:api']);
+
+    // api left the config: explicit setup reconciles the dev receipts before it
+    // runs what is left; the prod receipt belongs to another mode and stays.
+    await config('setup: echo root >> steps\nservices: {web: {command: echo}}');
+    await commandSetup(parseArgs([], 'setup'));
+    assert.deepEqual(await keys(), ['local:dev:project', 'local:prod:service:api']);
+
+    // Back with the same step, api runs again instead of looking done.
+    await runSetupStep(cfg, cfg.services.api!, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['root', 'api', 'api', 'root', 'api']);
+
+    // An owner that merely lost its steps is pruned too; nothing to prune writes nothing.
+    const bare = await config('services: {web: {command: echo}}');
+    await pruneSetupReceipts(bare, 'local:dev');
+    assert.deepEqual(await keys(), ['local:prod:service:api']);
+    await fs.rm(statePath);
+    await pruneSetupReceipts(bare, 'local:dev');
+    await assert.rejects(fs.access(statePath));
+  });
+
+  it('a service removed between up cycles runs its setup again when it comes back', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const api = '  api:\n    command: node server.mjs\n    setup: echo api >> steps\n    port: 4000\n    port_env: PORT\n';
+    const web = '  web:\n    command: node server.mjs\n    port: 3000\n    port_env: PORT\n';
+    const statePath = path.join(dir, '.portler/setup.json');
+    const keys = async () => Object.keys(JSON.parse(await fs.readFile(statePath, 'utf8')).steps);
+    try {
+      await config(`services:\n${api}${web}`);
+      await commandUp(parseArgs(['api', '-d'], 'up'));
+      assert.deepEqual(await lines(), ['api']);
+      assert.deepEqual(await keys(), ['local:dev:service:api']);
+      await commandDown(parseArgs([], 'down'));
+
+      await config(`services:\n${web}`);
+      await commandUp(parseArgs(['web', '-d'], 'up'));
+      assert.deepEqual(await keys(), [], 'the removed service loses its receipt on the next up');
+      await commandDown(parseArgs([], 'down'));
+
+      await config(`services:\n${api}${web}`);
+      await commandUp(parseArgs(['api', '-d'], 'up'));
+      assert.deepEqual(await lines(), ['api', 'api']);
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
   });
 
   it('auto-setup waits for dependencies and respects force/skip across up cycles', async () => {

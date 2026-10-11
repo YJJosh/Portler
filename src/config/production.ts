@@ -10,14 +10,17 @@ const SETUP_STEP_KEYS = ['run', 'if_missing', 'always'];
  */
 export function normalizeSetup(value: unknown, name: string): SetupStep[] | undefined {
   if (value === undefined) return undefined;
-  if (typeof value === 'string') return [{ run: value }];
+  if (typeof value === 'string') return [normalizeSetupStep(value, name)];
   if (isObject(value)) return [normalizeSetupStep(value, name)];
   if (!Array.isArray(value)) throw new Error(`${name} must be a string or a list of commands and {run, if_missing, always} steps`);
   return value.map((item, index) => normalizeSetupStep(item, `${name}[${index}]`));
 }
 
 function normalizeSetupStep(item: unknown, name: string): SetupStep {
-  if (typeof item === 'string') return { run: item };
+  if (typeof item === 'string') {
+    if (item.trim() === '') throw new Error(`${name} must be a shell command`);
+    return { run: item };
+  }
   if (!isObject(item)) throw new Error(`${name} must be a command string or a {run, if_missing, always} step`);
   for (const key of Object.keys(item)) {
     if (!SETUP_STEP_KEYS.includes(key)) throw new Error(`unknown key "${name}.${key}"; allowed keys: ${SETUP_STEP_KEYS.join(', ')}`);
