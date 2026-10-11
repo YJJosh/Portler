@@ -32,8 +32,8 @@ function isSetupState(value: unknown): value is SetupState {
 
 /**
  * What a plain step's receipt stands for: this command, in this cwd, in this
- * mode; `occurrence` tells identical commands in one list apart (0 for the
- * first).
+ * mode; `occurrence` tells identical commands in one list apart: how many
+ * earlier entries of the list, of any kind, run the same command.
  */
 export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0): string {
   return createHash('sha256').update(JSON.stringify({ command, cwd, mode, occurrence })).digest('hex');
@@ -45,26 +45,60 @@ export function isPlainSetupStep(step: SetupStep): boolean {
 }
 
 /**
- * Drops the receipts in `mode` whose owner is gone: a service that left the
- * config, or an owner with no steps left in this mode. Callers run it before
- * the owners of a run, so a service that is removed and later re-added with the
- * same step runs it again instead of inheriting its old success. Other modes'
- * receipts are not touched; their step lists are not known here. Writes only
- * when something was dropped. Caller holds the lifecycle lock.
+ * Fingerprints of the plain steps of one list, in list order; `undefined` for
+ * guarded and `always` entries. The occurrence counts every earlier entry
+ * with the same command, whatever its kind, so a receipt stays with its own
+ * entry when a neighbour changes kind instead of moving to another one.
+ */
+function plainFingerprints(steps: SetupStep[], cwd: string, mode: string): (string | undefined)[] {
+  const seen = new Map<string, number>();
+  return steps.map((step) => {
+    const occurrence = seen.get(step.run) ?? 0;
+    seen.set(step.run, occurrence + 1);
+    return isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode, occurrence) : undefined;
+  });
+}
+
+/**
+ * Reconciles the receipts in `mode` with the whole config, not only with the
+ * owners of a run: receipts of an owner that is gone (a service that left the
+ * config, or one with no steps left in this mode) are dropped, and every live
+ * owner keeps only the receipts of steps it still declares. Callers run it
+ * before the owners of a run, so a step that left a definition is forgotten
+ * even while its owner is not selected, and a service that is removed and
+ * later re-added with the same step runs it again. Other modes' receipts are
+ * not touched; their step lists are not known here. Writes only when
+ * something was dropped. Caller holds the lifecycle lock.
  */
 export async function pruneSetupReceipts(config: PortlerConfig, mode: string): Promise<void> {
   const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
   const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
   if (previous?.version !== 2 || previous.project !== config.projectDir) return;
-  const live = new Set<string>();
-  if (config.setup?.length) live.add(`${mode}:project`);
+  const owners: [string, SetupStep[] | undefined, string][] = [['project', config.setup, config.projectDir]];
   for (const service of Object.values(config.services)) {
-    if (service.setup?.length) live.add(`${mode}:service:${service.name}`);
+    owners.push([`service:${service.name}`, service.setup, resolveServiceCwd(config, service)]);
   }
-  const stale = Object.keys(previous.steps).filter((key) => key.startsWith(`${mode}:`) && !live.has(key));
-  if (stale.length === 0) return;
-  for (const key of stale) delete previous.steps[key];
-  await writeJsonFile(filePath, previous);
+  const live = new Map<string, Set<string>>();
+  for (const [name, steps, cwd] of owners) {
+    if (!steps?.length) continue;
+    const current = plainFingerprints(steps, cwd, mode).filter((fingerprint): fingerprint is string => fingerprint !== undefined);
+    live.set(`${mode}:${name}`, new Set(current));
+  }
+  let changed = false;
+  for (const [key, recorded] of Object.entries(previous.steps)) {
+    if (!key.startsWith(`${mode}:`) || !Array.isArray(recorded)) continue;
+    const current = live.get(key);
+    if (current === undefined) {
+      delete previous.steps[key];
+      changed = true;
+      continue;
+    }
+    const kept = recorded.filter((fingerprint) => current.has(fingerprint));
+    if (kept.length === recorded.length) continue;
+    previous.steps[key] = kept;
+    changed = true;
+  }
+  if (changed) await writeJsonFile(filePath, previous);
 }
 
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
@@ -114,15 +148,8 @@ export async function runSetupStep(
 
   // Receipts of steps that are no longer defined are dropped, and a forced
   // run drops every receipt BEFORE anything runs, so a failure in a forced
-  // rerun cannot leave an old success masking it. Identical commands in one
-  // list are separate steps: the receipt carries the occurrence.
-  const seen = new Map<string, number>();
-  const fingerprints = steps.map((step) => {
-    if (!isPlainSetupStep(step)) return undefined;
-    const occurrence = seen.get(step.run) ?? 0;
-    seen.set(step.run, occurrence + 1);
-    return setupFingerprint(step.run, cwd, mode, occurrence);
-  });
+  // rerun cannot leave an old success masking it.
+  const fingerprints = plainFingerprints(steps, cwd, mode);
   const recorded = force ? new Set<string>() : new Set(state.steps[key] ?? []);
   const done = new Set(fingerprints.filter((fingerprint): fingerprint is string => fingerprint !== undefined && recorded.has(fingerprint)));
   const persist = async (): Promise<void> => {

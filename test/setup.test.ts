@@ -97,6 +97,39 @@ describe('setup', () => {
     assert.equal(JSON.parse(await fs.readFile(statePath, 'utf8')).version, 2);
   });
 
+  it('numbers identical commands across every kind of entry, so a receipt stays with its entry', async () => {
+    const cfg = await config('setup: echo same >> steps\nservices: {api: {command: echo}}');
+    await fs.writeFile(path.join(dir, 'present'), '');
+    cfg.setup = [{ run: 'echo same >> steps', ifMissing: 'present' }, { run: 'echo same >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['same']);
+    const statePath = path.join(dir, '.portler/setup.json');
+    const second = setupFingerprint('echo same >> steps', dir, 'local:dev', 1);
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, { 'local:dev:project': [second] });
+    // Dropping the guard enables the first entry: it runs as occurrence 0,
+    // while the second entry keeps its receipt instead of handing it over.
+    cfg.setup = [{ run: 'echo same >> steps' }, { run: 'echo same >> steps' }];
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['same', 'same']);
+    const first = setupFingerprint('echo same >> steps', dir, 'local:dev', 0);
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps['local:dev:project'].sort(), [first, second].sort());
+  });
+
+  it('reconciles the receipts of live owners that are not part of the run', async () => {
+    const cfg = await config('services:\n  api:\n    command: echo\n    setup: echo A >> steps\n  web:\n    command: echo\n');
+    const api = cfg.services.api;
+    await runSetupStep(cfg, api, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['A']);
+    // The step changes while only other owners run (`up web`), then changes
+    // back: the old success must not be inherited.
+    api.setup = [{ run: 'echo B >> steps' }];
+    await pruneSetupReceipts(cfg, 'local:dev');
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8')).steps, { 'local:dev:service:api': [] });
+    api.setup = [{ run: 'echo A >> steps' }];
+    await runSetupStep(cfg, api, {}, 'local:dev');
+    assert.deepEqual(await lines(), ['A', 'A']);
+  });
+
   it('gives identical commands in one list their own receipts', async () => {
     const cfg = await config('setup: [echo same >> steps, echo same >> steps]\nservices: {api: {command: echo}}');
     await runSetupStep(cfg, null, {}, 'local:dev');
