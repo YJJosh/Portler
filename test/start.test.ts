@@ -75,6 +75,29 @@ services:
     await assert.rejects(buildStartEnv(cfg, api, { SHARED: 'missing.url' }, {}), /^Error: use_env\.SHARED: cannot resolve/);
   });
 
+  it('keeps generated values and port_env above stale platform values', async () => {
+    const cfg = await config(`services:
+  api:
+    command: echo
+    port: 4000
+    port_env: [PORT, API_PORT]
+  web:
+    command: echo
+    port: 3000
+`);
+    const api = cfg.services.api!;
+    // A shell that still carries another Portler run's variables must not leak them in.
+    const env = await buildStartEnv(cfg, api, {}, {
+      PORT: '5123', API_PORT: '1', PORTLER_API_URL: 'stale', PORTLER_WEB_URL: 'stale', PORTLER_SERVICE_NAME: 'web', KEEP: 'platform',
+    });
+    assert.equal(env.PORT, '5123'); // the platform's PORT selects the port...
+    assert.equal(env.API_PORT, '5123'); // ...and every port_env name follows that choice
+    assert.match(env.PORTLER_API_URL!, /:5123$/);
+    assert.match(env.PORTLER_WEB_URL!, /:3000$/);
+    assert.equal(env.PORTLER_SERVICE_NAME, 'api');
+    assert.equal(env.KEEP, 'platform');
+  });
+
   it('falls back to the declared port and then a free port', async () => {
     const cfg = await config('services: {api: {command: echo, port: 4000, port_env: PORT}}');
     const api = cfg.services.api!;

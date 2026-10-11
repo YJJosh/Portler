@@ -55,7 +55,7 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  // The deployment wins: the platform env (applied below), then the use_env file, then config.
+  // The deployment wins over portler.yml: the platform env (applied below), then the use_env file, then config.
   const configured = { ...config.env, ...service.env, ...baseEnv };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
@@ -68,11 +68,14 @@ export async function buildStartEnv(
       throw new Error(`${source}.${key}: ${(error as Error).message}`);
     }
   }
-  Object.assign(env, buildGeneratedEnv(assignments), { PORTLER_SERVICE_NAME: service.name });
-  for (const key of service.portEnv) env[key] = String(port);
   for (const [key, value] of Object.entries(platformEnv)) {
     if (value !== undefined) env[key] = value;
   }
+  // Portler's own values go on top of the platform's: generated PORTLER_* values,
+  // PORTLER_SERVICE_NAME and the port_env names are derived from the chosen port (which the
+  // platform's PORT selected above), so a stale PORTLER_* value in the shell cannot replace them.
+  Object.assign(env, buildGeneratedEnv(assignments), { PORTLER_SERVICE_NAME: service.name });
+  for (const key of service.portEnv) env[key] = String(port);
   return env;
 }
 
