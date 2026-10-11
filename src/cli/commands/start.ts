@@ -62,17 +62,19 @@ export async function buildStartEnv(
   const configured = { ...config.env, ...service.env };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
-    if (platformEnv[key] !== undefined || key in baseEnv) continue;
+    // Own-property checks: `toString` or `constructor` are valid variable names, and a
+    // plain `in` or index lookup would find the inherited Object.prototype member instead.
+    if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key)) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
       env[key] = resolveEnvValue(value, assignments);
     } catch (error) {
-      const source = key in service.env ? `services.${service.name}.env` : 'env';
+      const source = Object.hasOwn(service.env, key) ? `services.${service.name}.env` : 'env';
       throw new Error(`${source}.${key}: ${(error as Error).message}`);
     }
   }
   for (const [key, value] of Object.entries(baseEnv)) {
-    if (platformEnv[key] === undefined) env[key] = value;
+    if (!Object.hasOwn(platformEnv, key) || platformEnv[key] === undefined) env[key] = value;
   }
   for (const [key, value] of Object.entries(platformEnv)) {
     if (value !== undefined) env[key] = value;

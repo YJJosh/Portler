@@ -132,6 +132,47 @@ describe('restart', () => {
     await assert.rejects(main(['restart', 'api', '--setup']), /restart could not stop/);
   });
 
+  it('refuses a plain restart of a service running in Docker, and restart docker of a local process', async () => {
+    // api runs as a local process under plain `up` and as a container under `up docker`.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  api:', '    command: node -e ""', '    port: 3000', '    docker:', '      image: node:22-alpine'].join('\n'),
+      'utf8',
+    );
+    const startedAt = new Date().toISOString();
+    const seed = (dockerContainer?: string) =>
+      writePids(projectDir, {
+        version: 1,
+        project: projectDir,
+        startedAt,
+        services: {
+          api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt, ...(dockerContainer ? { dockerContainer } : {}) },
+        },
+      });
+
+    await seed('portler-test-api');
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api is running in Docker[^]*restart docker api/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+    // With `docker` the guard passes and restart reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), (error: Error) => !/running in Docker/.test(error.message));
+
+    await seed(undefined);
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), /api is running as a local process[^]*without "docker"/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+  });
+
+  it('does not mistake an Object.prototype member for a recorded service', async () => {
+    // With no pids.json, `running` is an empty object, and `running.constructor` is still Object.
+    // The guard must not report a service named constructor as a running development service.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  constructor:', '    command: node -e ""', '    port: 3000'].join('\n'),
+      'utf8',
+    );
+    // The guard passes and restart goes on to start the service, whose command exits at once.
+    await assert.rejects(commandRestart(parseArgs(['constructor', '--prod'], 'restart')), (error: Error) => !/development mode/.test(error.message));
+  });
+
   it('refuses restart --prod of a service running in development mode, before stopping anything', async () => {
     const startedAt = new Date().toISOString();
     await writePids(projectDir, {

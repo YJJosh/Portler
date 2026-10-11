@@ -82,6 +82,25 @@ services:
     delete api.env.BROKEN;
   });
 
+  it('treats toString and constructor as ordinary variable names', async () => {
+    // Object.prototype members are valid variable names. A plain `in` or index lookup on the
+    // platform or file map found the inherited member and silently dropped the config value.
+    const cfg = await config(`env: {toString: root-string}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {constructor: service-ctor}
+`);
+    const api = cfg.services.api!;
+    const env = await buildStartEnv(cfg, api, {}, {});
+    assert.equal(env.toString, 'root-string');
+    assert.equal(env.constructor, 'service-ctor');
+    // The usual order still holds for such a name: file over config, platform over file.
+    assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, {})).constructor, 'file');
+    assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, { constructor: 'platform' })).constructor, 'platform');
+  });
+
   it('keeps generated values and port_env above stale platform values', async () => {
     const cfg = await config(`services:
   api:

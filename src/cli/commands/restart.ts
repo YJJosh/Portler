@@ -1,4 +1,4 @@
-import { loadConfig } from '../../config/index.ts';
+import { configForRunMode, loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { readPids, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
@@ -59,7 +59,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // proxy's entry is Portler's own and carries no mode.
     const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
     const involved = [...new Set([...expandAndOrderServices(rawConfig, requestedRootNames), ...stopping])].filter(
-      (name) => running[name] !== undefined,
+      (name) => Object.hasOwn(running, name),
     );
     const prodStarted = involved.filter((name) => running[name]?.prod === true);
     const devStarted = involved.filter((name) => running[name]?.prod !== true);
@@ -74,6 +74,36 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       throw new Error(
         `${devStarted.join(', ')} ${devStarted.length === 1 ? 'was' : 'were'} started in development mode, and restart keeps ` +
           'the mode a service was started in. Run "portler down" and then "portler up --prod" to switch modes.',
+      );
+    }
+
+    // The run mode is kept the same way. A service `up docker` started from its docker:
+    // block is recorded with its container name; a plain restart would relaunch it as a
+    // local process, and a local process must not come back as a container: command, env
+    // and the addresses other services use all differ between the two. Services with a
+    // top-level image/build run in Docker in both modes and never mismatch. Services no
+    // longer in the config are only stopped, so they do not take part.
+    const modeConfig = configForRunMode(rawConfig, mode);
+    const inConfig = involved.filter((name) => Object.hasOwn(modeConfig.services, name));
+    const containerToProcess = inConfig.filter(
+      (name) => running[name]?.dockerContainer !== undefined && modeConfig.services[name]?.docker === undefined,
+    );
+    const processToContainer = inConfig.filter(
+      (name) => running[name]?.dockerContainer === undefined && modeConfig.services[name]?.docker !== undefined,
+    );
+    const again = `${requested.length > 0 ? ` ${requested.join(' ')}` : ''}${args.prod ? ' --prod' : ''}`;
+    if (containerToProcess.length > 0) {
+      throw new Error(
+        `${containerToProcess.join(', ')} ${containerToProcess.length === 1 ? 'is' : 'are'} running in Docker, and restart keeps ` +
+          `the mode a service was started in. Run "portler restart docker${again}", or "portler down" and then ` +
+          '"portler up" to switch modes.',
+      );
+    }
+    if (processToContainer.length > 0) {
+      throw new Error(
+        `${processToContainer.join(', ')} ${processToContainer.length === 1 ? 'is' : 'are'} running as a local process, and ` +
+          `restart keeps the mode a service was started in. Run "portler restart${again}" without "docker", or ` +
+          '"portler down" and then "portler up docker" to switch modes.',
       );
     }
 
