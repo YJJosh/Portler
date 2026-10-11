@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvMap, resolveEnvValue } from '../src/env/resolve.ts';
-import { buildServiceEnv } from '../src/env/service.ts';
+import { buildPrintableEnv, buildServiceEnv } from '../src/env/service.ts';
 import type { Assignments, PortlerConfig, ServiceConfig } from '../src/types/index.ts';
 
 function makeAssignments(): Assignments {
@@ -191,6 +191,19 @@ describe('buildServiceEnv', () => {
       assert.equal(explicitKeys.has(key), true, `expected explicit key ${key}`);
     }
     assert.equal(explicitKeys.has('PATH'), false);
+  });
+
+  it('keeps generated values above service env in development too, and in the printable env', () => {
+    const service = makeService({ env: { PORTLER_API_PORT: '1', PORTLER_API_URL: 'stale' } });
+    const config = makeConfig({ api: service });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+
+    const { env } = buildServiceEnv(config, service, {}, generated, assignments);
+    assert.equal(env.PORTLER_API_PORT, '52001');
+    assert.equal(env.PORTLER_API_URL, 'http://localhost:52001');
+    const printable = buildPrintableEnv(config, service, generated, assignments);
+    assert.equal(printable.PORTLER_API_PORT, '52001');
   });
 
   it('resolves service references in root and service env', () => {

@@ -63,8 +63,8 @@ Each service's final environment is composed from (lowest to highest precedence)
 1. **Your shell's environment** — everything Portler itself was started with.
 2. **`.env` files** listed in the top-level `use_env:` (loaded in order, later files win).
 3. **Top-level `env:`** from portler.yml (shared across all services).
-4. **Generated `PORTLER_*` variables** — ports, URLs, and Docker metadata for every service ([full list](/reference/environment)).
-5. **The service's own `env:`** — the final word.
+4. **The service's own `env:`** — the last word among your own values.
+5. **Generated `PORTLER_*` variables** — ports, URLs, and Docker metadata for every service ([full list](/reference/environment)). These stay Portler's own: a service `env:` entry cannot replace them.
 
 On top of that, `port_env` keys are set to the service's port. Local services receive the **assigned host port**; Docker services receive their declared **container port** (the Docker port mapping translates between the two).
 

@@ -186,7 +186,14 @@ export async function runSetupStep(
 
     process.stdout.write(`[portler] setup ${name}: ${step.run}\n`);
     ran += 1;
-    const code = await runShell(step.run, cwd, env);
+    let interrupted = undefined as NodeJS.Signals | undefined;
+    const code = await runShell(step.run, cwd, env, { onSignal: (signal) => { interrupted = signal; } });
+    // A cancelled step is not a finished step, whatever its exit code: a command that
+    // handles SIGTERM and exits 0 must not be receipted, and neither the next step nor
+    // the services behind it may run.
+    if (interrupted !== undefined) {
+      throw new Error(`setup ${name}: interrupted by ${interrupted} while running "${step.run}"; the step is not recorded as done`);
+    }
     if (code !== 0) throw new Error(`setup ${name}: command "${step.run}" failed (exit code ${code})`);
     if (fingerprint !== undefined) {
       done.add(fingerprint);

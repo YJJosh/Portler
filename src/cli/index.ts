@@ -54,7 +54,7 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     setup: new Set(['--file', '--prod']),
     start: new Set(['--file', '--prod']),
     down: new Set(['--force', '--volumes', '--file']),
-    restart: new Set(['--volume-set', '--file', '--prod']),
+    restart: new Set(['--volume-set', '--file', '--prod', '--setup', '--no-setup']),
     clean: new Set(['--global', '--ports', '--force', '--file']),
     ps: new Set(['--file']),
     logs: new Set(['--follow', '--file']),

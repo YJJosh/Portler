@@ -54,7 +54,7 @@ function injectPortEnv(env: EnvMap, service: ServiceConfig, assignment: ServiceA
 /**
  * Compose the full environment for a service, layering (lowest to highest
  * precedence): the current process env, base `.env` files, root config env,
- * generated PORTLER_* values, and the service's own env overrides.
+ * the service's own env overrides, and generated PORTLER_* values.
  *
  * In production (`config.production`, set by applyProduction) the deployment
  * wins over portler.yml instead: root config env, the service's own env, base
@@ -80,7 +80,7 @@ export function buildServiceEnv(
   const serviceEnv = resolveEnvMap(service.env, assignments, overridden);
   const env: EnvMap = config.production
     ? { ...rootEnv, ...serviceEnv, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
-    : { ...processEnv, ...baseEnv, ...rootEnv, ...generatedEnv, ...serviceEnv, PORTLER_SERVICE_NAME: service.name };
+    : { ...processEnv, ...baseEnv, ...rootEnv, ...serviceEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name };
 
   // Raw config keys, so an overridden key still reaches containers with the deployment's value.
   const explicitKeys = new Set<string>([
@@ -118,16 +118,16 @@ export function buildPrintableEnv(
 
   if (!service) {
     return {
-      ...generatedEnv,
       ...rootEnv,
+      ...generatedEnv,
     };
   }
 
   const serviceEnv = resolveEnvMap(service.env, assignments);
   const output: EnvMap = {
-    ...generatedEnv,
     ...rootEnv,
     ...serviceEnv,
+    ...generatedEnv,
     PORTLER_SERVICE_NAME: service.name,
   };
 

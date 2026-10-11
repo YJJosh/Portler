@@ -1,3 +1,6 @@
+import { fileURLToPath } from 'node:url';
+import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -483,6 +486,107 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
     } finally {
       await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('restart --no-setup restarts without running setup steps, which a server without the toolchain needs', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`setup: exit 17
+services:
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+`);
+    try {
+      await commandUp(parseArgs(['api', '-d', '--no-setup'], 'up'));
+      assert.deepEqual(await lines(), ['dev']);
+      await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev']);
+      assert.notEqual((await readPids(dir))?.services.api, undefined, 'api is running again');
+      // Without the flag, restart runs setup like up does: here that fails after api was stopped.
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /failed \(exit code 17\)/);
+    } finally {
+      await commandDown(parseArgs([], 'down')).catch(() => {});
+    }
+  });
+
+  it('a restart without names checks the mode of recorded services that left the config', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`services:
+  old:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`);
+    try {
+      await commandUp(parseArgs(['old', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['prod']);
+      await config(`services:
+  new:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+`);
+      // old is no longer in the config but is recorded in production mode, and this restart would stop it.
+      await assert.rejects(commandRestart(parseArgs([], 'restart')), /old was started with --prod/);
+      assert.deepEqual(await lines(), ['prod'], 'nothing was stopped or started');
+      assert.notEqual((await readPids(dir))?.services.old, undefined, 'old is still running');
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('a cancelled setup step is not recorded and stops the run, even when the command exits 0', async () => {
+    await fs.writeFile(path.join(dir, 'step.mjs'), `
+import fs from 'node:fs';
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { fs.writeFileSync('handled', signal); process.exit(0); });
+setInterval(() => {}, 1000);
+fs.writeFileSync('ready', 'yes');
+`);
+    await config(`setup:
+  - exec node step.mjs
+  - echo ran > later
+services: {api: {command: echo}}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      await fs.rm(path.join(dir, 'ready'), { force: true });
+      const child = spawn(process.execPath, ['--experimental-strip-types', cli, 'setup'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+      let output = '';
+      child.stdout.on('data', (chunk) => { output += chunk; });
+      child.stderr.on('data', (chunk) => { output += chunk; });
+      const exited = once(child, 'exit');
+      try {
+        for (let i = 0; i < 100 && !(await fs.access(path.join(dir, 'ready')).then(() => true, () => false)); i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        child.kill(signal);
+        const [code] = await exited;
+        assert.notEqual(code, 0, `exit code after ${signal}: ${output}`);
+        assert.match(output, /interrupted by SIG(TERM|INT)/);
+        assert.equal(await fs.readFile(path.join(dir, 'handled'), 'utf8'), signal, 'the step received the forwarded signal and exited 0');
+        await assert.rejects(fs.access(path.join(dir, 'later')), 'the next step did not run');
+        const receipts = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+        assert.deepEqual(receipts.steps['local:dev:project'] ?? [], [], 'the interrupted step has no receipt');
+      } finally {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }
     }
   });
 

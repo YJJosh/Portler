@@ -1,4 +1,5 @@
 import { loadConfig } from '../../config/index.ts';
+import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { readPids, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -15,7 +16,9 @@ import { startPhase } from './up.ts';
  * overrides, exactly like `up --prod`. restart keeps the mode a service was
  * started in: a production service refuses a plain restart and a development
  * one refuses `restart --prod`, so a routine restart can neither flip a stack
- * to the other mode nor mix the two modes in one dependency graph.
+ * to the other mode nor mix the two modes in one dependency graph. `--setup`
+ * and `--no-setup` apply to the services it starts again, like `up`: a server
+ * without the source toolchain restarts with `--no-setup`.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -51,7 +54,13 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // Entries without `prod` predate the field and count as development.
     const before = await readPids(rawConfig.projectDir);
     const running = before?.services ?? {};
-    const involved = expandAndOrderServices(rawConfig, requestedRootNames).filter((name) => running[name] !== undefined);
+    // A restart without names stops every recorded service, including ones no longer in
+    // the config; they are part of the running stack and count for the check too. The
+    // proxy's entry is Portler's own and carries no mode.
+    const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
+    const involved = [...new Set([...expandAndOrderServices(rawConfig, requestedRootNames), ...stopping])].filter(
+      (name) => running[name] !== undefined,
+    );
     const prodStarted = involved.filter((name) => running[name]?.prod === true);
     const devStarted = involved.filter((name) => running[name]?.prod !== true);
     if (!args.prod && prodStarted.length > 0) {
@@ -91,7 +100,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod });
+    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod, setup: args.setup });
 
     return 0;
   });

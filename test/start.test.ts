@@ -71,8 +71,15 @@ services:
     assert.equal(env.FROM_ROOT, 'root');
     assert.equal(env.FROM_FILE, 'file');
     assert.equal(env.PORT, '4000');
-    // A bad value is attributed to the layer it came from.
-    await assert.rejects(buildStartEnv(cfg, api, { SHARED: 'missing.url' }, {}), /^Error: use_env\.SHARED: cannot resolve/);
+    // File values are used as written, like in up and setup: a hostname that merely looks like a
+    // reference is not resolved, and a config reference the file overrides is not resolved either.
+    const literal = await buildStartEnv(cfg, api, { SHARED: 'missing.url', LITERAL: '${db.port}' }, {});
+    assert.equal(literal.SHARED, 'missing.url');
+    assert.equal(literal.LITERAL, '${db.port}');
+    api.env.BROKEN = 'missing.url';
+    await assert.rejects(buildStartEnv(cfg, api, {}, {}), /^Error: services\.api\.env\.BROKEN: cannot resolve/);
+    assert.equal((await buildStartEnv(cfg, api, { BROKEN: 'from-file' }, {})).BROKEN, 'from-file');
+    delete api.env.BROKEN;
   });
 
   it('keeps generated values and port_env above stale platform values', async () => {

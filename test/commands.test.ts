@@ -119,6 +119,19 @@ describe('restart', () => {
     await assert.rejects(main(['restart', 'api', '--prod']), /restart could not stop/);
   });
 
+  it('accepts --setup and --no-setup on restart, like up', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt } },
+    });
+    // The scope check accepts both flags; restart then reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(main(['restart', 'api', '--no-setup']), /restart could not stop/);
+    await assert.rejects(main(['restart', 'api', '--setup']), /restart could not stop/);
+  });
+
   it('refuses restart --prod of a service running in development mode, before stopping anything', async () => {
     const startedAt = new Date().toISOString();
     await writePids(projectDir, {

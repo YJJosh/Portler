@@ -55,18 +55,24 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  // The deployment wins over portler.yml: the platform env (applied below), then the use_env file, then config.
-  const configured = { ...config.env, ...service.env, ...baseEnv };
+  // The deployment wins over portler.yml: the platform env (applied below), then the use_env
+  // file, then config. Only config values are Portler expressions; a file value is used as
+  // written, exactly as `up` and `setup` treat it, and a config key the file or the platform
+  // supplies is not resolved at all.
+  const configured = { ...config.env, ...service.env };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
-    if (platformEnv[key] !== undefined) continue;
+    if (platformEnv[key] !== undefined || key in baseEnv) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
       env[key] = resolveEnvValue(value, assignments);
     } catch (error) {
-      const source = key in baseEnv ? 'use_env' : key in service.env ? `services.${service.name}.env` : 'env';
+      const source = key in service.env ? `services.${service.name}.env` : 'env';
       throw new Error(`${source}.${key}: ${(error as Error).message}`);
     }
+  }
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (platformEnv[key] === undefined) env[key] = value;
   }
   for (const [key, value] of Object.entries(platformEnv)) {
     if (value !== undefined) env[key] = value;
