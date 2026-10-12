@@ -58,7 +58,7 @@ In every mode, the generated URLs and environment variables keep working the sam
 The same file also describes production. `--prod` applies the `prod:` overrides (production commands, setup steps and env), and the deployment's own environment wins over the file:
 
 - **On a platform** with a build command and a start command, run `portler setup --prod` as the build step and `portler start <service> --prod` as the start command. The platform's `PORT` and secrets apply.
-- **On a server with Docker**, `portler up docker --prod -d` starts the stack, and `--image` runs the exact images CI built instead of building on the host.
+- **On a server with Docker**, `portler up docker --prod -d` starts the stack, and `--image` with a digest reference (`api=ghcr.io/org/api@sha256:…`) runs the exact images CI built instead of building on the host. A tag is not enough: Docker reuses a cached copy of it without checking the registry.
 
 See [Setup & production](/guide/setup-and-production) and [Docker](/guide/docker) for the details.
 
