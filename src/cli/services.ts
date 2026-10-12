@@ -130,3 +130,38 @@ export function servicesNeedingReadiness(config: PortlerConfig, serviceNames: st
 
   return names;
 }
+
+/** Say which services run from a pinned `--image`, and whether that skipped a build. */
+export function reportImageOverrides(modeConfig: PortlerConfig, images: Readonly<Record<string, string>>): void {
+  for (const [serviceName, image] of Object.entries(images)) {
+    const hadBuild = modeConfig.services[serviceName]?.docker?.build !== undefined;
+    process.stdout.write(`[portler] ${serviceName}: using image ${image}${hadBuild ? ' (build skipped)' : ''}\n`);
+  }
+}
+
+/**
+ * Every `--image` target has to be a service this command actually starts. `up api` and
+ * `restart api` leave an already-running dependency untouched, and a service outside the
+ * selection is never started at all; in both cases the flag would be accepted and change
+ * nothing, so the old image keeps running while the user believes it was replaced.
+ */
+export function validateImageOverrideTargets(
+  images: Readonly<Record<string, string>>,
+  selectedNames: readonly string[],
+  runningNames: ReadonlySet<string>,
+): void {
+  const selected = new Set(selectedNames);
+  for (const serviceName of Object.keys(images)) {
+    if (selected.has(serviceName)) continue;
+    if (runningNames.has(serviceName)) {
+      throw new Error(
+        `--image: service "${serviceName}" is already running and this command leaves it running, so it would keep its ` +
+          `current image. Include it in the restart, or stop it first with "portler down ${serviceName}".`,
+      );
+    }
+    throw new Error(
+      `--image: service "${serviceName}" is not started by this command, so the image would never be used. ` +
+        'Name it, or a service that depends on it, in the command.',
+    );
+  }
+}

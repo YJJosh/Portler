@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { applyDockerMode, normalizeDockerModeConfig, normalizeTopLevelDockerConfig } from '../src/config/docker.ts';
+import { applyDockerMode, applyImageOverrides, normalizeDockerModeConfig, normalizeTopLevelDockerConfig } from '../src/config/docker.ts';
 import { defaultDockerContainer, defaultDockerImage } from '../src/config/naming.ts';
 import { dockerShellCommand } from '../src/process/docker.ts';
 import type { Assignments, DockerConfig, PortlerConfig, ServiceConfig } from '../src/types/index.ts';
@@ -411,5 +411,62 @@ describe('dockerShellCommand', () => {
       () => dockerShellCommand(makeConfig({ api: service }), service, {}, new Set(), assignment, assignments),
       /is not a Docker service/,
     );
+  });
+});
+
+describe('applyImageOverrides', () => {
+  const built = makeService({
+    docker: {
+      image: 'portler-x-api',
+      containerName: 'c',
+      volumes: ['@data:/data'],
+      env: { A: '1' },
+      command: 'npm start',
+      build: { context: '.', dockerfile: 'Dockerfile', args: {} },
+    },
+  });
+
+  it('replaces the image, drops the build, and keeps everything else', () => {
+    const config = applyImageOverrides(makeConfig({ api: built }), { api: 'ghcr.io/org/api@sha256:abc' });
+    const docker = config.services.api!.docker!;
+    assert.equal(docker.image, 'ghcr.io/org/api@sha256:abc');
+    assert.equal(docker.build, undefined);
+    assert.equal(docker.command, 'npm start');
+    assert.deepEqual(docker.volumes, ['@data:/data']);
+    assert.deepEqual(docker.env, { A: '1' });
+    assert.equal(docker.containerName, 'c');
+    // The input config is left alone.
+    assert.equal(built.docker!.image, 'portler-x-api');
+    assert.ok(built.docker!.build);
+  });
+
+  it('also pins plain image services and is a no-op without overrides', () => {
+    const redis = makeService({ name: 'redis', docker: { image: 'redis:7', containerName: 'r', volumes: [], env: {} } });
+    const config = makeConfig({ redis });
+    assert.equal(applyImageOverrides(config, {}), config);
+    assert.equal(applyImageOverrides(config, { redis: 'redis@sha256:def' }).services.redis!.docker!.image, 'redis@sha256:def');
+  });
+
+  it('rejects unknown services and services that do not run in Docker in this mode', () => {
+    const local = makeService({
+      command: 'npm run dev',
+      dockerModeOverride: { image: 'x', containerName: 'c', volumes: [], env: {} },
+    });
+    const config = makeConfig({ api: local });
+    assert.throws(
+      () => applyImageOverrides(config, { apo: 'img' }),
+      (error: Error) => error.message.includes('--image: unknown service "apo"') && error.message.includes('"api"'),
+    );
+    // Plain `up` leaves the docker: block inactive, so there is no image to replace...
+    assert.throws(() => applyImageOverrides(config, { api: 'img' }), /does not run in Docker in this mode/);
+    // ...while `up docker` activates it.
+    assert.equal(applyImageOverrides(applyDockerMode(config), { api: 'img' }).services.api!.docker!.image, 'img');
+  });
+
+  it('leaves no docker build in the generated shell command', () => {
+    const service = applyImageOverrides(makeConfig({ api: built }), { api: 'ghcr.io/org/api@sha256:abc' }).services.api!;
+    const command = dockerShellCommand(makeConfig({ api: service }), service, {}, new Set(), undefined, {});
+    assert.ok(!command.includes('docker build'), command);
+    assert.ok(command.endsWith("ghcr.io/org/api@sha256:abc sh -lc 'npm start'"), command);
   });
 });

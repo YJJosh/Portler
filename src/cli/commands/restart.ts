@@ -1,9 +1,9 @@
-import { configForRunMode, loadConfig } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { readPids, stopServices } from '../../process/index.ts';
+import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import { parseRunMode, expandAndOrderServices, selectServiceNames } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { startPhase } from './up.ts';
 
 /**
@@ -107,6 +107,20 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
+    // Check --image before anything is stopped. applyImageOverrides rejects an unknown
+    // service or one that does not run in Docker in this mode, and a target this restart
+    // leaves running would keep its old image. Either failure after the stop would leave
+    // the requested services down with nothing restarted.
+    if (args.images) {
+      applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
+      const runningNow = new Set(runningServices(before));
+      const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
+      const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
+        (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
+      );
+      validateImageOverrideTargets(args.images, starting, runningNow);
+    }
+
     // With no names, stop everything in pids.json (like `portler down`) so
     // services removed from the config do not linger; otherwise stop only the
     // requested roots.
@@ -130,7 +144,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod, setup: args.setup });
+    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod, setup: args.setup, images: args.images });
 
     return 0;
   });

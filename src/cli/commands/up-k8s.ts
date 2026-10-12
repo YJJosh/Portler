@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { configForRunMode, loadConfig, proxyServiceConfig } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadConfig, proxyServiceConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv } from '../../env/index.ts';
 import {
@@ -32,7 +32,7 @@ import { sleep } from '../../util/sleep.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { printPortTable } from '../table.ts';
-import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, selectServiceNames, servicesWithPorts } from '../services.ts';
+import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
 import { IncompleteTeardownError, reportIncompleteTeardown } from './up.ts';
 
 /** How long a namespace left Terminating by a previous down may take to clear. */
@@ -317,7 +317,10 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
   const rawConfig = await loadConfig(process.cwd(), args.file);
   const requestedRootNames = selectServiceNames(rawConfig, requested);
   const selectedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const config = configForRunMode(rawConfig, 'k8s');
+  const modeConfig = configForRunMode(rawConfig, 'k8s');
+  const config = applyImageOverrides(modeConfig, args.images ?? {});
+  validateImageOverrideTargets(args.images ?? {}, selectedNames, new Set<string>());
+  reportImageOverrides(modeConfig, args.images ?? {});
 
   validateK8sMode(config, selectedNames);
 

@@ -48,13 +48,14 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     ...(args.volumes ? ['--volumes'] : []),
     ...(args.volumeSet !== undefined ? ['--volume-set'] : []),
     ...(args.file !== undefined ? ['--file'] : []),
+    ...(args.images !== undefined ? ['--image'] : []),
   ];
   const allowed: Record<string, ReadonlySet<string>> = {
-    up: new Set(['--detach', '--volume-set', '--file', '--prod', '--setup', '--no-setup']),
+    up: new Set(['--detach', '--volume-set', '--file', '--prod', '--setup', '--no-setup', '--image']),
     setup: new Set(['--file', '--prod']),
     start: new Set(['--file', '--prod']),
     down: new Set(['--force', '--volumes', '--file']),
-    restart: new Set(['--volume-set', '--file', '--prod', '--setup', '--no-setup']),
+    restart: new Set(['--volume-set', '--file', '--prod', '--setup', '--no-setup', '--image']),
     clean: new Set(['--global', '--ports', '--force', '--file']),
     ps: new Set(['--file']),
     logs: new Set(['--follow', '--file']),

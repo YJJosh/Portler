@@ -6,12 +6,12 @@ export function printHelp(): void {
 Usage:
   ${PACKAGE_NAME} setup [docker] [service...] [--prod]
   ${PACKAGE_NAME} start [service] [--prod]
-  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup]
-  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>]
-  ${PACKAGE_NAME} up k8s [service...] [--detach]
+  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>] [--image <service>=<image>]
+  ${PACKAGE_NAME} up k8s [service...] [--detach] [--image <service>=<image>]
   ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
   ${PACKAGE_NAME} k8s render [service...]
-  ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup]
+  ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <service>=<image>]
   ${PACKAGE_NAME} ps [service...]
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports
@@ -44,6 +44,10 @@ Options:
                           Without it, stored data survives a down/up cycle.
       --volume-set <name> Use the <volume>--<name> variant of managed "@" volumes
                           (env fallback: PORTLER_VOLUME_SET)
+      --image <service>=<image>
+                          For "up"/"restart": run that Docker service from this
+                          image instead of building it (repeatable; e.g. the
+                          digest reference CI pushed)
   -h, --help              Show help
 
 "down" only signals a process group whose leader's recorded start token still

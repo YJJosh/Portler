@@ -60,6 +60,23 @@ describe('parseArgs', () => {
     assert.deepEqual(args.positionals, ['--not-a-flag']);
   });
 
+  it('parses --image <service>=<image> in both forms, repeatable', () => {
+    const args = parseArgs(['--image', 'api=ghcr.io/org/api@sha256:abc', '--image=web=org/web:1.2.3', 'docker'], 'up');
+    assert.deepEqual(args.images, { api: 'ghcr.io/org/api@sha256:abc', web: 'org/web:1.2.3' });
+    assert.deepEqual(args.positionals, ['docker']);
+    assert.equal(parseArgs([], 'up').images, undefined);
+  });
+
+  it('rejects malformed or repeated --image values', () => {
+    assert.throws(() => parseArgs(['--image'], 'up'), /--image requires <service>=<image>/);
+    assert.throws(() => parseArgs(['--image='], 'up'), /--image requires <service>=<image>/);
+    assert.throws(() => parseArgs(['--image', 'api'], 'up'), /--image expects <service>=<image>, got "api"/);
+    assert.throws(() => parseArgs(['--image', '=img'], 'up'), /got "=img"/);
+    assert.throws(() => parseArgs(['--image', 'api='], 'up'), /got "api="/);
+    assert.throws(() => parseArgs(['--image', 'api=img one'], 'up'), /must not contain whitespace/);
+    assert.throws(() => parseArgs(['--image', 'api=a', '--image', 'api=b'], 'up'), /--image given twice for service "api"/);
+  });
+
   it('requires a value for flags that take one', () => {
     assert.throws(() => parseArgs(['--file'], 'up'), /--file requires a path/);
     assert.throws(() => parseArgs(['--file='], 'up'), /--file requires a path/);

@@ -1,4 +1,4 @@
-import { configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction } from '../../config/production.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
@@ -31,10 +31,12 @@ import {
   ensureNoOverlap,
   expandAndOrderServices,
   parseRunMode,
+  reportImageOverrides,
   selectServiceNames,
   servicesNeedingReadiness,
   servicesWithPorts,
   validateDockerMode,
+  validateImageOverrideTargets,
 } from '../services.ts';
 
 function warnMissingPortEnv(config: PortlerConfig, selectedNames: string[]): void {
@@ -146,6 +148,8 @@ export interface StartOptions {
   detach: boolean;
   /** Skip already-running services instead of failing (used by restart). */
   skipRunning?: boolean;
+  /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
+  images?: Readonly<Record<string, string>>;
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -179,7 +183,9 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const config = applyProduction(configForRunMode(rawConfig, mode), options.prod);
+  const modeConfig = configForRunMode(rawConfig, mode);
+  const images = options.images ?? {};
+  const config = applyProduction(applyImageOverrides(modeConfig, images), options.prod);
   const pidsBefore = await readPids(config.projectDir);
   const runningNames = new Set(runningServices(pidsBefore));
 
@@ -190,6 +196,10 @@ export async function startPhase(
     ensureNoOverlap(runningNames, orderedNames);
     selectedNames = orderedNames;
   }
+  // Only now is it known which services this run starts; a pinned image for any other
+  // service would be accepted and never used.
+  validateImageOverrideTargets(images, selectedNames, runningNames);
+  reportImageOverrides(modeConfig, images);
 
   if (mode === 'docker') validateDockerMode(config, selectedNames);
   validateCommands(config, selectedNames);
@@ -430,5 +440,5 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
 
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const requestedRootNames = selectServiceNames(rawConfig, requested);
-  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup });
+  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup, images: args.images });
 }

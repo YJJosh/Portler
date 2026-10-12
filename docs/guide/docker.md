@@ -109,6 +109,22 @@ Env values under `docker:` are merged **over** the service's env in Docker mode,
 `docker` is a reserved word on the command line (`portler up docker`) and cannot be used as a service name.
 :::
 
+## Prebuilt images
+
+`portler up` builds a `build:` service's image every time. When the image already exists, for example because CI built and pushed it, pin it instead of building:
+
+```bash
+portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…
+```
+
+`--image <service>=<image>` replaces that service's `image` and drops its `build`, so nothing is built and Docker pulls the reference when it is not present locally. Everything else still comes from `portler.yml`: the command, env, ports, volumes, dependencies and healthchecks. The flag is repeatable, works with `up`, `up docker`, `up k8s` and `restart`, and can also pin a plain `image:` service to a digest. The service must run in Docker in the chosen mode, so a service whose only Docker configuration is a `docker:` block takes the flag under `up docker`, not under plain `up`. The target also has to be a service the command starts: `restart api` leaves an already-running dependency untouched, and plain `up` never starts over a running service, so pinning that dependency there is an error rather than a flag that changes nothing (restart it as well, or stop it first), and `restart` checks this before it stops anything.
+
+This is how a server runs exactly what CI built, with no toolchain on the host: check out the commit the images were built from, so `portler.yml` matches, then start the stack from the pinned references. A digest reference is immutable, so the same command starts the same bytes every time. Docker pulls with the login of the user running Portler, so `docker login` to a private registry first. Under `up k8s` a pinned image is not loaded into the cluster; the cluster pulls it, so it must be reachable from there.
+
+A pin lasts for that invocation. `restart` applies only the `--image` flags it is given: a `restart` without them rebuilds the service from its Dockerfile, or pulls its `image:`, and replaces the pinned one, and `ps` does not show which image a service runs. On a deployed stack pass the same `--image` flags to `restart`, or run `down` and start again from the pinned references.
+
+`up --prod` still runs the `setup:` steps of `portler.yml` on the host, so a server with no toolchain adds `--no-setup`. That skips every setup step, including a migration declared there, so keep such steps in the image or run them separately.
+
 ## Requirements & failure behavior
 
 Docker services need the Docker daemon; when it is not running, commands that need it fail with a clear error. `portler down` stops and removes the project's containers.

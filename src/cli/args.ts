@@ -13,6 +13,8 @@ export interface ParsedArgs {
   /** `down k8s --volumes`: also delete PersistentVolumeClaims (destroys data). */
   volumes: boolean;
   volumeSet?: string;
+  /** `--image <service>=<image>`: run that Docker service from this image instead of building it (up/restart). */
+  images?: Record<string, string>;
   positionals: string[];
 }
 
@@ -30,6 +32,7 @@ const KNOWN_FLAGS = [
   '--volumes',
   '--volume-set',
   '--file',
+  '--image',
 ];
 
 /**
@@ -42,6 +45,23 @@ const KNOWN_FLAGS = [
  */
 function shortFMeansFollow(command: string): boolean {
   return command === 'logs';
+}
+
+/**
+ * `--image api=ghcr.io/org/api@sha256:...` pins the image a Docker service runs
+ * from. The split is at the first "=": a service name never contains one, and
+ * neither does an image reference (registry/name:tag@digest).
+ */
+function addImageOverride(parsed: ParsedArgs, spec: string): void {
+  const separator = spec.indexOf('=');
+  const service = separator > 0 ? spec.slice(0, separator) : '';
+  const image = separator >= 0 ? spec.slice(separator + 1) : '';
+  if (!service || !image) throw new Error(`--image expects <service>=<image>, got "${spec}"`);
+  if (/\s/.test(image)) throw new Error(`--image ${service}: image reference "${image}" must not contain whitespace`);
+
+  parsed.images ??= {};
+  if (parsed.images[service] !== undefined) throw new Error(`--image given twice for service "${service}"`);
+  parsed.images[service] = image;
 }
 
 /** Parse the argv tail (everything after the command) into structured flags. */
@@ -140,6 +160,21 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
       const value = arg.slice('--file='.length);
       if (!value) throw new Error('--file requires a path');
       parsed.file = value;
+      continue;
+    }
+
+    if (arg === '--image') {
+      const value = args[index + 1];
+      if (!value) throw new Error('--image requires <service>=<image>');
+      addImageOverride(parsed, value);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--image=')) {
+      const value = arg.slice('--image='.length);
+      if (!value) throw new Error('--image requires <service>=<image>');
+      addImageOverride(parsed, value);
       continue;
     }
 
