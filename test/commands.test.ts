@@ -15,7 +15,7 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { writePids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
 
@@ -98,6 +98,97 @@ describe('restart', () => {
       commandRestart(parseArgs(['k8s'], 'restart')),
       /restart does not support Kubernetes mode/,
     );
+  });
+
+  it('refuses a plain restart of a service started with --prod, before stopping anything', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: true, startedAt } },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api was started with --prod/);
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), /api was started with --prod/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+
+    // With the flag the guard passes and restart reaches the stop step, which refuses
+    // the unverified entry. Going through main proves the scope check accepts --prod.
+    await assert.rejects(main(['restart', 'api', '--prod']), /restart could not stop/);
+  });
+
+  it('accepts --setup and --no-setup on restart, like up', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt } },
+    });
+    // The scope check accepts both flags; restart then reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(main(['restart', 'api', '--no-setup']), /restart could not stop/);
+    await assert.rejects(main(['restart', 'api', '--setup']), /restart could not stop/);
+  });
+
+  it('refuses a plain restart of a service running in Docker, and restart docker of a local process', async () => {
+    // api runs as a local process under plain `up` and as a container under `up docker`.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  api:', '    command: node -e ""', '    port: 3000', '    docker:', '      image: node:22-alpine'].join('\n'),
+      'utf8',
+    );
+    const startedAt = new Date().toISOString();
+    const seed = (dockerContainer?: string) =>
+      writePids(projectDir, {
+        version: 1,
+        project: projectDir,
+        startedAt,
+        services: {
+          api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt, ...(dockerContainer ? { dockerContainer } : {}) },
+        },
+      });
+
+    await seed('portler-test-api');
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api is running in Docker[^]*restart docker api/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+    // With `docker` the guard passes and restart reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), (error: Error) => !/running in Docker/.test(error.message));
+
+    await seed(undefined);
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), /api is running as a local process[^]*without "docker"/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+  });
+
+  it('does not mistake an Object.prototype member for a recorded service', async () => {
+    // With no pids.json, `running` is an empty object, and `running.constructor` is still Object.
+    // The guard must not report a service named constructor as a running development service.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  constructor:', '    command: node -e ""', '    port: 3000'].join('\n'),
+      'utf8',
+    );
+    // The guard passes and restart goes on to start the service, whose command exits at once.
+    await assert.rejects(commandRestart(parseArgs(['constructor', '--prod'], 'restart')), (error: Error) => !/development mode/.test(error.message));
+  });
+
+  it('refuses restart --prod of a service running in development mode, before stopping anything', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt } },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /api was started in development mode/);
+    await assert.rejects(commandRestart(parseArgs(['--prod'], 'restart')), /api was started in development mode/);
+    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+
+    // Same mode: the guard passes and restart reaches the stop step, which refuses the unverified entry.
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /restart could not stop/);
   });
 
   it('points the user at the down/up sequence that does work', async () => {

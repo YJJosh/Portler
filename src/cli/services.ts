@@ -20,6 +20,16 @@ export function parseRunMode(positionals: string[]): { mode: RunMode; requested:
 }
 
 /** Refuse to start services that already have a live pids.json entry. */
+/** Docker mode needs Docker config for every selected service. */
+export function validateDockerMode(config: PortlerConfig, selectedNames: string[]): void {
+  for (const serviceName of selectedNames) {
+    const service = config.services[serviceName]!;
+    if (!service.docker) {
+      throw new Error(`service "${serviceName}" has no Docker config. Add image, build, dockerfile, or docker: {...}`);
+    }
+  }
+}
+
 export function ensureNoOverlap(runningNames: ReadonlySet<string>, selectedNames: string[]): void {
   const running = selectedNames.filter((serviceName) => runningNames.has(serviceName));
 

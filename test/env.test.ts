@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvMap, resolveEnvValue } from '../src/env/resolve.ts';
-import { buildServiceEnv } from '../src/env/service.ts';
+import { buildPrintableEnv, buildServiceEnv } from '../src/env/service.ts';
 import type { Assignments, PortlerConfig, ServiceConfig } from '../src/types/index.ts';
 
 function makeAssignments(): Assignments {
@@ -193,6 +193,19 @@ describe('buildServiceEnv', () => {
     assert.equal(explicitKeys.has('PATH'), false);
   });
 
+  it('keeps generated values above service env in development too, and in the printable env', () => {
+    const service = makeService({ env: { PORTLER_API_PORT: '1', PORTLER_API_URL: 'stale' } });
+    const config = makeConfig({ api: service });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+
+    const { env } = buildServiceEnv(config, service, {}, generated, assignments);
+    assert.equal(env.PORTLER_API_PORT, '52001');
+    assert.equal(env.PORTLER_API_URL, 'http://localhost:52001');
+    const printable = buildPrintableEnv(config, service, generated, assignments);
+    assert.equal(printable.PORTLER_API_PORT, '52001');
+  });
+
   it('resolves service references in root and service env', () => {
     const service = makeService({ env: { API_URL: 'api.url', DB: 'localhost:${db-main.port}' } });
     const config = makeConfig({ api: service });
@@ -201,6 +214,80 @@ describe('buildServiceEnv', () => {
     const { env } = buildServiceEnv(config, service, {}, {}, assignments);
     assert.equal(env.API_URL, 'http://localhost:52001');
     assert.equal(env.DB, 'localhost:52002');
+  });
+
+  it('lets the deployment win over portler.yml in production, except for generated values', () => {
+    const service = makeService({ env: { FROM_SERVICE: 'service', SHARED: 'service', SHELL_WINS: 'service' } });
+    const config = makeConfig({ api: service }, { FROM_ROOT: 'root', SHARED: 'root' });
+    const baseEnv = { SHARED: 'file', SHELL_WINS: 'file', FROM_FILE: 'file' };
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const saved = { SHELL_WINS: process.env.SHELL_WINS, PORTLER_API_PORT: process.env.PORTLER_API_PORT, PORT: process.env.PORT };
+    process.env.SHELL_WINS = 'shell';
+    process.env.PORTLER_API_PORT = 'shell';
+    process.env.PORT = '1';
+    try {
+      const dev = buildServiceEnv(config, service, baseEnv, generated, assignments);
+      assert.equal(dev.env.SHARED, 'service', 'development: config wins');
+      assert.equal(dev.env.SHELL_WINS, 'service');
+
+      const prod = buildServiceEnv({ ...config, production: true }, service, baseEnv, generated, assignments);
+      assert.equal(prod.env.SHELL_WINS, 'shell', 'production: the process env wins over file and config');
+      assert.equal(prod.env.SHARED, 'file', 'production: the use_env file wins over config');
+      assert.equal(prod.env.FROM_ROOT, 'root');
+      assert.equal(prod.env.FROM_SERVICE, 'service');
+      assert.equal(prod.env.FROM_FILE, 'file');
+      assert.equal(prod.env.PORTLER_API_PORT, '52001', 'generated values stay Portler\'s');
+      assert.equal(prod.env.PORT, '52001', 'port_env stays Portler\'s');
+      assert.equal(prod.env.PORTLER_SERVICE_NAME, 'api');
+      assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].sort(), 'containers get the same keys');
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('does not resolve config values the deployment overrides in production', () => {
+    const service = makeService({ env: { DB_URL: 'missing.url', KEEP: 'api.url' } });
+    const config = makeConfig({ api: service }, { ROOT_URL: 'missing.url' });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    // Development: config wins, so the dangling reference is a config error even with a file value.
+    assert.throws(() => buildServiceEnv(config, service, { DB_URL: 'file', ROOT_URL: 'file' }, generated, assignments), /cannot resolve|no assigned port/);
+    const prod = { ...config, production: true };
+    // Production without anything overriding it: still a config error.
+    assert.throws(() => buildServiceEnv(prod, service, {}, generated, assignments), /cannot resolve|no assigned port/);
+    const saved = process.env.ROOT_URL;
+    process.env.ROOT_URL = 'shell';
+    try {
+      const { env, explicitKeys } = buildServiceEnv(prod, service, { DB_URL: 'file' }, generated, assignments);
+      assert.equal(env.DB_URL, 'file', 'the use_env file replaces the unresolvable config value');
+      assert.equal(env.ROOT_URL, 'shell', 'the process env replaces the unresolvable config value');
+      assert.equal(env.KEEP, 'http://localhost:52001', 'other config values still resolve');
+      assert.equal(explicitKeys.has('DB_URL') && explicitKeys.has('ROOT_URL'), true, 'overridden keys still reach containers');
+    } finally {
+      if (saved === undefined) delete process.env.ROOT_URL;
+      else process.env.ROOT_URL = saved;
+    }
+  });
+
+  it('does not resolve a root value the service replaces, in either mode', () => {
+    // Root URL is a dangling reference; api's own env (what prod.env becomes after
+    // applyProduction) replaces URL, so the root value is never used for api and must not
+    // throw. A service that does not replace it still hits the config error.
+    const service = makeService({ env: { URL: 'https://api.example' } });
+    const config = makeConfig({ api: service }, { URL: 'missing.url', OTHER: 'api.url' });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const dev = buildServiceEnv(config, service, {}, generated, assignments);
+    assert.equal(dev.env.URL, 'https://api.example');
+    assert.equal(dev.env.OTHER, 'http://localhost:52001', 'other root values still resolve');
+    const prod = { ...config, production: true };
+    assert.equal(buildServiceEnv(prod, service, {}, generated, assignments).env.URL, 'https://api.example');
+    assert.equal(buildPrintableEnv(config, service, generated, assignments).URL, 'https://api.example', 'portler env agrees with up');
+    assert.throws(() => buildServiceEnv(config, makeService({}), {}, generated, assignments), /cannot resolve|no assigned port/);
   });
 
   it('gives Docker services their declared internal port in port_env', () => {

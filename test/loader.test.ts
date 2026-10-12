@@ -248,4 +248,13 @@ describe('loadBaseEnv', () => {
     const config = await loadConfig(dir);
     await assert.rejects(loadBaseEnv(config), /env file "\.env\.missing" listed in use_env was not found/);
   });
+
+  it('skips missing env files when allowed (production deploys get env from the platform)', async () => {
+    const dir = await makeProject({
+      'portler.yml': ['use_env: [.env.missing, .env]', 'services:', '  api:', '    port: 3000', ''].join('\n'),
+      '.env': 'PRESENT=1\n',
+    });
+    const config = await loadConfig(dir);
+    assert.deepEqual(await loadBaseEnv(config, { allowMissing: true }), { PRESENT: '1' });
+  });
 });
