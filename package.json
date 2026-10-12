@@ -1,7 +1,7 @@
 {
   "name": "portler",
   "version": "0.2.1",
-  "description": "Local development process runner with automatic port assignment and env resolution.",
+  "description": "Process runner with automatic port assignment and env resolution, from local development to production.",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
