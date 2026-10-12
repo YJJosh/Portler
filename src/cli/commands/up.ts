@@ -20,7 +20,7 @@ import {
   updatePids,
   waitForForegroundServices,
 } from '../../process/index.ts';
-import type { StopResult } from '../../process/index.ts';
+import type { ForegroundTeardownOptions, StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
@@ -164,8 +164,10 @@ export interface StartedStack {
    * how to hold the lifecycle lock. Inside startPhase it runs on the
    * startup-failure path, where the lock is already held (taking it again would
    * deadlock: the lock is not reentrant); the foreground caller re-acquires it.
+   * Returns this run's own services it left running because a service another
+   * run started depends on them; `keepAdopted: false` stops those too.
    */
-  teardown: () => Promise<void>;
+  teardown: (options?: ForegroundTeardownOptions) => Promise<string[]>;
   detached: boolean;
 }
 
@@ -305,7 +307,7 @@ export async function startPhase(
   // still holding its port) tells a script the opposite of the truth — `down`
   // exits non-zero in exactly this situation. Release only safe reservations
   // before reporting an incomplete stop, so it still gives back what it can.
-  const teardown = async (): Promise<void> => {
+  const teardown = async ({ keepAdopted = true }: ForegroundTeardownOptions = {}): Promise<string[]> => {
     // The lifecycle lock is held here, but restart may have replaced an entry
     // while this foreground run was waiting. Names alone do not prove ownership.
     const current = await readPids(config.projectDir);
@@ -367,11 +369,13 @@ export async function startPhase(
       if ((await livenessOf(serviceName, info)).status !== 'dead') foreignLive.push(serviceName);
     }
     let toStop = stopNames;
-    if (foreignLive.length > 0) {
+    let kept: string[] = [];
+    if (keepAdopted && foreignLive.length > 0) {
       const adopted = await recordedDependencyClosure(config, current!, foreignLive);
       if (startedEntries.has(PROXY_SERVICE_NAME)) adopted.add(PROXY_SERVICE_NAME);
       toStop = stopNames.filter((serviceName) => !adopted.has(serviceName));
-      for (const serviceName of stopNames.filter((serviceName) => adopted.has(serviceName))) {
+      kept = stopNames.filter((serviceName) => adopted.has(serviceName));
+      for (const serviceName of kept) {
         replaced.add(serviceName);
         process.stderr.write(`[portler] leaving service "${serviceName}" alone: a service another run started depends on it.\n`);
       }
@@ -384,6 +388,7 @@ export async function startPhase(
       reserveNames.filter((serviceName) => !remaining.has(serviceName)),
     );
     if (incomplete) throw new IncompleteTeardownError(result);
+    return kept;
   };
 
   try {
@@ -566,8 +571,8 @@ export async function startServices(
 
   if (stack.detached) return 0;
 
-  return waitForForegroundServices(stack.children, () =>
-    withLifecycleLockForTeardown(rawConfig.projectDir, stack.teardown),
+  return waitForForegroundServices(stack.children, (teardownOptions) =>
+    withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
   );
 }
 

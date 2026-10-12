@@ -357,4 +357,70 @@ describe('waitForForegroundServices', () => {
     assert.equal(code, 0);
     assert.equal(runs, 1);
   });
+
+  /** A child that keeps running until it is killed: a service the teardown left up. */
+  function runningChild(): ChildProcess {
+    return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  }
+
+  async function until(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(check(), 'condition never became true');
+  }
+
+  it('stays attached to a service the teardown kept for another run, and resolves when it exits', async (t) => {
+    // `portler restart api` from another terminal: api's exit ends the wait, and
+    // the teardown keeps db because the replacement depends on it. db's output is
+    // piped through this process, so the run says so and waits for db instead of
+    // going quiet with Ctrl-C ignored.
+    const db = runningChild();
+    t.after(() => { db.kill('SIGKILL'); });
+    const children = new Map([['api', await exitedChild()], ['db', db]]);
+    const calls: Array<boolean | undefined> = [];
+    const output: string[] = [];
+    t.mock.method(process.stderr, 'write', (text: string) => { output.push(text); return true; });
+    const listeners = process.listenerCount('SIGINT');
+
+    const pending = waitForForegroundServices(children, async (options) => {
+      calls.push(options?.keepAdopted);
+      return ['db'];
+    });
+    await until(() => output.some((text) => text.includes('still attached to db')));
+    db.kill('SIGTERM');
+    const code = await pending;
+    t.mock.restoreAll();
+
+    assert.equal(code, 0, "the exit code is still the one that ended the wait");
+    assert.deepEqual(calls, [true], 'one teardown, keeping what another run depends on');
+    assert.ok(output.some((text) => text.includes('portler down db') && text.includes('Ctrl+C')));
+    assert.equal(process.listenerCount('SIGINT'), listeners, 'no signal handler is left behind');
+  });
+
+  it('a Ctrl-C while attached stops the kept services too', async (t) => {
+    const db = runningChild();
+    t.after(() => { db.kill('SIGKILL'); });
+    const children = new Map([['api', await exitedChild()], ['db', db]]);
+    const calls: Array<boolean | undefined> = [];
+    const output: string[] = [];
+    t.mock.method(process.stderr, 'write', (text: string) => { output.push(text); return true; });
+    const listeners = process.listenerCount('SIGINT');
+
+    const pending = waitForForegroundServices(children, async (options) => {
+      calls.push(options?.keepAdopted);
+      if (options?.keepAdopted === false) {
+        db.kill('SIGTERM');
+        return [];
+      }
+      return ['db'];
+    });
+    await until(() => output.some((text) => text.includes('still attached to db')));
+    process.emit('SIGINT');
+    const code = await pending;
+    t.mock.restoreAll();
+
+    assert.equal(code, 130);
+    assert.deepEqual(calls, [true, false], 'the second teardown no longer keeps adopted services');
+    assert.ok(output.some((text) => text.includes('received SIGINT, stopping db')));
+    assert.equal(process.listenerCount('SIGINT'), listeners, 'no signal handler is left behind');
+  });
 });

@@ -17,3 +17,4 @@ export { spawnService } from './spawn.ts';
 export { signalDecision, stopServices } from './stop.ts';
 export type { StopOptions, StopResult } from './stop.ts';
 export { waitForForegroundServices } from './supervise.ts';
+export type { ForegroundTeardown, ForegroundTeardownOptions } from './supervise.ts';

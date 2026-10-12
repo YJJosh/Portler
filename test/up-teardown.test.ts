@@ -187,9 +187,10 @@ describe('foreground teardown ownership', () => {
     });
     const notices: string[] = [];
     t.mock.method(process.stderr, 'write', (text: string) => { notices.push(text); return true; });
-    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    const kept = await withLifecycleLockForTeardown(projectDir, stack.teardown);
     t.mock.restoreAll();
 
+    assert.deepEqual([...kept].sort(), ['db', PROXY_SERVICE_NAME].sort(), 'the teardown names what it kept, so the supervisor can stay attached');
     assert.deepEqual(signals, [], 'nothing the replacement depends on may be signalled');
     assert.deepEqual(await readPids(projectDir), afterRestart, 'api replacement, db and proxy entries survive');
     assert.deepEqual(await readRegistry(), registry, 'their reservations survive');
@@ -198,6 +199,18 @@ describe('foreground teardown ownership', () => {
     }
     for (const name of ['db', PROXY_SERVICE_NAME]) {
       assert.ok(notices.some((text) => text.includes(`"${name}"`) && text.includes('depends on it')), `notice for ${name}`);
+    }
+
+    // The Ctrl-C that follows the supervisor's notice stops them anyway, and
+    // still leaves the replacement alone: it is not this run's.
+    const stillKept = await withLifecycleLockForTeardown(projectDir, () => stack.teardown({ keepAdopted: false }));
+    assert.deepEqual(stillKept, []);
+    const afterStop = (await readPids(projectDir))!;
+    assert.deepEqual(Object.keys(afterStop.services), ['api'], 'only the replacement is left on record');
+    assert.deepEqual(afterStop.services.api, afterRestart.services.api);
+    assert.ok(isPidRunning(afterRestart.services.api!.pid), 'the replacement keeps running');
+    for (const name of ['db', PROXY_SERVICE_NAME]) {
+      assert.equal(isPidRunning(afterRestart.services[name]!.pid), false, `${name} was stopped`);
     }
   });
 
