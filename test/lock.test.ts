@@ -383,7 +383,7 @@ describe('waitForForegroundServices', () => {
 
     const pending = waitForForegroundServices(children, async (options) => {
       calls.push(options?.keepAdopted);
-      return ['db'];
+      return calls.length === 1 ? ['db'] : [];
     });
     await until(() => output.some((text) => text.includes('still attached to db')));
     db.kill('SIGTERM');
@@ -391,7 +391,11 @@ describe('waitForForegroundServices', () => {
     t.mock.restoreAll();
 
     assert.equal(code, 0, "the exit code is still the one that ended the wait");
-    assert.deepEqual(calls, [true], 'one teardown, keeping what another run depends on');
+    assert.deepEqual(
+      calls,
+      [true, true],
+      'once db exits, a second teardown prunes its entry and releases its port; it still keeps what another run depends on',
+    );
     assert.ok(output.some((text) => text.includes('portler down db') && text.includes('Ctrl+C')));
     assert.equal(process.listenerCount('SIGINT'), listeners, 'no signal handler is left behind');
   });

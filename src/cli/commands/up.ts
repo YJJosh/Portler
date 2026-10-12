@@ -373,8 +373,14 @@ export async function startPhase(
     if (keepAdopted && foreignLive.length > 0) {
       const adopted = await recordedDependencyClosure(config, current!, foreignLive);
       if (startedEntries.has(PROXY_SERVICE_NAME)) adopted.add(PROXY_SERVICE_NAME);
-      toStop = stopNames.filter((serviceName) => !adopted.has(serviceName));
-      kept = stopNames.filter((serviceName) => adopted.has(serviceName));
+      // Only a live entry is kept. One of this run's that died before the
+      // teardown (db crashed while the replacement still depends on it) is
+      // nothing to keep: stopServices prunes it and its port is released.
+      for (const serviceName of stopNames) {
+        if (!adopted.has(serviceName)) continue;
+        if ((await livenessOf(serviceName, current!.services[serviceName]!)).status !== 'dead') kept.push(serviceName);
+      }
+      toStop = stopNames.filter((serviceName) => !kept.includes(serviceName));
       for (const serviceName of kept) {
         replaced.add(serviceName);
         process.stderr.write(`[portler] leaving service "${serviceName}" alone: a service another run started depends on it.\n`);

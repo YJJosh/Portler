@@ -214,6 +214,49 @@ describe('foreground teardown ownership', () => {
     }
   });
 
+  it('prunes an adopted dependency that died before the teardown ran', { timeout: 15_000 }, async () => {
+    // `restart api` keeps db for the replacement, and db then crashes before
+    // the foreground teardown takes the lifecycle lock. Its entry still matches
+    // this run, and the replacement still depends on it, but a dead db is
+    // nothing to keep: it is pruned and its port released, not reported as kept.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3001',
+      '    port_env: PORT',
+      '  api:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3000',
+      '    port_env: PORT',
+      '    depends_on: [db]',
+      'proxy:',
+      '  routes:',
+      '    /: api',
+      '',
+    ].join('\n'));
+    const stack = await startForeground();
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    const db = afterRestart.services.db!;
+    const dbPort = String(db.port);
+    assert.ok((await readRegistry()).ports[dbPort], 'db holds a reservation before the teardown');
+    process.kill(-db.pid, 'SIGKILL');
+    for (let i = 0; i < 100 && isPidRunning(db.pid); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(isPidRunning(db.pid), false, 'db is gone before the teardown runs');
+
+    const kept = await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    assert.deepEqual(kept, [PROXY_SERVICE_NAME], 'only the live proxy is kept; the dead db is not');
+    const after = (await readPids(projectDir))!;
+    assert.ok(!after.services.db, "db's dead entry is pruned");
+    assert.equal((await readRegistry()).ports[dbPort], undefined, 'and its reservation is released');
+    assert.deepEqual(after.services.api, afterRestart.services.api, 'the replacement is left alone');
+    assert.ok(isPidRunning(afterRestart.services.api!.pid), 'the replacement keeps running');
+    assert.ok(isPidRunning(afterRestart.services[PROXY_SERVICE_NAME]!.pid), 'the proxy the replacement is served through stays');
+  });
+
   it('still stops what no other run depends on after a named restart', { timeout: 15_000 }, async () => {
     // db is this run's and nothing the replacement api needs: it is stopped and
     // released as before. The proxy serves the replacement and stays.

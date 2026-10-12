@@ -36,9 +36,11 @@ export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promis
  * service another run started depends on them (`portler restart api` keeps the
  * db this run started). Their output is piped through this process, so it
  * cannot exit without cutting them off: it says so, keeps relaying until they
- * exit (`portler down` from elsewhere), and a Ctrl-C then stops them too. While
- * a teardown is in progress the signal handlers are off, so a second Ctrl-C
- * still quits at once, as it always has.
+ * exit (`portler down` from elsewhere), and a Ctrl-C then stops them too. When
+ * they exit on their own, the teardown runs once more before the wait resolves:
+ * their entries still name this run, and only a teardown prunes a dead one and
+ * gives its port back. While a teardown is in progress the signal handlers are
+ * off, so a second Ctrl-C still quits at once, as it always has.
  */
 export function waitForForegroundServices(
   children: Map<string, ChildProcess>,
@@ -108,10 +110,17 @@ export function waitForForegroundServices(
       for (const serviceName of attachedNames) {
         children.get(serviceName)!.once('exit', () => {
           left -= 1;
-          if (left === 0 && phase === 'attached') finish(triggerCode);
+          if (left === 0 && phase === 'attached') void settleAfterKept();
         });
       }
       listen();
+    };
+
+    const settleAfterKept = async (): Promise<void> => {
+      phase = 'stopping';
+      unlisten();
+      const kept = await runTeardown({ keepAdopted: true });
+      finish(kept === undefined && triggerCode === 0 ? 1 : triggerCode);
     };
 
     const onSignal = (signal: NodeJS.Signals, exitCode: number): void => {
