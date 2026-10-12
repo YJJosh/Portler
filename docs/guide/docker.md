@@ -75,6 +75,8 @@ Portler derives stable, project-scoped default names so projects never collide:
 
 `<project>` is the project directory basename, `<hash>` a short hash of its full path. Override with `container_name:` per service or a top-level `docker_network:`. Explicit container names must remain unique across the project's services in each run mode; Portler rejects a collision before starting anything.
 
+Under `--prod` a top-level `name:` replaces the directory part: containers are `portler-<name>--<service>`, the network `portler-<name>`, and managed volumes `portler-<name>--<volume>`; the double dash keeps project `foo` with service `bar-api` apart from project `foo-bar` with service `api`. An explicit `container_name:` or `docker_network:` is kept, and built images keep the hashed default. That is what lets a release that unpacks into a new folder find its volumes again, and what makes Docker refuse a second release while the previous one is still up. See [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server).
+
 All Docker services of a project share the project network, with the service name as network alias — so in full Docker mode containers can reach each other as `postgres:5432`.
 
 ## Docker mode: `portler up docker`

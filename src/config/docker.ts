@@ -57,15 +57,16 @@ function normalizeDockerConfigFromObject(
   const rawImage = optionalString(rawDocker.image, `${pathPrefix}.image`);
   const build = normalizeDockerBuild(rawDocker.build, rawDocker, serviceName, pathPrefix);
   const volumes = normalizeStringArray(rawDocker.volumes, `${pathPrefix}.volumes`);
-  const containerName =
+  const explicitContainerName =
     optionalString(rawDocker.container_name, `${pathPrefix}.container_name`) ??
-    optionalString(rawDocker.containerName, `${pathPrefix}.containerName`) ??
-    defaultDockerContainer(projectDir, serviceName);
+    optionalString(rawDocker.containerName, `${pathPrefix}.containerName`);
+  const containerName = explicitContainerName ?? defaultDockerContainer(projectDir, serviceName);
 
   return {
     image: rawImage ?? fallbackImage ?? defaultDockerImage(projectDir, serviceName),
     build,
     containerName,
+    ...(explicitContainerName === undefined ? {} : { containerNameExplicit: true as const }),
     volumes,
     env: readDockerEnv(rawDocker, pathPrefix),
     command: optionalString(rawDocker.command, `${pathPrefix}.command`),

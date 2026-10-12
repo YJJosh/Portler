@@ -2,10 +2,10 @@ import {
   managedVolumeName,
   normalizeVolumeSet,
   normalizeVolumeToken,
-  projectVolumeName,
-  projectVolumePrefix,
   VOLUME_SET_SEPARATOR,
+  volumeFullName,
   volumeLabelArgs,
+  volumeScope,
 } from '../config/index.ts';
 import { ownershipVerdict, parseInspectLabels, PROJECT_LABEL } from '../process/ownership.ts';
 import type { OwnershipVerdict } from '../process/ownership.ts';
@@ -44,7 +44,7 @@ export function parseProjectVolumeName(
   config: PortlerConfig,
   fullName: string,
 ): { name: string; volumeSet?: string } | undefined {
-  const prefix = projectVolumePrefix(config.volumeRoot);
+  const prefix = volumeScope(config).prefix;
   if (!fullName.startsWith(prefix)) return undefined;
 
   const rest = fullName.slice(prefix.length);
@@ -64,7 +64,7 @@ export function parseProjectVolumeName(
  * (`postgres-data--migration`). Bare short names follow the active volume set.
  */
 export function resolveVolumeName(config: PortlerConfig, volumeArg: string): string {
-  const prefix = projectVolumePrefix(config.volumeRoot);
+  const prefix = volumeScope(config).prefix;
   if (volumeArg.startsWith(prefix)) return volumeArg;
   if (volumeArg.startsWith('portler-')) {
     throw new Error(`volume "${volumeArg}" does not belong to this project (expected prefix "${prefix}")`);
@@ -74,12 +74,12 @@ export function resolveVolumeName(config: PortlerConfig, volumeArg: string): str
   const separatorIndex = short.indexOf(VOLUME_SET_SEPARATOR);
 
   if (separatorIndex === -1) {
-    return projectVolumeName(config.volumeRoot, normalizeVolumeToken(short, 'volume name'), config.volumeSet);
+    return volumeFullName(volumeScope(config).prefix, normalizeVolumeToken(short, 'volume name'), config.volumeSet);
   }
 
   const name = normalizeVolumeToken(short.slice(0, separatorIndex), 'volume name');
   const volumeSet = normalizeVolumeSet(short.slice(separatorIndex + VOLUME_SET_SEPARATOR.length));
-  return projectVolumeName(config.volumeRoot, name, volumeSet);
+  return volumeFullName(volumeScope(config).prefix, name, volumeSet);
 }
 
 function declaredServicesFor(config: PortlerConfig, volumeName: string): string[] {
@@ -123,8 +123,14 @@ async function containersUsing(fullName: string): Promise<string[]> {
 export async function listProjectVolumes(config: PortlerConfig): Promise<ProjectVolume[]> {
   await ensureDockerRunning();
 
-  const prefix = projectVolumePrefix(config.volumeRoot);
-  const output = await dockerOrThrow(['volume', 'ls', '--format', '{{.Name}}\t{{.Driver}}']);
+  const scope = volumeScope(config);
+  const prefix = scope.prefix;
+  // Under a name only volumes labelled with the name as owner are listed, so a volume that
+  // merely matches the prefix (portler-<name>--) is never shown as this release's.
+  // Development keeps the prefix match, which also shows unlabelled volumes that `remove`
+  // will then refuse.
+  const labelFilter = config.production && config.name ? ['--filter', `label=${PROJECT_LABEL}=${scope.owner}`] : [];
+  const output = await dockerOrThrow(['volume', 'ls', ...labelFilter, '--format', '{{.Name}}\t{{.Driver}}']);
   const sizes = await volumeSizes();
   const volumes: ProjectVolume[] = [];
 
@@ -147,7 +153,7 @@ export async function listProjectVolumes(config: PortlerConfig): Promise<Project
   }
 
   for (const declared of config.volumes) {
-    const fullName = projectVolumeName(config.volumeRoot, declared.name, config.volumeSet);
+    const fullName = volumeFullName(volumeScope(config).prefix, declared.name, config.volumeSet);
     if (volumes.some((volume) => volume.fullName === fullName)) continue;
 
     volumes.push({
@@ -182,15 +188,15 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
 
   const source = resolveVolumeName(config, volumeArg);
   const parsed = parseProjectVolumeName(config, source)!;
-  const target = projectVolumeName(config.volumeRoot, parsed.name, newSet);
+  const target = volumeFullName(volumeScope(config).prefix, parsed.name, newSet);
 
   if (target === source) throw new Error(`volume "${volumeArg}" already is the "${newSet}" variant`);
   if (!(await volumeExists(source))) {
     throw new Error(`volume not found: ${source}. Run "portler volumes" to see this project's volumes.`);
   }
-  if ((await volumeOwnership(source, config.volumeRoot)) !== 'owned') {
+  if ((await volumeOwnership(source, volumeScope(config).owner)) !== 'owned') {
     throw new Error(
-      `source volume ${source} is not labelled as this project's (${PROJECT_LABEL}=${config.volumeRoot}); refusing to read or copy it`,
+      `source volume ${source} is not labelled as this project's (${PROJECT_LABEL}=${volumeScope(config).owner}); refusing to read or copy it`,
     );
   }
   if (await volumeExists(target)) {
@@ -204,12 +210,12 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     );
   }
 
-  await dockerOrThrow(['volume', 'create', ...volumeLabelArgs(config.volumeRoot, parsed.name, newSet), target]);
+  await dockerOrThrow(['volume', 'create', ...volumeLabelArgs(volumeScope(config).owner, parsed.name, newSet), target]);
 
   // `docker volume create` returns success for an existing volume. Re-check after
   // creation so a foreign volume that won the exists/create race is never used as
   // the copy target (and never removed by our rollback).
-  if ((await volumeOwnership(target, config.volumeRoot)) !== 'owned') {
+  if ((await volumeOwnership(target, volumeScope(config).owner)) !== 'owned') {
     throw new Error(`target volume ${target} appeared during creation but is not owned by this project; refusing to overwrite it`);
   }
 
@@ -229,7 +235,7 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
   } catch (error) {
     // Fail closed on the cleanup too: only remove a target that is STILL ours.
     // A name can be deleted/recreated between Docker calls.
-    if ((await volumeOwnership(target, config.volumeRoot).catch(() => 'absent' as const)) === 'owned') {
+    if ((await volumeOwnership(target, volumeScope(config).owner).catch(() => 'absent' as const)) === 'owned') {
       await runDocker(['volume', 'rm', target]);
     }
     throw new Error(`copying volume data failed: ${(error as Error).message}`);
@@ -269,9 +275,9 @@ export async function removeVolume(config: PortlerConfig, volumeArg: string, for
   // --force may bypass the separate in-use guard below, but it must never turn
   // an expected name into proof of ownership. In particular, legacy Portler
   // versions could leave unlabelled volumes under a convincing managed name.
-  if ((await volumeOwnership(fullName, config.volumeRoot)) !== 'owned') {
+  if ((await volumeOwnership(fullName, volumeScope(config).owner)) !== 'owned') {
     throw new Error(
-      `volume ${fullName} is not labelled as this project's (${PROJECT_LABEL}=${config.volumeRoot}), so Portler ` +
+      `volume ${fullName} is not labelled as this project's (${PROJECT_LABEL}=${volumeScope(config).owner}), so Portler ` +
         'cannot confirm it created it and will not delete it, even with --force. Inspect it with "docker volume inspect ' +
         `${fullName}"; if it is a legacy volume you intend to discard, remove it manually with "docker volume rm ${fullName}".`,
     );
@@ -285,7 +291,7 @@ export async function removeVolume(config: PortlerConfig, volumeArg: string, for
   // The in-use query is another Docker round trip during which a named volume
   // can be removed and recreated. Re-check at the destructive boundary so a
   // foreign replacement is refused rather than removed under the old verdict.
-  if ((await volumeOwnership(fullName, config.volumeRoot)) !== 'owned') {
+  if ((await volumeOwnership(fullName, volumeScope(config).owner)) !== 'owned') {
     throw new Error(
       `ownership of volume ${fullName} changed while preparing to remove it; refusing to delete it. ` +
         `Inspect it with "docker volume inspect ${fullName}" and remove it manually only if you can confirm it is safe.`,
@@ -365,14 +371,14 @@ export async function warnMissingVolumeSetVariants(config: PortlerConfig, servic
   const existing = new Set(result.stdout.split('\n').map((line) => line.trim()).filter(Boolean));
 
   for (const name of managed) {
-    if (existing.has(projectVolumeName(config.volumeRoot, name, config.volumeSet))) continue;
+    if (existing.has(volumeFullName(volumeScope(config).prefix, name, config.volumeSet))) continue;
 
     const otherSets = [...existing]
       .map((fullName) => parseProjectVolumeName(config, fullName))
       .filter((parsed) => parsed?.name === name && parsed.volumeSet !== undefined)
       .map((parsed) => parsed!.volumeSet!)
       .sort();
-    const hasBase = existing.has(projectVolumeName(config.volumeRoot, name));
+    const hasBase = existing.has(volumeFullName(volumeScope(config).prefix, name));
     if (otherSets.length === 0 && !hasBase) continue; // brand-new volume: empty is expected
 
     const suggestion = didYouMean(config.volumeSet, otherSets);

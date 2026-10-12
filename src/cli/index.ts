@@ -63,7 +63,7 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     logs: new Set(['--follow', '--file']),
     ports: new Set(['--file']),
     env: new Set(['--file', '--prod', '--reveal']),
-    volumes: new Set(['--force', '--volume-set', '--file']),
+    volumes: new Set(['--force', '--volume-set', '--file', '--prod']),
     k8s: new Set(['--file']),
     init: new Set(),
   };

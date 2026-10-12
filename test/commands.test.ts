@@ -15,6 +15,7 @@ import { commandClean } from '../src/cli/commands/clean.ts';
 import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
+import { forkUpCommand } from '../src/cli/commands/volumes.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
@@ -63,6 +64,15 @@ describe('CLI command contracts', () => {
     await assert.rejects(main(['init', 'extra']), /init does not accept positional arguments/);
     await assert.rejects(main(['volumes', 'list', '--force']), /--force only applies to "portler volumes remove"/);
     await assert.rejects(commandClean(parseArgs(['--global', '--file', 'other.yml'], 'clean')), /--file does not apply/);
+  });
+
+  it('suggests an up command that runs in the same scope as the fork', () => {
+    assert.equal(forkUpCommand('migration', parseArgs(['volumes', 'fork', 'data', 'migration'])), 'portler up --volume-set migration');
+    assert.equal(forkUpCommand('migration', parseArgs(['volumes', 'fork', 'data', 'migration', '--prod'])), 'portler up --prod --volume-set migration');
+    assert.equal(
+      forkUpCommand('migration', parseArgs(['volumes', 'fork', 'data', 'migration', '--prod', '--file', 'deploy/portler prod.yml'])),
+      "portler up --file 'deploy/portler prod.yml' --prod --volume-set migration",
+    );
   });
 
   it('rejects --image for a service the command does not start', async () => {

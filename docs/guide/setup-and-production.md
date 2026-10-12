@@ -81,6 +81,16 @@ services:
 
 `portler env api --prod` prints what `up --prod` hands the service: the deployment's values with that precedence and only the keys the service receives, secret-looking values masked unless `--reveal` is given, and a note on stderr for missing required keys.
 
+## Stable identity on a server
+
+Docker objects are named after the project directory and a hash of its path, so two checkouts of one project never collide. On a server that works against you: a release that unpacks into a new folder gets a new hash, so `up --prod` creates a fresh network, fresh containers and, worse, fresh empty volumes while the previous release's data sits under the old names. Give the project a name:
+
+```yaml
+name: todo
+```
+
+Under `--prod` the containers are then `portler-todo--<service>`, the network `portler-todo`, and `@` volumes `portler-todo--<volume>`, whichever folder the release lives in; development runs are unchanged. The collision this creates is the point: if the previous release is still up when the new one starts, Docker refuses the container name, so stop the previous release first (`portler down` in its folder) or deploy into the same folder. `portler volumes --prod` lists, forks and removes the production volumes and leaves the development ones alone. Two stacks of one project on a host, say staging and production, need two names, so keep them in two config files (`--file portler.staging.yml`). An explicit `container_name:` or `docker_network:` is kept as written, and built images keep their hashed default name.
+
 ## Production overrides and run modes
 
 `--prod` replaces setup/command definitions and merges env; missing overrides fall back to dev definitions. An empty setup list disables inherited setup. `prod` is an ordinary service name, not a positional mode token.
