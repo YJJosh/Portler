@@ -664,6 +664,19 @@ services: {app: {command: echo}}
     assert.equal((await lines()).length, 4, 'content cannot pass for the next file\'s entry either');
   });
 
+  it('a watched path that exists but cannot be read is an error, not absence', async () => {
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'the file is absent: the step runs once');
+    // A directory cannot be read as a file on any platform (EISDIR), like an unreadable file.
+    await fs.mkdir(path.join(dir, 'lock'));
+    await assert.rejects(run(), /watch file "lock" cannot be read/);
+    assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+  });
+
   it('setup skips a missing use_env file in development, like --prod does', async () => {
     await config(`use_env: .env
 setup: echo ok >> steps

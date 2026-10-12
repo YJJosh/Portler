@@ -148,9 +148,26 @@ export function buildPrintableEnv(
   return output;
 }
 
-/** The `prod.require` keys that apply to a service (top-level plus its own), or to the project. */
+// A `prod.env` entry with no value (`KEY: ''`, or a bare `KEY:`) says the deployment must supply it.
+const isBlankConfigValue = (value: unknown): boolean => value === '' || value === null;
+
+/**
+ * The keys the deployment must supply for a service (top-level plus its own), or
+ * for the project: every `prod.require` entry, and every blank `prod.env` entry,
+ * which means the same. A blank top-level entry is not required of a service
+ * whose own env gives the key a value, since that value replaces the top-level one.
+ */
 export function requiredEnvKeys(config: PortlerConfig, service?: ServiceConfig): string[] {
-  return [...new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])])];
+  const keys = new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])]);
+  for (const [key, value] of Object.entries(config.prod?.env ?? {})) {
+    if (!isBlankConfigValue(value)) continue;
+    if (service && Object.hasOwn(service.env, key) && !isBlankConfigValue(service.env[key])) continue;
+    keys.add(key);
+  }
+  for (const [key, value] of Object.entries(service?.prod?.env ?? {})) {
+    if (isBlankConfigValue(value)) keys.add(key);
+  }
+  return [...keys];
 }
 
 /**

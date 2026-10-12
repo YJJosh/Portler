@@ -254,6 +254,29 @@ services:
     assert.match(dev.stderr, /--reveal applies to "env --prod"/);
   });
 
+  it('setup --prod fails before running when a key blanked in prod.env is not supplied', async () => {
+    const cfg = await config(`prod: {setup: ["echo ran >> steps"]}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {DATABASE_URL: "postgres://localhost/dev"}
+    prod: {env: {DATABASE_URL: ''}}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.DATABASE_URL;
+    const run = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'setup', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    const missing = run();
+    assert.equal(missing.status, 1, missing.stderr);
+    assert.match(missing.stderr, /service api requires DATABASE_URL in production/);
+    await assert.rejects(fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'nothing ran');
+    env.DATABASE_URL = 'postgres://db.internal/app';
+    const supplied = run();
+    assert.equal(supplied.status, 0, supplied.stderr);
+    assert.equal(await fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'ran\n');
+  });
+
   it('does not hand --prod the cached assignment of a service prod.services leaves out', async () => {
     const cfg = await config(`prod: {services: [api]}
 services:

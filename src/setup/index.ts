@@ -47,9 +47,10 @@ export function setupFingerprint(command: string, cwd: string, mode: string, occ
 /**
  * The content of a plain step's `watch` files, folded into its receipt: the
  * step runs again when any of them changes, appears or disappears. Paths are
- * relative to the step's cwd; a missing file is a state of its own. Each file
- * contributes one record, its name and the digest of its content (or null when
- * it is absent), so no content can pass for absence or for another file's entry.
+ * relative to the step's cwd. A missing file is a state of its own; one that
+ * exists but cannot be read is an error. Each file contributes one record, its
+ * name and the digest of its content (or null when it is absent), so no content
+ * can pass for absence or for another file's entry.
  */
 function watchDigest(step: SetupStep, cwd: string): string | undefined {
   if (!step.watch) return undefined;
@@ -57,7 +58,13 @@ function watchDigest(step: SetupStep, cwd: string): string | undefined {
     let content: string | null;
     try {
       content = createHash('sha256').update(readFileSync(path.resolve(cwd, file))).digest('hex');
-    } catch {
+    } catch (error) {
+      // Only absence is a state of its own. A file that exists but cannot be read
+      // (EACCES, a directory) must not pass for a missing one and skip the step.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw new Error(`watch file "${file}" cannot be read: ${(error as Error).message}`);
+      }
       content = null;
     }
     return [file, content];

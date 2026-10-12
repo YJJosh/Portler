@@ -323,6 +323,24 @@ describe('buildServiceEnv', () => {
     assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { ...withFile.env, DEPLOY_SECRET: 's' }));
   });
 
+  it('counts a blank prod.env entry as required, like prod.require', () => {
+    // `prod.env: {KEY: ''}` (or a bare `KEY:`) says the deployment supplies the key, so a
+    // deployment that omits it fails the check instead of starting with an empty value.
+    const service = makeService({ env: { DATABASE_URL: 'postgres://dev' }, prod: { env: { DATABASE_URL: '', TOKEN: null, NODE_ENV: 'production' }, require: [] } });
+    const config = { ...makeConfig({ api: service }), production: true };
+    assert.deepEqual(requiredEnvKeys(config, service).sort(), ['DATABASE_URL', 'TOKEN']);
+    assert.throws(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { NODE_ENV: 'production' }), /service api requires DATABASE_URL, TOKEN in production/);
+    assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { DATABASE_URL: 'postgres://prod', TOKEN: 't' }));
+    // A blank top-level entry is required of the project and of a service with no value of
+    // its own for the key, not of one whose own env replaces it.
+    const plain = makeService({ name: 'plain' });
+    const own = makeService({ name: 'own', env: { PUBLIC_URL: 'https://own.example' } });
+    const root = { ...makeConfig({ plain, own }), production: true, prod: { env: { PUBLIC_URL: '' }, require: [] } };
+    assert.deepEqual(requiredEnvKeys(root), ['PUBLIC_URL']);
+    assert.deepEqual(requiredEnvKeys(root, plain), ['PUBLIC_URL']);
+    assert.deepEqual(requiredEnvKeys(root, own), []);
+  });
+
   it('masks generic key-like names too, not only the usual suspects', () => {
     const masked = maskSecrets({ SIGNING_KEY: 'a', ENCRYPTION_KEY: 'b', SSH_KEY: 'c', KEY: 'd', PASSPHRASE: 'e', TLS_CERT: 'f', KEYCLOAK_URL: 'http://kc', PUBLIC_PORT: '80' });
     assert.deepEqual(masked, { SIGNING_KEY: '***', ENCRYPTION_KEY: '***', SSH_KEY: '***', KEY: '***', PASSPHRASE: '***', TLS_CERT: '***', KEYCLOAK_URL: 'http://kc', PUBLIC_PORT: '80' });
