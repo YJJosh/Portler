@@ -1,4 +1,5 @@
-import { loadConfig, projectVolumePrefix } from '../../config/index.ts';
+import { loadConfig, volumeScope } from '../../config/index.ts';
+import { applyProduction } from '../../config/production.ts';
 import { forkVolume, listProjectVolumes, removeVolume } from '../../volumes/index.ts';
 import type { PortlerConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -23,7 +24,8 @@ async function listVolumes(config: PortlerConfig): Promise<number> {
     ]),
   );
 
-  process.stdout.write(`\n[portler] Docker name prefix: ${projectVolumePrefix(config.volumeRoot)}\n`);
+  process.stdout.write(`\n[portler] Docker name prefix: ${volumeScope(config).prefix}\n`);
+  if (config.production) process.stdout.write(`[portler] production scope: ${config.name ? `name "${config.name}"` : 'no name set, directory hash'}\n`);
   if (config.volumeSet) process.stdout.write(`[portler] active volume set: ${config.volumeSet}\n`);
   return 0;
 }
@@ -34,7 +36,7 @@ export async function commandVolumes(args: ParsedArgs): Promise<number> {
     throw new Error('--force only applies to "portler volumes remove"');
   }
 
-  const config = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
+  const config = applyProduction(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod);
 
   switch (subcommand) {
     case 'list':

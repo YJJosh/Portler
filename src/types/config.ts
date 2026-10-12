@@ -30,6 +30,8 @@ export interface DockerConfig {
   image: string;
   build?: DockerBuildConfig;
   containerName: string;
+  /** `container_name:` was set in the config; `name` does not rename it. */
+  containerNameExplicit?: true;
   volumes: string[];
   env: UnknownMap;
   command?: string;
@@ -150,6 +152,16 @@ export interface DeclaredVolume {
 export interface PortlerConfig {
   setup?: SetupStep[];
   prod?: ProductionConfig;
+  /**
+   * Stable project name (`name:` in portler.yml). Under --prod it names the
+   * Docker network, the containers and the managed volumes in place of the
+   * directory hash, so a release that unpacks into a new folder keeps its
+   * volumes, and a release that starts while the previous one is still up is
+   * refused by Docker on the container name. Development runs ignore it.
+   */
+  name?: string;
+  /** `docker_network:` was set in the config; `name` does not rename it. */
+  dockerNetworkExplicit?: true;
   /** Set by applyProduction: the deployment (process env, then use_env files) wins over config env. */
   production?: boolean;
   filePath: string;

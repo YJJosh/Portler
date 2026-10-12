@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fnv1aBase36 } from '../util/hash.ts';
+import type { PortlerConfig } from '../types/index.ts';
 
 export function slug(input: string): string {
   const value = input
@@ -30,6 +31,19 @@ export function defaultDockerNetwork(projectDir: string): string {
 }
 
 /**
+ * Under --prod with a top-level `name:`, containers and the network carry the
+ * name instead of the directory hash, so they are the same in every folder a
+ * release unpacks into. Images keep the hashed default.
+ */
+export function namedDockerContainer(name: string, serviceName: string): string {
+  return `portler-${name}-${slug(serviceName)}`;
+}
+
+export function namedDockerNetwork(name: string): string {
+  return `portler-${name}`;
+}
+
+/**
  * Separates the volume set suffix from the base volume name. Managed volume
  * and set names must not contain it so the full name parses unambiguously.
  */
@@ -49,8 +63,25 @@ export function projectVolumePrefix(volumeRoot: string): string {
  * `portler-<project>-<hash>-<name>` plus `--<set>` for a volume set variant.
  */
 export function projectVolumeName(volumeRoot: string, volumeName: string, volumeSet?: string): string {
-  const base = `${projectVolumePrefix(volumeRoot)}${slug(volumeName)}`;
+  return volumeFullName(projectVolumePrefix(volumeRoot), volumeName, volumeSet);
+}
+
+/** Full Docker volume name for an `@name` volume under a prefix from volumeScope. */
+export function volumeFullName(prefix: string, volumeName: string, volumeSet?: string): string {
+  const base = `${prefix}${slug(volumeName)}`;
   return volumeSet ? `${base}${VOLUME_SET_SEPARATOR}${slug(volumeSet)}` : base;
+}
+
+/**
+ * Where a project's managed volumes live and the owner they are labelled with.
+ * Development scopes them by the hash of volumeRoot, so every checkout has its
+ * own data. Under --prod with a `name:` the name scopes them instead, so a
+ * release that unpacks into a new folder keeps its volumes; the owner label is
+ * then the name, which never looks like a path.
+ */
+export function volumeScope(config: Pick<PortlerConfig, 'volumeRoot' | 'name' | 'production'>): { prefix: string; owner: string } {
+  if (config.production && config.name) return { prefix: `portler-${config.name}-`, owner: config.name };
+  return { prefix: projectVolumePrefix(config.volumeRoot), owner: config.volumeRoot };
 }
 
 /**

@@ -17,16 +17,16 @@ Usage:
   ${PACKAGE_NAME} ports
   ${PACKAGE_NAME} env [service] [--prod] [--reveal]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
-  ${PACKAGE_NAME} volumes [list]
-  ${PACKAGE_NAME} volumes fork <volume> <new-set>
-  ${PACKAGE_NAME} volumes remove <volume> [--force]
+  ${PACKAGE_NAME} volumes [list] [--prod]
+  ${PACKAGE_NAME} volumes fork <volume> <new-set> [--prod]
+  ${PACKAGE_NAME} volumes remove <volume> [--force] [--prod]
   ${PACKAGE_NAME} init
 
 Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
-      --prod              Use production overrides for setup, start, up, restart and env
+      --prod              Use production overrides for setup, start, up, restart, env and volumes
       --reveal            For "env --prod": print secret-looking values instead of ***
       --drain-ms <ms>     For "start": after the shell exits, wait up to <ms> for the rest
                           of its process group before returning (default 10000)

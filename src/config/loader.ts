@@ -9,7 +9,7 @@ import { findDependencyCycle, normalizeDependsOn } from './dependencies.ts';
 import { normalizeDockerModeConfig, normalizeTopLevelDockerConfig } from './docker.ts';
 import { normalizeHealthcheck } from './healthcheck.ts';
 import { normalizeK8sConfig } from './k8s.ts';
-import { defaultDockerNetwork, defaultK8sNamespace, k8sName } from './naming.ts';
+import { defaultDockerNetwork, defaultK8sNamespace, k8sName, VOLUME_SET_SEPARATOR } from './naming.ts';
 import { normalizeProduction, normalizeSetup } from './production.ts';
 import { normalizeProxyConfig } from './proxy.ts';
 import { collectDeclaredVolumes, normalizeVolumeSet, resolveVolumeRoot } from './volumes.ts';
@@ -119,6 +119,18 @@ export interface LoadConfigOptions {
   volumeSet?: string;
 }
 
+/**
+ * `name:` goes into Docker object names as-is under --prod, so it has to be a
+ * name Docker accepts, and it must not contain the volume set separator.
+ */
+function normalizeProjectName(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,39}$/.test(value) || value.includes(VOLUME_SET_SEPARATOR)) {
+    throw new Error('name must be 1 to 40 characters of lowercase letters, digits, "_", "." or "-", start with a letter or digit, and must not contain "--"');
+  }
+  return value;
+}
+
 export async function loadConfig(projectDir: string, explicitFile?: string, options: LoadConfigOptions = {}): Promise<PortlerConfig> {
   const filePath = await findConfigFile(projectDir, explicitFile);
   const rawText = await fs.readFile(filePath, 'utf8');
@@ -133,6 +145,8 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
   const urlHost = optionalString(root.url_host, 'url_host') ?? 'localhost';
   const protocol = optionalString(root.protocol, 'protocol') ?? 'http';
   const preferDeclaredPort = optionalBoolean(root.prefer_declared_port, 'prefer_declared_port', false);
+  const name = normalizeProjectName(root.name);
+  const dockerNetwork = optionalString(root.docker_network, 'docker_network');
 
   const config: PortlerConfig = {
     filePath,
@@ -146,7 +160,9 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     protocol,
     portRange: normalizePortRange(root),
     preferDeclaredPort,
-    dockerNetwork: optionalString(root.docker_network, 'docker_network') ?? defaultDockerNetwork(projectDir),
+    ...(name === undefined ? {} : { name }),
+    dockerNetwork: dockerNetwork ?? defaultDockerNetwork(projectDir),
+    ...(dockerNetwork === undefined ? {} : { dockerNetworkExplicit: true as const }),
     volumeRoot: await resolveVolumeRoot(projectDir),
     volumeSet: normalizeVolumeSet(options.volumeSet ?? process.env.PORTLER_VOLUME_SET),
     volumes: [],

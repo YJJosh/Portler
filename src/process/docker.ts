@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { managedVolumeName, normalizeVolumeToken, projectVolumeName, volumeLabelArgs } from '../config/index.ts';
+import { managedVolumeName, normalizeVolumeToken, volumeFullName, volumeLabelArgs, volumeScope } from '../config/index.ts';
 import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue } from '../env/index.ts';
 import { dockerLabelArgs, PROJECT_LABEL } from './ownership.ts';
 import type { Assignments, DockerConfig, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -47,7 +47,7 @@ function normalizeVolume(config: PortlerConfig, volume: string): string {
   } else if (source.startsWith('@')) {
     const volumeName = source.slice(1);
     if (!volumeName) throw new Error(`invalid Docker volume "${volume}": @ shorthand requires a name`);
-    parts[0] = projectVolumeName(config.volumeRoot, volumeName, config.volumeSet);
+    parts[0] = volumeFullName(volumeScope(config).prefix, volumeName, config.volumeSet);
   }
 
   return parts.join(':');
@@ -62,15 +62,15 @@ function normalizeVolume(config: PortlerConfig, volume: string): string {
 function ensureVolumeCommands(config: PortlerConfig, docker: DockerConfig): string[] {
   const commands: string[] = [];
   const template = shellQuote(`{{if .Labels}}{{index .Labels "${PROJECT_LABEL}"}}{{end}}`);
-  const expectedOwner = shellQuote(config.volumeRoot);
+  const expectedOwner = shellQuote(volumeScope(config).owner);
 
   for (const volumeEntry of docker.volumes) {
     const rawName = managedVolumeName(volumeEntry);
     if (rawName === undefined) continue;
     const name = normalizeVolumeToken(rawName, `volume name in "${volumeEntry}"`);
-    const fullNameValue = projectVolumeName(config.volumeRoot, name, config.volumeSet);
+    const fullNameValue = volumeFullName(volumeScope(config).prefix, name, config.volumeSet);
     const fullName = shellQuote(fullNameValue);
-    const labels = volumeLabelArgs(config.volumeRoot, name, config.volumeSet).map(shellQuote).join(' ');
+    const labels = volumeLabelArgs(volumeScope(config).owner, name, config.volumeSet).map(shellQuote).join(' ');
     const foreignMessage = shellQuote(
       `[portler] error: Docker volume "${fullNameValue}" exists but is not managed by this project; refusing to mount it`,
     );

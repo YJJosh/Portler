@@ -1,4 +1,5 @@
 import { isObject, normalizeEnvObject, optionalBoolean, optionalString } from './scalars.ts';
+import { namedDockerContainer, namedDockerNetwork } from './naming.ts';
 import type { PortlerConfig, ProductionConfig, SetupStep } from '../types/index.ts';
 
 const SETUP_STEP_KEYS = ['run', 'if_missing', 'always', 'watch'];
@@ -129,9 +130,13 @@ export function productionServices(config: PortlerConfig, prod = false, requeste
 export function applyProduction(config: PortlerConfig, prod = false): PortlerConfig {
   if (!prod) return config;
   const base = productionServices(config, true);
+  // A `name:` scopes the Docker network and the containers to the project instead of
+  // the directory hash (volumes follow through volumeScope); explicit names are kept.
+  const projectName = base.name;
   return {
     ...base,
     production: true,
+    dockerNetwork: projectName !== undefined && !base.dockerNetworkExplicit ? namedDockerNetwork(projectName) : base.dockerNetwork,
     setup: base.prod?.setup ?? base.setup,
     env: { ...base.env, ...base.prod?.env },
     services: serviceMap(Object.entries(base.services).map(([name, service]) => [name, {
@@ -141,6 +146,7 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
       env: { ...service.env, ...service.prod?.env },
       docker: service.docker ? {
         ...service.docker,
+        ...(projectName !== undefined && !service.docker.containerNameExplicit ? { containerName: namedDockerContainer(projectName, name) } : {}),
         // `prod.command` replaces `command`, so it only reaches containers that run
         // `command` (flagged at normalization); a `docker:` block's own command,
         // even one spelled like `command`, or the image CMD is kept.

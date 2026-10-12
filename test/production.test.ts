@@ -9,6 +9,7 @@ import { loadConfig } from '../src/config/loader.ts';
 import { applyDockerMode } from '../src/config/docker.ts';
 import { applyProduction, productionServices } from '../src/config/production.ts';
 import { expandAndOrderServices } from '../src/cli/services.ts';
+import { volumeFullName, volumeScope } from '../src/config/naming.ts';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -359,5 +360,42 @@ services:
     await assert.rejects(main(['start', '--setup']), /does not apply/);
     await assert.rejects(main(['down', '--prod']), /does not apply/);
     await assert.rejects(main(['up', 'k8s', '--prod']), /do not apply to k8s/);
+  });
+});
+
+describe('name: stable identity under --prod', () => {
+  it('rejects names Docker would not accept or that contain the volume set separator', async () => {
+    for (const bad of ['Todo', 'my app', '-todo', 'a--b', 'x'.repeat(41)]) {
+      await assert.rejects(config(`name: ${JSON.stringify(bad)}\nservices:\n  api:\n    command: node -e ""\n    port: 3000\n`), /name must be/);
+    }
+  });
+
+  it('names the network, containers and volumes after the project under --prod and keeps explicit names', async () => {
+    const cfg = await config(['name: todo', 'services:', '  api:', '    image: example/api', '    volumes: ["@data:/data"]', '  db:', '    image: postgres:16', '    container_name: my-db', ''].join('\n'));
+    assert.notEqual(cfg.dockerNetwork, 'portler-todo', 'development keeps the hashed default');
+    assert.notEqual(cfg.services.api?.docker?.containerName, 'portler-todo-api');
+    assert.equal(volumeScope(cfg).owner, cfg.volumeRoot);
+
+    const prod = applyProduction(cfg, true);
+    assert.equal(prod.dockerNetwork, 'portler-todo');
+    assert.equal(prod.services.api?.docker?.containerName, 'portler-todo-api');
+    assert.equal(prod.services.db?.docker?.containerName, 'my-db', 'an explicit container name is kept');
+    assert.deepEqual(volumeScope(prod), { prefix: 'portler-todo-', owner: 'todo' });
+    assert.equal(volumeFullName(volumeScope(prod).prefix, 'data', 'migration'), 'portler-todo-data--migration');
+    assert.equal(applyProduction(cfg, false).dockerNetwork, cfg.dockerNetwork, 'development is unchanged');
+  });
+
+  it('keeps an explicit docker_network, and changes nothing without a name', async () => {
+    const explicit = await config('name: todo\ndocker_network: shared\nservices:\n  api:\n    image: example/api\n');
+    assert.equal(applyProduction(explicit, true).dockerNetwork, 'shared');
+    const unnamed = await config('services:\n  api:\n    image: example/api\n');
+    const prod = applyProduction(unnamed, true);
+    assert.equal(prod.dockerNetwork, unnamed.dockerNetwork);
+    assert.equal(prod.services.api?.docker?.containerName, unnamed.services.api?.docker?.containerName);
+    assert.equal(volumeScope(prod).owner, unnamed.volumeRoot);
+  });
+
+  it('accepts --prod on volumes', async () => {
+    await assert.rejects(main(['volumes', 'list', '--prod', '--file', '/nonexistent/portler.yml']), (error: Error) => !/does not apply/.test(error.message));
   });
 });

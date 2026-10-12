@@ -11,6 +11,7 @@ Portler uses its own hand-rolled YAML parser covering a practical subset: mappin
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `setup` | string \| list of commands and steps | — | Host shell commands run from the project root; a step object adds `if_missing`, `always` or `watch`. See [Setup and prod](#setup-and-prod) |
+| `name` | string | — | Stable project name. Under `--prod` it names the Docker network, the containers and the managed volumes instead of the directory hash; `[a-z0-9][a-z0-9_.-]*`, no `--`. See [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server) |
 | `prod` | object | — | Production `setup` replacement, `env` overrides, `require` (keys the deployment must supply) and `services` (which services run), used with `--prod` |
 | `services` | mapping | — (required) | The services to run; see [Service options](#service-options) |
 | `use_env` | string \| list | `[]` | `.env` file(s) loaded for all services, later files win. Alias: `env_file` |
