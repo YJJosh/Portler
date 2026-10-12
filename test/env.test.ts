@@ -323,6 +323,11 @@ describe('buildServiceEnv', () => {
     assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { ...withFile.env, DEPLOY_SECRET: 's' }));
   });
 
+  it('masks generic key-like names too, not only the usual suspects', () => {
+    const masked = maskSecrets({ SIGNING_KEY: 'a', ENCRYPTION_KEY: 'b', SSH_KEY: 'c', KEY: 'd', PASSPHRASE: 'e', TLS_CERT: 'f', KEYCLOAK_URL: 'http://kc', PUBLIC_PORT: '80' });
+    assert.deepEqual(masked, { SIGNING_KEY: '***', ENCRYPTION_KEY: '***', SSH_KEY: '***', KEY: '***', PASSPHRASE: '***', TLS_CERT: '***', KEYCLOAK_URL: 'http://kc', PUBLIC_PORT: '80' });
+  });
+
   it('prints the deployment view with secrets masked', () => {
     const service = makeService({ env: { DATABASE_URL: 'postgres://app:hunter2@db:5432/app', API_TOKEN: 'abc', PLAIN: 'x' } });
     const config = { ...makeConfig({ api: service }, { ROOT_VALUE: 'r' }), production: true };

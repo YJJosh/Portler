@@ -72,6 +72,13 @@ async function drainGroup(pgid: number, deadlineMs: number): Promise<void> {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       }
+      // SIGKILL is not instant, and under a PID 1 that does not reap orphans a
+      // killed member stays in the group as a zombie. Confirm the group is gone
+      // before returning, and say so when it is not: the exit code stays the
+      // shell's, since nothing more can be done to a process that survived SIGKILL.
+      const confirmUntil = Date.now() + 2000;
+      while (groupAlive(pgid) && Date.now() < confirmUntil) await new Promise((resolve) => setTimeout(resolve, 50));
+      if (groupAlive(pgid)) process.stderr.write(`[portler] process group ${pgid} is still present after SIGKILL (unreaped?); giving up on it\n`);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));

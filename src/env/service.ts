@@ -168,7 +168,10 @@ export function assertRequiredEnv(owner: string, required: string[], env: EnvMap
   );
 }
 
-const SECRET_KEY = /(SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|API_KEY|ACCESS_KEY|CREDENTIAL)/i;
+// A name that contains one of these words, or KEY/CERT as a whole word (SIGNING_KEY,
+// ENCRYPTION_KEY, SSH_KEY, KEY), is masked. Over-masking is the safe direction;
+// --reveal shows the value.
+const SECRET_KEY = /(SECRET|TOKEN|PASS|PWD|PRIVATE|CREDENTIAL|APIKEY|SALT|(^|_)(KEYS?|CERT)(_|$))/i;
 const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:)[^\s/@]+@/gi;
 
 /** Hide secret-looking values, and the password of URL credentials, for printing. */

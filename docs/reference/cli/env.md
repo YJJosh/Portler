@@ -6,7 +6,7 @@ Print generated and resolved environment values.
 portler env [service] [--prod] [--reveal]
 ```
 
-`--prod` prints what `up --prod` hands the service: the production overrides applied, the deployment's values with their precedence (process env, then the `use_env` file, then config), and only the keys the service receives. Secret-looking values (`SECRET`, `TOKEN`, `PASSWORD`, `KEY`, and the password in a URL) are masked unless `--reveal` is given, and missing `prod.require` keys are reported on stderr. Port assignment is the same as `up`; `start` uses the platform's `PORT` instead.
+`--prod` prints what `up --prod` hands the service: the production overrides applied, the deployment's values with their precedence (process env, then the `use_env` file, then config), and only the keys the service receives. Secret-looking values are masked unless `--reveal` is given: a name containing `SECRET`, `TOKEN`, `PASS`, `PWD`, `PRIVATE`, `CREDENTIAL`, `SALT` or `APIKEY`, or `KEY` or `CERT` as a word (`SIGNING_KEY`, `SSH_KEY`), and the password in a URL, and missing `prod.require` keys are reported on stderr. Port assignment is the same as `up`; `start` uses the platform's `PORT` instead.
 
 ## Behavior
 
