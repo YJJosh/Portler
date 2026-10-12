@@ -4,6 +4,7 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  isPidRunning,
   pidInfoFor,
   readPids,
   runningServices,
@@ -183,7 +184,8 @@ export async function startPhase(
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
   const config = configForRunMode(rawConfig, mode);
-  const runningNames = new Set(runningServices(await readPids(config.projectDir)));
+  const pidsBefore = await readPids(config.projectDir);
+  const runningNames = new Set(runningServices(pidsBefore));
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -260,12 +262,25 @@ export async function startPhase(
     // proxy starts. Its own readiness wait returned long ago, so nothing else
     // would notice and `up` would report a started stack with a dead member.
     // The proxy's own exit is reported by its readiness wait.
+    // Dependencies this run leaves running (restart's skipRunning) are not in
+    // `children`, so their recorded pids are rechecked instead. For a Docker
+    // service that pid is the `docker run` client, which exits with the container.
+    const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = (): void => {
-      const died = [...children]
+      const spawnedDied = [...children]
         .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
         .map(([name]) => name);
+      const retainedDied = retained.filter((name) => {
+        const pid = pidsBefore?.services[name]?.pid;
+        return pid !== undefined && !isPidRunning(pid);
+      });
+      const died = [...spawnedDied, ...retainedDied];
       if (died.length === 0) return;
-      const hints = died.map((name) => logLocationHint(name, options.detach ? serviceLogPath(config.projectDir, name) : undefined));
+      // A retained service was started by an earlier run; its log file is the
+      // best pointer we have, whether or not that run was detached.
+      const hints = died.map((name) =>
+        logLocationHint(name, options.detach || retainedDied.includes(name) ? serviceLogPath(config.projectDir, name) : undefined),
+      );
       throw new Error(
         `service${died.length > 1 ? 's' : ''} ${died.join(', ')} exited while the stack was still starting. ` +
           `${hints.length === 1 ? hints[0] : hints.join('; ')}, then run the same command again.`,
