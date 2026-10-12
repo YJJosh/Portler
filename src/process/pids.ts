@@ -1,5 +1,5 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
@@ -137,8 +137,8 @@ export function isPidRunning(pid: number): boolean {
  * that does not reap orphans (a container without an init) a dead service's
  * leader stays one, so the existence check alone would call it alive. The
  * state comes from /proc on Linux and `ps` on macOS, the two platforms Portler
- * supports; anywhere else, or if the probe itself fails, the existence check
- * decides.
+ * supports; anywhere else, or when the state cannot be read, the existence
+ * check decides.
  */
 export function isPidAlive(pid: number): boolean {
   if (!isPidRunning(pid)) return false;
@@ -146,13 +146,14 @@ export function isPidAlive(pid: number): boolean {
     let stat: string;
     try {
       stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    } catch (error) {
-      // Only a missing entry on a mounted /proc means the process is gone.
-      // Without a /proc mount (a restricted chroot or container), or on a
-      // permission error, the probe is unavailable and the existence check
-      // decides.
-      const code = (error as { code?: string }).code;
-      return !(code === 'ENOENT' && existsSync('/proc/self/stat'));
+    } catch {
+      // A zombie still has a /proc entry, so a failed read never means
+      // "zombie". It means gone since the existence check, or that the state
+      // is unreadable: no /proc mount, a permission error, or a procfs with
+      // hidepid, which answers ENOENT for a live process of another user.
+      // Ask the existence check again and take its answer. A hidden zombie
+      // stays indistinguishable from a hidden live process.
+      return isPidRunning(pid);
     }
     // `pid (comm) S ...`; comm may contain spaces or parentheses.
     const state = stat.charAt(stat.lastIndexOf(')') + 2);
