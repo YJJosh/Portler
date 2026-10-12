@@ -33,6 +33,13 @@ export interface DockerConfig {
   volumes: string[];
   env: UnknownMap;
   command?: string;
+  /**
+   * The container runs the service's `command` (a service with top-level
+   * `image`/`build`), so `prod.command` reaches it. Absent for a `docker:`
+   * block, which sets its own command or leaves the image CMD, even when the
+   * text it sets happens to match `command`.
+   */
+  commandFromService?: true;
 }
 
 export interface K8sVolumeConfig {
@@ -49,7 +56,28 @@ export interface K8sConfig {
   volume?: K8sVolumeConfig;
 }
 
+/**
+ * One setup command. A plain string in portler.yml is the same as `{ run }`:
+ * it runs once per checkout and again when its command or cwd changes (the
+ * receipt lives in `.portler/setup.json`). `if_missing` runs it only while
+ * nothing exists at that path, relative to the step's cwd; `always` runs it on
+ * every `up` and `setup`. Neither of those two keeps a receipt.
+ */
+export interface SetupStep {
+  run: string;
+  ifMissing?: string;
+  always?: boolean;
+}
+
+export interface ProductionConfig {
+  setup?: SetupStep[];
+  command?: string;
+  env: UnknownMap;
+}
+
 export interface ServiceConfig {
+  setup?: SetupStep[];
+  prod?: ProductionConfig;
   name: string;
   command?: string;
   cwd: string;
@@ -114,6 +142,10 @@ export interface DeclaredVolume {
 }
 
 export interface PortlerConfig {
+  setup?: SetupStep[];
+  prod?: ProductionConfig;
+  /** Set by applyProduction: the deployment (process env, then use_env files) wins over config env. */
+  production?: boolean;
   filePath: string;
   projectDir: string;
   useEnv: string[];

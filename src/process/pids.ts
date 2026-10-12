@@ -5,7 +5,7 @@ import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
 import { portlerDir } from '../state/index.ts';
 import { withProjectLock } from '../state/lock.ts';
-import { isObject, isOptionalPort, isOptionalString, isPositiveInteger, isString } from '../util/guards.ts';
+import { isObject, isOptionalBoolean, isOptionalPort, isOptionalString, isPositiveInteger, isString } from '../util/guards.ts';
 import { readValidatedJsonFile, readValidatedJsonFileOrNull, writeJsonFile } from '../util/json-file.ts';
 import { readProcessStartToken } from './identity.ts';
 import type { PidsFile, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -20,6 +20,7 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     isOptionalString(value.url) &&
     isOptionalString(value.dockerContainer) &&
     isOptionalString(value.dockerNetwork) &&
+    isOptionalBoolean(value.prod) &&
     isOptionalString(value.startToken) &&
     isString(value.startedAt)
   );
@@ -204,6 +205,7 @@ export async function pidInfoFor(
     url: assignment?.url,
     dockerContainer: service.docker?.containerName,
     dockerNetwork: service.docker ? config.dockerNetwork : undefined,
+    prod: config.production === true,
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
   };

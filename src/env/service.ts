@@ -54,7 +54,15 @@ function injectPortEnv(env: EnvMap, service: ServiceConfig, assignment: ServiceA
 /**
  * Compose the full environment for a service, layering (lowest to highest
  * precedence): the current process env, base `.env` files, root config env,
- * generated PORTLER_* values, and the service's own env overrides.
+ * the service's own env overrides, and generated PORTLER_* values.
+ *
+ * In production (`config.production`, set by applyProduction) the deployment
+ * wins over portler.yml instead: root config env, the service's own env, base
+ * `.env` files, then the current process env. Generated PORTLER_* values and
+ * `port_env` keys stay Portler's own in both orders, and containers receive the
+ * same set of keys; only the values differ. A key the deployment supplies is not
+ * resolved from config at all, so a reference that only works in development
+ * cannot block the deployment's value.
  */
 export function buildServiceEnv(
   config: PortlerConfig,
@@ -63,22 +71,27 @@ export function buildServiceEnv(
   generatedEnv: EnvMap,
   assignments: Assignments,
 ): ServiceEnv {
-  const rootEnv = resolveEnvMap(config.env, assignments);
-  const serviceEnv = resolveEnvMap(service.env, assignments);
-  const env: EnvMap = {
-    ...processEnvAsMap(),
-    ...baseEnv,
-    ...rootEnv,
-    ...generatedEnv,
-    ...serviceEnv,
-    PORTLER_SERVICE_NAME: service.name,
-  };
+  const processEnv = processEnvAsMap();
+  // In production a key the deployment supplies (process env or use_env file) is left out
+  // of resolution: its config value never applies, and a reference that only resolves in
+  // development (a service with no assignment here) must not block the deployment's value.
+  const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]) : undefined;
+  // A root key the service's own env replaces (prod.env is folded in by then) is never used
+  // for this service, in either mode, so it is not resolved either: a reference only another
+  // service can resolve must not block the value this service actually gets.
+  const rootSkip = new Set([...(overridden ?? []), ...Object.keys(service.env)]);
+  const rootEnv = resolveEnvMap(config.env, assignments, rootSkip);
+  const serviceEnv = resolveEnvMap(service.env, assignments, overridden);
+  const env: EnvMap = config.production
+    ? { ...rootEnv, ...serviceEnv, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
+    : { ...processEnv, ...baseEnv, ...rootEnv, ...serviceEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name };
 
+  // Raw config keys, so an overridden key still reaches containers with the deployment's value.
   const explicitKeys = new Set<string>([
     ...Object.keys(baseEnv),
-    ...Object.keys(rootEnv),
+    ...Object.keys(config.env),
     ...Object.keys(generatedEnv),
-    ...Object.keys(serviceEnv),
+    ...Object.keys(service.env),
     'PORTLER_SERVICE_NAME',
   ]);
 
@@ -105,20 +118,20 @@ export function buildPrintableEnv(
   generatedEnv: EnvMap,
   assignments: Assignments,
 ): EnvMap {
-  const rootEnv = resolveEnvMap(config.env, assignments);
-
   if (!service) {
     return {
+      ...resolveEnvMap(config.env, assignments),
       ...generatedEnv,
-      ...rootEnv,
     };
   }
 
+  // Same rule as buildServiceEnv: a root key the service's own env replaces is not resolved.
+  const rootEnv = resolveEnvMap(config.env, assignments, new Set(Object.keys(service.env)));
   const serviceEnv = resolveEnvMap(service.env, assignments);
   const output: EnvMap = {
-    ...generatedEnv,
     ...rootEnv,
     ...serviceEnv,
+    ...generatedEnv,
     PORTLER_SERVICE_NAME: service.name,
   };
 

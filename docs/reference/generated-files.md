@@ -5,6 +5,7 @@
 Portler writes runtime files to `.portler/` in the project directory:
 
 ```text
+.portler/setup.json          receipts of the plain setup steps that succeeded, per owner and mode
 .portler/state.json          last assignments and run metadata
 .portler/runtime.env         resolved env snapshot
 .portler/pids.json           pids of detached services and the proxy
@@ -33,3 +34,9 @@ Notes:
 ```
 
 The registry records which project/service reserved which port and bind host, so concurrent `portler up` runs in different projects never hand out the same port. Stale entries (port free again on the recorded host, reservation old enough) are pruned automatically; `portler clean --global` forces a prune, and `portler clean --ports` releases the current project's reservations. If the registry itself is malformed, ordinary commands fail closed rather than discard unknown reservations; `portler clean --global --force` is the explicit reset path.
+
+## Setup receipts
+
+`setup.json` stores version 2, the absolute project identity, and per owner (keyed by run mode `local`/`docker`, environment `dev`/`prod`, and `project` or `service:<name>`) the SHA-256 fingerprints of the plain setup steps that succeeded. A fingerprint covers one step's command, resolved cwd and mode, plus its position among the entries of its list that run the same command, whatever their kind, and how many such entries there are, so adding or removing a duplicate of a command runs every entry with that command again. A receipt is written as soon as its step succeeds; a step that left its definition loses its receipt before the next run in that mode, whether or not its owner is part of that run, and an owner that left the config (or has no steps left in that mode) loses all of them the same way, and a forced run clears every receipt of the owner before running. `if_missing` and `always` steps never get one. Writes are atomic and serialized by the lifecycle lock. Receipts copied from another checkout are not reused, and a version 1 file (one fingerprint per owner) is treated as empty.
+
+Deleting this file (or running `clean`) makes the next `up` run every plain step again. `down` preserves receipts. Source files, lockfiles, env values and port assignments are not fingerprinted; use `if_missing` or `always` steps, or force setup, when these inputs require a rerun.

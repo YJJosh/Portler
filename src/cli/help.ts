@@ -4,16 +4,18 @@ export function printHelp(): void {
   process.stdout.write(`${PACKAGE_NAME} ${VERSION}
 
 Usage:
-  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>]
+  ${PACKAGE_NAME} setup [docker] [service...] [--prod]
+  ${PACKAGE_NAME} start [service] [--prod]
+  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup]
   ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>]
   ${PACKAGE_NAME} up k8s [service...] [--detach]
   ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
   ${PACKAGE_NAME} k8s render [service...]
-  ${PACKAGE_NAME} restart [docker] [service...]
+  ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup]
   ${PACKAGE_NAME} ps [service...]
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports
-  ${PACKAGE_NAME} env [service]
+  ${PACKAGE_NAME} env [service] [--prod]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
   ${PACKAGE_NAME} volumes [list]
   ${PACKAGE_NAME} volumes fork <volume> <new-set>
@@ -24,6 +26,11 @@ Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
+      --prod              Use production overrides for setup, start, up, restart and env
+      --setup             For "up" and "restart": run setup steps again, ignoring their receipts
+                          (local/Docker; an if_missing step still skips while its
+                          path exists)
+      --no-setup          For "up" and "restart": skip setup entirely (local/Docker)
       --ports             For "clean": only release this project's ports
       --global            For "clean": prune stale entries from the global registry
                           (with --force, reset it if it is corrupt/unreadable)

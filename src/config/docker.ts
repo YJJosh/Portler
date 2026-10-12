@@ -85,13 +85,10 @@ export function normalizeTopLevelDockerConfig(
   if (!hasTopLevelDocker) return undefined;
   if (explicitType && explicitType !== 'docker') throw new Error(`services.${serviceName}.type only supports "docker" right now`);
 
-  return normalizeDockerConfigFromObject(
-    rawService,
-    serviceName,
-    projectDir,
-    `services.${serviceName}`,
-    rawImage ?? defaultDockerImage(projectDir, serviceName),
-  );
+  return {
+    ...normalizeDockerConfigFromObject(rawService, serviceName, projectDir, `services.${serviceName}`, rawImage ?? defaultDockerImage(projectDir, serviceName)),
+    commandFromService: true,
+  };
 }
 
 /**

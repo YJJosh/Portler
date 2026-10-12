@@ -13,6 +13,10 @@ export function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
+export function isOptionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean';
+}
+
 export function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
