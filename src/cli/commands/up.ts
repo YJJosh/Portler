@@ -20,7 +20,7 @@ import { waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
-import type { Assignments, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { commandUpK8s } from './up-k8s.ts';
 import { printPortTable } from '../table.ts';
@@ -166,6 +166,39 @@ export interface StartedStack {
 }
 
 /**
+ * Every service the given PID entries depend on, transitively, as each entry
+ * recorded when it started: what a service actually runs with, whichever
+ * portler.yml a run read. An entry written by an older Portler has no record;
+ * its dependencies come from the config as it is on disk now, the nearest
+ * thing to what started it, and a file that no longer loads means none.
+ */
+async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, roots: string[]): Promise<Set<string>> {
+  let fallback: PortlerConfig | null | undefined;
+  const dependenciesOf = async (serviceName: string): Promise<string[]> => {
+    const recorded = pids.services[serviceName]?.dependsOn;
+    if (recorded) return recorded;
+    if (fallback === undefined) {
+      try {
+        fallback = await loadConfig(config.projectDir, config.filePath, { volumeSet: config.volumeSet });
+      } catch {
+        fallback = null;
+      }
+    }
+    return fallback?.services[serviceName]?.dependsOn.map((dependency) => dependency.service) ?? [];
+  };
+  const closure = new Set<string>();
+  const queue = [...roots];
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    for (const dependency of await dependenciesOf(next)) {
+      if (closure.has(dependency)) continue;
+      closure.add(dependency);
+      queue.push(dependency);
+    }
+  }
+  return closure;
+}
+
+/**
  * Shared start engine behind `up` and `restart`: expand the requested roots
  * to their dependencies, allocate ports, and spawn everything in dependency
  * order.
@@ -261,21 +294,20 @@ export async function startPhase(
     // What a later run adopted stays up. `restart api` replaces api and keeps
     // this run's db and proxy as the replacement's dependencies, so their
     // entries still match this run; stopping them here would leave another
-    // run's service without what it depends on. Anything a live foreign
-    // service depends on, and the proxy while any such service remains, is
-    // left alone, reservation included.
+    // run's service without what it depends on. The dependencies walked are
+    // the ones each entry recorded when it started, not this run's captured
+    // config: portler.yml may have changed in between, and the restart read
+    // the newer file. Anything a live foreign service depends on, and the
+    // proxy while any such service remains, is left alone, reservation included.
     const foreignLive = Object.entries(current?.services ?? {})
       .filter(
         ([serviceName, info]) =>
-          serviceName !== PROXY_SERVICE_NAME &&
-          !stopNames.includes(serviceName) &&
-          Object.hasOwn(rawConfig.services, serviceName) &&
-          isPidRunning(info.pid),
+          serviceName !== PROXY_SERVICE_NAME && !stopNames.includes(serviceName) && isPidRunning(info.pid),
       )
       .map(([serviceName]) => serviceName);
     let toStop = stopNames;
     if (foreignLive.length > 0) {
-      const adopted = new Set(expandAndOrderServices(rawConfig, foreignLive));
+      const adopted = await recordedDependencyClosure(config, current!, foreignLive);
       if (startedEntries.has(PROXY_SERVICE_NAME)) adopted.add(PROXY_SERVICE_NAME);
       toStop = stopNames.filter((serviceName) => !adopted.has(serviceName));
       for (const serviceName of stopNames.filter((serviceName) => adopted.has(serviceName))) {

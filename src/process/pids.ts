@@ -4,7 +4,7 @@ import type { ChildProcess } from 'node:child_process';
 import { resolveServiceCwd } from '../config/index.ts';
 import { portlerDir } from '../state/index.ts';
 import { withProjectLock } from '../state/lock.ts';
-import { isObject, isOptionalPort, isOptionalString, isPositiveInteger, isString } from '../util/guards.ts';
+import { isObject, isOptionalPort, isOptionalString, isOptionalStringArray, isPositiveInteger, isString } from '../util/guards.ts';
 import { readValidatedJsonFile, readValidatedJsonFileOrNull, writeJsonFile } from '../util/json-file.ts';
 import { readProcessStartToken } from './identity.ts';
 import type { PidsFile, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -20,6 +20,7 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     isOptionalString(value.dockerContainer) &&
     isOptionalString(value.dockerNetwork) &&
     isOptionalString(value.startToken) &&
+    isOptionalStringArray(value.dependsOn) &&
     isString(value.startedAt)
   );
 }
@@ -167,6 +168,9 @@ export async function pidInfoFor(
     dockerContainer: service.docker?.containerName,
     dockerNetwork: service.docker ? config.dockerNetwork : undefined,
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
+    // Always recorded, empty included: an entry without the field was written
+    // by an older Portler, which is a different fact from "no dependencies".
+    dependsOn: service.dependsOn.map((dependency) => dependency.service),
     startedAt: new Date().toISOString(),
   };
 }

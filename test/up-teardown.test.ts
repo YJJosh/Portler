@@ -203,6 +203,118 @@ describe('foreground teardown ownership', () => {
     assert.ok(isPidRunning(afterRestart.services.api!.pid) && isPidRunning(afterRestart.services[PROXY_SERVICE_NAME]!.pid));
   });
 
+  const independentConfig = [
+    'services:',
+    '  db:',
+    `    command: exec "${process.execPath}" server.cjs`,
+    '    port: 3001',
+    '    port_env: PORT',
+    '  api:',
+    `    command: exec "${process.execPath}" server.cjs`,
+    '    port: 3000',
+    '    port_env: PORT',
+    'proxy:',
+    '  routes:',
+    '    /: api',
+    '',
+  ].join('\n');
+  const dependentConfig = independentConfig.replace('    port_env: PORT\nproxy:', '    port_env: PORT\n    depends_on: [db]\nproxy:');
+  assert.notEqual(dependentConfig, independentConfig);
+
+  async function startForegroundWith(configText: string) {
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), configText);
+    const config = await loadConfig(projectDir);
+    const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['db', 'api'], { detach: false }));
+    for (const child of stack.children.values()) childPids.add(child.pid!);
+    return stack;
+  }
+
+  it('keeps a dependency the restart gained from an edited portler.yml', { timeout: 15_000 }, async (t) => {
+    // This run started db and api independent. portler.yml then changed, and
+    // `restart api` started a replacement that depends on db. What the
+    // replacement recorded decides, not this run's captured config.
+    const stack = await startForegroundWith(independentConfig);
+    const original = (await readPids(projectDir))!;
+    assert.deepEqual(original.services.api!.dependsOn, [], 'this run recorded api without dependencies');
+
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), dependentConfig);
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    assert.deepEqual(afterRestart.services.api!.dependsOn, ['db'], 'the replacement recorded what it started with');
+    assert.deepEqual(afterRestart.services.db, original.services.db, 'db was kept by the restart');
+    const registry = await readRegistry();
+
+    const signals: number[] = [];
+    const kill = process.kill;
+    t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal !== 0) signals.push(pid);
+      return kill(pid, signal);
+    });
+    const notices: string[] = [];
+    t.mock.method(process.stderr, 'write', (text: string) => { notices.push(text); return true; });
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    t.mock.restoreAll();
+
+    assert.deepEqual(signals, [], 'db, which the replacement depends on, must not be signalled');
+    assert.deepEqual(await readPids(projectDir), afterRestart, 'api replacement, db and proxy entries survive');
+    assert.deepEqual(await readRegistry(), registry, 'their reservations survive');
+    for (const name of ['db', 'api', PROXY_SERVICE_NAME]) {
+      assert.ok(isPidRunning(afterRestart.services[name]!.pid), `${name} must still be alive`);
+    }
+    assert.ok(notices.some((text) => text.includes('"db"') && text.includes('depends on it')));
+  });
+
+  it('stops a dependency the restart dropped through an edited portler.yml', { timeout: 15_000 }, async () => {
+    // The mirror image: this run's config made api depend on db, the edited
+    // one does not, and the replacement api recorded no dependencies. Nothing
+    // live needs db any more, so this run stops and releases it.
+    const stack = await startForegroundWith(dependentConfig);
+    const original = (await readPids(projectDir))!;
+    assert.deepEqual(original.services.api!.dependsOn, ['db']);
+
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), independentConfig);
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    assert.deepEqual(afterRestart.services.api!.dependsOn, []);
+    const dbPort = String(original.services.db!.port);
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.db, undefined, 'db, which the replacement no longer needs, is stopped');
+    assert.ok(!isPidRunning(original.services.db!.pid), 'db is gone');
+    assert.equal((await readRegistry()).ports[dbPort], undefined, 'and its reservation is released');
+    assert.deepEqual(after.services.api, afterRestart.services.api, 'the api replacement is untouched');
+    assert.deepEqual(after.services[PROXY_SERVICE_NAME], afterRestart.services[PROXY_SERVICE_NAME], 'the proxy stays for the replacement');
+  });
+
+  it('falls back to the config on disk for an entry that recorded no dependencies', { timeout: 15_000 }, async () => {
+    // A PID entry written by an older Portler has no dependsOn. Its
+    // dependencies are then read from portler.yml as it is now, which is what
+    // such a run most plausibly started from, rather than from this run's copy.
+    const stack = await startForegroundWith(independentConfig);
+    const original = (await readPids(projectDir))!;
+
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), dependentConfig);
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+      delete pids.services.api!.dependsOn;
+    }));
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    assert.equal(afterRestart.services.api!.dependsOn, undefined);
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = (await readPids(projectDir))!;
+    assert.deepEqual(after.services.db, original.services.db, 'db stays: the file on disk says the replacement depends on it');
+    assert.ok(isPidRunning(original.services.db!.pid));
+    assert.deepEqual(after.services.api, afterRestart.services.api);
+    assert.deepEqual(after.services[PROXY_SERVICE_NAME], afterRestart.services[PROXY_SERVICE_NAME]);
+  });
+
   for (const changed of ['pid', 'startToken'] as const) {
     it(`preserves an entry when only its ${changed} differs`, { timeout: 10_000 }, async () => {
       const stack = await startForeground();

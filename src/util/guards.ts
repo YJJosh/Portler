@@ -13,6 +13,10 @@ export function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
+export function isOptionalStringArray(value: unknown): value is string[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every(isString));
+}
+
 export function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }

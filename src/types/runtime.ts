@@ -34,6 +34,14 @@ export interface PidServiceInfo {
    * files written by Portler < 0.2.0.
    */
   startToken?: string;
+  /**
+   * Names of the services this one was started depending on (its `depends_on`
+   * as the run that started it read them). A foreground `up` tearing down after
+   * a `restart` replaced some of its services keeps whatever the replacements
+   * recorded here, so an edited `portler.yml` cannot make it stop a dependency
+   * the newer run still needs. Absent in PID files written by Portler < 0.2.2.
+   */
+  dependsOn?: string[];
   startedAt: string;
 }
 
