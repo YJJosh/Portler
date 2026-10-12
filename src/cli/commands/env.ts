@@ -33,7 +33,7 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
     // prints no values for an external service and `setup --prod` cannot resolve `${db.url}`
     // where `up --prod` rejects it. state.json itself is left as it is.
     const configured = new Set(configuredWithPorts);
-    const assignments: Assignments = Object.fromEntries(Object.entries(state.services).filter(([name]) => configured.has(name)));
+    const assignments: Assignments = Object.assign(Object.create(null) as Assignments, Object.fromEntries(Object.entries(state.services).filter(([name]) => configured.has(name))));
     return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
   }
 

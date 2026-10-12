@@ -87,6 +87,14 @@ export function normalizeProduction(value: unknown, name: string, service: boole
 }
 
 /**
+ * Rebuild a service map the way the loader makes it, without a prototype, so a
+ * name such as "constructor" or "toString" is unknown rather than inherited.
+ */
+function serviceMap<T>(entries: Array<[string, T]>): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, Object.fromEntries(entries));
+}
+
+/**
  * Under --prod only the services in top-level prod.services run; the rest are
  * external to the deployment (a managed database, a hosted queue) and reached
  * through values the deployment supplies. Dependencies on left-out services
@@ -109,7 +117,7 @@ export function productionServices(config: PortlerConfig, prod = false, requeste
   }
   return {
     ...config,
-    services: Object.fromEntries(
+    services: serviceMap(
       Object.entries(config.services)
         .filter(([name]) => keep.has(name))
         .map(([name, service]) => [name, { ...service, dependsOn: service.dependsOn.filter((dependency) => keep.has(dependency.service)) }]),
@@ -126,7 +134,7 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
     production: true,
     setup: base.prod?.setup ?? base.setup,
     env: { ...base.env, ...base.prod?.env },
-    services: Object.fromEntries(Object.entries(base.services).map(([name, service]) => [name, {
+    services: serviceMap(Object.entries(base.services).map(([name, service]) => [name, {
       ...service,
       setup: service.prod?.setup ?? service.setup,
       command: service.prod?.command ?? service.command,

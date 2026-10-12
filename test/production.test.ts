@@ -8,6 +8,7 @@ import { main } from '../src/cli/index.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyDockerMode } from '../src/config/docker.ts';
 import { applyProduction, productionServices } from '../src/config/production.ts';
+import { expandAndOrderServices } from '../src/cli/services.ts';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -213,6 +214,22 @@ services:
     assert.deepEqual(Object.keys(applyProduction(cfg, true).services), ['api', 'web'], 'applyProduction applies the list too');
     assert.throws(() => productionServices(cfg, true, ['postgres']), /service "postgres" is not in prod.services/);
     assert.doesNotThrow(() => productionServices(cfg, true, ['api']));
+  });
+
+  it('keeps the production service map prototype-free, so an inherited name is an unknown service', async () => {
+    const cfg = await config(`prod: {services: [api, web]}
+services:
+  postgres: {image: postgres:16, port: 5432}
+  api: {command: echo, port: 4000, depends_on: [postgres]}
+  web: {command: echo, port: 3000, depends_on: [api]}
+`);
+    const filtered = productionServices(cfg, true, ['constructor']);
+    assert.equal(Object.getPrototypeOf(filtered.services), null);
+    assert.equal(Object.getPrototypeOf(applyProduction(cfg, true).services), null);
+    for (const name of ['constructor', 'toString']) {
+      assert.throws(() => expandAndOrderServices(filtered, [name]), new RegExp(`unknown service "${name}"`));
+      assert.throws(() => expandAndOrderServices(applyProduction(cfg, true), [name]), new RegExp(`unknown service "${name}"`));
+    }
   });
 
   it('refuses a proxy route to a service that prod.services leaves out', async () => {
