@@ -273,6 +273,23 @@ describe('buildServiceEnv', () => {
     }
   });
 
+  it('does not resolve a root value the service replaces, in either mode', () => {
+    // Root URL is a dangling reference; api's own env (what prod.env becomes after
+    // applyProduction) replaces URL, so the root value is never used for api and must not
+    // throw. A service that does not replace it still hits the config error.
+    const service = makeService({ env: { URL: 'https://api.example' } });
+    const config = makeConfig({ api: service }, { URL: 'missing.url', OTHER: 'api.url' });
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const dev = buildServiceEnv(config, service, {}, generated, assignments);
+    assert.equal(dev.env.URL, 'https://api.example');
+    assert.equal(dev.env.OTHER, 'http://localhost:52001', 'other root values still resolve');
+    const prod = { ...config, production: true };
+    assert.equal(buildServiceEnv(prod, service, {}, generated, assignments).env.URL, 'https://api.example');
+    assert.equal(buildPrintableEnv(config, service, generated, assignments).URL, 'https://api.example', 'portler env agrees with up');
+    assert.throws(() => buildServiceEnv(config, makeService({}), {}, generated, assignments), /cannot resolve|no assigned port/);
+  });
+
   it('gives Docker services their declared internal port in port_env', () => {
     const service = makeService({
       port: 5432,

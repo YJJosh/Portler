@@ -76,7 +76,11 @@ export function buildServiceEnv(
   // of resolution: its config value never applies, and a reference that only resolves in
   // development (a service with no assignment here) must not block the deployment's value.
   const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]) : undefined;
-  const rootEnv = resolveEnvMap(config.env, assignments, overridden);
+  // A root key the service's own env replaces (prod.env is folded in by then) is never used
+  // for this service, in either mode, so it is not resolved either: a reference only another
+  // service can resolve must not block the value this service actually gets.
+  const rootSkip = new Set([...(overridden ?? []), ...Object.keys(service.env)]);
+  const rootEnv = resolveEnvMap(config.env, assignments, rootSkip);
   const serviceEnv = resolveEnvMap(service.env, assignments, overridden);
   const env: EnvMap = config.production
     ? { ...rootEnv, ...serviceEnv, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
@@ -114,15 +118,15 @@ export function buildPrintableEnv(
   generatedEnv: EnvMap,
   assignments: Assignments,
 ): EnvMap {
-  const rootEnv = resolveEnvMap(config.env, assignments);
-
   if (!service) {
     return {
-      ...rootEnv,
+      ...resolveEnvMap(config.env, assignments),
       ...generatedEnv,
     };
   }
 
+  // Same rule as buildServiceEnv: a root key the service's own env replaces is not resolved.
+  const rootEnv = resolveEnvMap(config.env, assignments, new Set(Object.keys(service.env)));
   const serviceEnv = resolveEnvMap(service.env, assignments);
   const output: EnvMap = {
     ...rootEnv,
