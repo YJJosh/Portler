@@ -8,7 +8,7 @@ portler volumes fork <volume> <new-set> [--prod]
 portler volumes remove <volume> [--force] [--prod]
 ```
 
-All volume commands need the Docker daemon; when it is not running they fail with a clear error. With `--prod` they work on the production volumes of a project that sets `name:` (`portler-<name>-<volume>`, listed by their owner label); see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server).
+All volume commands need the Docker daemon; when it is not running they fail with a clear error. With `--prod` they work on the production volumes of a project that sets `name:` (`portler-<name>--<volume>`, listed by their owner label); see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server).
 
 ## `volumes` / `volumes list`
 

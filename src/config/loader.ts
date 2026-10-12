@@ -121,12 +121,14 @@ export interface LoadConfigOptions {
 
 /**
  * `name:` goes into Docker object names as-is under --prod, so it has to be a
- * name Docker accepts, and it must not contain the volume set separator.
+ * name Docker accepts. It must not contain "--" or end in "-", so the "--"
+ * that ends it in a container or volume name (PROJECT_NAME_BOUNDARY) is never
+ * ambiguous.
  */
 function normalizeProjectName(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,39}$/.test(value) || value.includes(VOLUME_SET_SEPARATOR)) {
-    throw new Error('name must be 1 to 40 characters of lowercase letters, digits, "_", "." or "-", start with a letter or digit, and must not contain "--"');
+  if (typeof value !== 'string' || !/^[a-z0-9](?:[a-z0-9_.-]{0,38}[a-z0-9])?$/.test(value) || value.includes(VOLUME_SET_SEPARATOR)) {
+    throw new Error('name must be 1 to 40 characters of lowercase letters, digits, "_", "." or "-", start and end with a letter or digit, and must not contain "--"');
   }
   return value;
 }

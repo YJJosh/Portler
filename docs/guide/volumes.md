@@ -15,7 +15,7 @@ services:
       - '@postgres-data:/var/lib/postgresql/data'
 ```
 
-`@postgres-data` becomes the Docker volume `portler-<project>-<hash>-postgres-data`, where `<project>` and `<hash>` come from the project root (under `--prod` with a top-level `name:` it is `portler-<name>-postgres-data` instead, so a release that unpacks into a new folder keeps it; see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server)). Portler creates it with `portler.*` labels before the first run so it can find it again later. Before mounting it, Portler verifies that project label again (including after a concurrent create race); an unlabelled or foreign volume that merely has the expected name is refused rather than exposed to the service.
+`@postgres-data` becomes the Docker volume `portler-<project>-<hash>-postgres-data`, where `<project>` and `<hash>` come from the project root (under `--prod` with a top-level `name:` it is `portler-<name>--postgres-data` instead, so a release that unpacks into a new folder keeps it; see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server)). Portler creates it with `portler.*` labels before the first run so it can find it again later. Before mounting it, Portler verifies that project label again (including after a concurrent create race); an unlabelled or foreign volume that merely has the expected name is refused rather than exposed to the service.
 
 ::: tip Stable across git worktrees
 Linked worktrees of the same repository resolve `@` volumes to the **main repository's** volumes, so a worktree sees the same data as the main checkout. Containers and networks stay per-directory — only volumes are shared.

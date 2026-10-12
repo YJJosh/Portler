@@ -31,12 +31,21 @@ export function defaultDockerNetwork(projectDir: string): string {
 }
 
 /**
+ * Ends the project name in a named container or volume. `name:` never contains
+ * it and never ends in "-", so the first "--" after "portler-" is always this
+ * boundary: project `foo` with service `bar-api` and project `foo-bar` with
+ * service `api` get different names, and no name's volume prefix is a prefix
+ * of another name's volumes.
+ */
+export const PROJECT_NAME_BOUNDARY = '--';
+
+/**
  * Under --prod with a top-level `name:`, containers and the network carry the
  * name instead of the directory hash, so they are the same in every folder a
  * release unpacks into. Images keep the hashed default.
  */
 export function namedDockerContainer(name: string, serviceName: string): string {
-  return `portler-${name}-${slug(serviceName)}`;
+  return `portler-${name}${PROJECT_NAME_BOUNDARY}${slug(serviceName)}`;
 }
 
 export function namedDockerNetwork(name: string): string {
@@ -80,7 +89,7 @@ export function volumeFullName(prefix: string, volumeName: string, volumeSet?: s
  * then the name, which never looks like a path.
  */
 export function volumeScope(config: Pick<PortlerConfig, 'volumeRoot' | 'name' | 'production'>): { prefix: string; owner: string } {
-  if (config.production && config.name) return { prefix: `portler-${config.name}-`, owner: config.name };
+  if (config.production && config.name) return { prefix: `portler-${config.name}${PROJECT_NAME_BOUNDARY}`, owner: config.name };
   return { prefix: projectVolumePrefix(config.volumeRoot), owner: config.volumeRoot };
 }
 

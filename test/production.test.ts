@@ -365,7 +365,7 @@ services:
 
 describe('name: stable identity under --prod', () => {
   it('rejects names Docker would not accept or that contain the volume set separator', async () => {
-    for (const bad of ['Todo', 'my app', '-todo', 'a--b', 'x'.repeat(41)]) {
+    for (const bad of ['Todo', 'my app', '-todo', 'todo-', 'todo.', 'a--b', 'x'.repeat(41)]) {
       await assert.rejects(config(`name: ${JSON.stringify(bad)}\nservices:\n  api:\n    command: node -e ""\n    port: 3000\n`), /name must be/);
     }
   });
@@ -373,16 +373,29 @@ describe('name: stable identity under --prod', () => {
   it('names the network, containers and volumes after the project under --prod and keeps explicit names', async () => {
     const cfg = await config(['name: todo', 'services:', '  api:', '    image: example/api', '    volumes: ["@data:/data"]', '  db:', '    image: postgres:16', '    container_name: my-db', ''].join('\n'));
     assert.notEqual(cfg.dockerNetwork, 'portler-todo', 'development keeps the hashed default');
-    assert.notEqual(cfg.services.api?.docker?.containerName, 'portler-todo-api');
+    assert.notEqual(cfg.services.api?.docker?.containerName, 'portler-todo--api');
     assert.equal(volumeScope(cfg).owner, cfg.volumeRoot);
 
     const prod = applyProduction(cfg, true);
     assert.equal(prod.dockerNetwork, 'portler-todo');
-    assert.equal(prod.services.api?.docker?.containerName, 'portler-todo-api');
+    assert.equal(prod.services.api?.docker?.containerName, 'portler-todo--api');
     assert.equal(prod.services.db?.docker?.containerName, 'my-db', 'an explicit container name is kept');
-    assert.deepEqual(volumeScope(prod), { prefix: 'portler-todo-', owner: 'todo' });
-    assert.equal(volumeFullName(volumeScope(prod).prefix, 'data', 'migration'), 'portler-todo-data--migration');
+    assert.deepEqual(volumeScope(prod), { prefix: 'portler-todo--', owner: 'todo' });
+    assert.equal(volumeFullName(volumeScope(prod).prefix, 'data', 'migration'), 'portler-todo--data--migration');
     assert.equal(applyProduction(cfg, false).dockerNetwork, cfg.dockerNetwork, 'development is unchanged');
+  });
+
+  it('keeps the project name apart from the service and volume, so two names never share an object', async () => {
+    const foo = applyProduction(await config('name: foo\nservices:\n  bar-api:\n    image: example/api\n    volumes: ["@bar-data:/data"]\n'), true);
+    const fooBar = applyProduction(await config('name: foo-bar\nservices:\n  api:\n    image: example/api\n    volumes: ["@data:/data"]\n'), true);
+    assert.equal(foo.services['bar-api']?.docker?.containerName, 'portler-foo--bar-api');
+    assert.equal(fooBar.services.api?.docker?.containerName, 'portler-foo-bar--api');
+    assert.notEqual(foo.services['bar-api']?.docker?.containerName, fooBar.services.api?.docker?.containerName);
+    const fooVolume = volumeFullName(volumeScope(foo).prefix, 'bar-data');
+    const fooBarVolume = volumeFullName(volumeScope(fooBar).prefix, 'data');
+    assert.notEqual(fooVolume, fooBarVolume);
+    assert.ok(!fooBarVolume.startsWith(volumeScope(foo).prefix), "foo's volume prefix does not cover foo-bar's volumes");
+    assert.ok(!fooVolume.startsWith(volumeScope(fooBar).prefix));
   });
 
   it('keeps an explicit docker_network, and changes nothing without a name', async () => {

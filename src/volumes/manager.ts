@@ -125,10 +125,10 @@ export async function listProjectVolumes(config: PortlerConfig): Promise<Project
 
   const scope = volumeScope(config);
   const prefix = scope.prefix;
-  // A name scope's prefix (portler-<name>-) also prefixes the development volumes of a
-  // checkout whose directory is called <name>, so under a name only volumes labelled with
-  // the name as owner are listed. Development keeps the prefix match, which also shows
-  // unlabelled volumes that `remove` will then refuse.
+  // Under a name only volumes labelled with the name as owner are listed, so a volume that
+  // merely matches the prefix (portler-<name>--) is never shown as this release's.
+  // Development keeps the prefix match, which also shows unlabelled volumes that `remove`
+  // will then refuse.
   const labelFilter = config.production && config.name ? ['--filter', `label=${PROJECT_LABEL}=${scope.owner}`] : [];
   const output = await dockerOrThrow(['volume', 'ls', ...labelFilter, '--format', '{{.Name}}\t{{.Driver}}']);
   const sizes = await volumeSizes();
