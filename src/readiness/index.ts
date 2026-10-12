@@ -42,7 +42,11 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
       // if it stays silent until then it is not ready yet, and the caller
       // decides whether its overall timeout leaves room for another attempt.
       const remaining = deadline - Date.now();
-      holdTimer = setTimeout(() => finish(remaining > holdMs), Math.min(holdMs, Math.max(1, remaining)));
+      const fullHoldFits = remaining > holdMs;
+      // Checked again when the timer fires: a blocked event loop can delay
+      // it past the deadline, and a hold that ended late has proved nothing
+      // in time.
+      holdTimer = setTimeout(() => finish(fullHoldFits && Date.now() <= deadline), Math.min(holdMs, Math.max(1, remaining)));
     });
     socket.on('end', () => finish(false));
     socket.on('close', () => finish(false));

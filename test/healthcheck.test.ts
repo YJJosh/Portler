@@ -336,6 +336,26 @@ describe('waitForServiceReady', () => {
     }
   });
 
+  it('rechecks the deadline when the hold timer fires', async () => {
+    // A blocked event loop can delay the hold timer past the attempt deadline.
+    // A silent peer whose hold ended late has proved nothing in time, so the
+    // answer is still "not ready". The block lands after the connect (loopback
+    // connects within a few ms) and before the 200 ms hold would have ended.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      const probe = isTcpReady('127.0.0.1', port, 300, 200);
+      setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 50);
+      assert.equal(await probe, false);
+      assert.ok(Date.now() - startedAt >= 300, 'the answer came after the deadline the block ran through');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it('passes an http check for responses below 500', async () => {
     const server = http.createServer((_request, response) => {
       response.statusCode = 404;
