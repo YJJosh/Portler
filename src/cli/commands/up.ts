@@ -8,7 +8,6 @@ import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
   identityVerdict,
   isPidAlive,
-  isPidRunning,
   ownedContainerLiveness,
   pidInfoFor,
   readPids,
@@ -168,6 +167,12 @@ export interface StartedStack {
    * run started depends on them; `keepAdopted: false` stops those too.
    */
   teardown: (options?: ForegroundTeardownOptions) => Promise<string[]>;
+  /**
+   * Whether any service another run started, the reason the last teardown kept
+   * something, is still alive. Those are not this run's children, so nothing
+   * reports their exit: the supervisor asks this while it stays attached.
+   */
+  dependentsAlive: () => Promise<boolean>;
   detached: boolean;
 }
 
@@ -177,7 +182,7 @@ type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status:
  * Whether a pids.json entry still names something alive. The pid first, by
  * identity: a live pid whose start token differs from the recorded one was
  * recycled by the OS for an unrelated process, so the entry is as dead as one
- * whose pid is gone (stopServices drops it without signalling). A live pid
+ * whose pid is gone or a zombie. A live pid
  * that cannot be identified (no recorded token, or the platform will not say)
  * counts as alive. Then, for a Docker service, its container: `docker run` is
  * supervised by a shell whose pid can be gone while the container runs on, and
@@ -187,7 +192,11 @@ type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status:
  * the one mistake that destroys something.
  */
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
-  const exists = isPidRunning(info.pid);
+  // A zombie counts as gone. Under a PID 1 that does not reap orphans (a
+  // container without an init), a replacement that exited keeps its pid and its
+  // start token, and the existence check alone would keep it, and everything it
+  // depends on, alive for good.
+  const exists = isPidAlive(info.pid);
   const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
   if (verdict === 'match' || verdict === 'unverifiable') return { status: 'alive', reason: 'its PID entry belongs to another run' };
   if (!info.dockerContainer) return { status: 'dead' };
@@ -301,6 +310,9 @@ export async function startPhase(
 
   const startedEntries = new Map<string, PidServiceInfo>();
   const children = new Map<string, ReturnType<typeof spawnService>>();
+  // The live services of other runs the last teardown pass found, as their
+  // entries read then: what it kept, it kept for them.
+  let foreignRoots: PidServiceInfo[] = [];
   // stopServices prunes its services' pids.json entries itself. It reports what
   // it could NOT stop, and a teardown that did not finish is an error: a
   // foreground `up` that exits 0 while a service it started is still running (and
@@ -368,6 +380,7 @@ export async function startPhase(
       if (serviceName === PROXY_SERVICE_NAME || stopNames.includes(serviceName)) continue;
       if ((await livenessOf(serviceName, info)).status !== 'dead') foreignLive.push(serviceName);
     }
+    foreignRoots = foreignLive.map((serviceName) => current!.services[serviceName]!);
     let toStop = stopNames;
     let kept: string[] = [];
     if (keepAdopted && foreignLive.length > 0) {
@@ -400,6 +413,15 @@ export async function startPhase(
     );
     if (incomplete) throw new IncompleteTeardownError(result);
     return kept;
+  };
+
+  // A root whose entry was replaced since counts as gone here; the pass this
+  // triggers reads pids.json again and keeps whatever a newer service needs.
+  const dependentsAlive = async (): Promise<boolean> => {
+    for (const info of foreignRoots) {
+      if ((await entryLiveness(config.projectDir, info)).status !== 'dead') return true;
+    }
+    return false;
   };
 
   try {
@@ -538,8 +560,12 @@ export async function startPhase(
     // The rollback must not replace the startup error with a cleanup error: the
     // reason the start failed is what the user needs to see. Whatever the
     // teardown could not do it has already reported for itself.
+    // A rollback restores what was there before this run, so it keeps nothing
+    // for another run: a service it started was not running before it, even if
+    // a live service elsewhere depends on it. Keeping it would also leave this
+    // failed `up` attached to a child nobody supervises.
     try {
-      await teardown();
+      await teardown({ keepAdopted: false });
     } catch (teardownError) {
       process.stderr.write(`[portler] warning: rollback was incomplete: ${(teardownError as Error).message}\n`);
     }
@@ -554,7 +580,7 @@ export async function startPhase(
     process.stdout.write('[portler] services started in background\n');
   }
 
-  return { children, teardown, detached: options.detach };
+  return { children, teardown, dependentsAlive, detached: options.detach };
 }
 
 /**
@@ -582,8 +608,10 @@ export async function startServices(
 
   if (stack.detached) return 0;
 
-  return waitForForegroundServices(stack.children, (teardownOptions) =>
-    withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
+  return waitForForegroundServices(
+    stack.children,
+    (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
+    { dependentsAlive: stack.dependentsAlive },
   );
 }
 

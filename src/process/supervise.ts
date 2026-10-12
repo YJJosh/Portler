@@ -24,6 +24,17 @@ export interface ForegroundTeardownOptions {
  */
 export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promise<string[] | void>;
 
+export interface ForegroundWaitOptions {
+  /**
+   * Whether the services of other runs that the last teardown kept something
+   * for are still alive. They are not this process's children, so nothing
+   * reports their exit; while attached the supervisor asks this every
+   * `recheckMs` and runs the teardown again once it says no.
+   */
+  dependentsAlive?: () => Promise<boolean>;
+  recheckMs?: number;
+}
+
 /**
  * Supervise foreground services: on SIGINT/SIGTERM or the first child exit,
  * run `teardown` once and resolve with the resulting exit code.
@@ -39,13 +50,17 @@ export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promis
  * exit (`portler down` from elsewhere), and a Ctrl-C then stops them too. Each
  * time one of them exits on its own, the teardown runs again, staying attached
  * to the ones still running: their entries still name this run, and only a
- * teardown prunes a dead one and gives its port back. While a teardown is in
+ * teardown prunes a dead one and gives its port back. The services of other
+ * runs it kept them for are not children of this process, so it also polls
+ * `dependentsAlive`, and runs the teardown again once they are gone: whatever
+ * nothing depends on any more is then stopped. While a teardown is in
  * progress the signal handlers are off, so a second Ctrl-C still quits at once,
  * as it always has.
  */
 export function waitForForegroundServices(
   children: Map<string, ChildProcess>,
   teardown: ForegroundTeardown,
+  options: ForegroundWaitOptions = {},
 ): Promise<number> {
   let phase: 'running' | 'stopping' | 'attached' | 'done' = 'running';
 
@@ -61,9 +76,32 @@ export function waitForForegroundServices(
       process.once('SIGINT', onSigint);
       process.once('SIGTERM', onSigterm);
     };
+    let recheck: NodeJS.Timeout | undefined;
     const unlisten = (): void => {
       process.off('SIGINT', onSigint);
       process.off('SIGTERM', onSigterm);
+      if (recheck) clearInterval(recheck);
+      recheck = undefined;
+    };
+    // Only while attached, and never two questions at once.
+    const startRecheck = (): void => {
+      const { dependentsAlive } = options;
+      if (!dependentsAlive || recheck) return;
+      let asking = false;
+      recheck = setInterval(() => {
+        if (asking || phase !== 'attached') return;
+        asking = true;
+        dependentsAlive().then(
+          (alive) => {
+            asking = false;
+            if (!alive && phase === 'attached') void settle();
+          },
+          () => {
+            asking = false;
+          },
+        );
+      }, options.recheckMs ?? 2000);
+      recheck.unref();
     };
 
     const finish = (exitCode: number): void => {
@@ -119,6 +157,7 @@ export function waitForForegroundServices(
         );
       }
       listen();
+      startRecheck();
     };
 
     const cleanup = async (exitCode: number): Promise<void> => {
@@ -129,7 +168,8 @@ export function waitForForegroundServices(
       attachOrFinish(await keepingPasses());
     };
 
-    // One kept service exited on its own: prune it and stay with the rest.
+    // A kept service exited on its own, or what it was kept for is gone: run the
+    // teardown again and stay with whatever it still keeps.
     const settle = async (): Promise<void> => {
       phase = 'stopping';
       unlisten();

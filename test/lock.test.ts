@@ -486,4 +486,39 @@ describe('waitForForegroundServices', () => {
     assert.equal(code, 0);
     assert.deepEqual(calls, [true, true, true], 'a third pass prunes the proxy the second one still saw running');
   });
+
+  it('runs the teardown again once the services it kept something for are gone', async (t) => {
+    // The restarted api that db was kept for is another run's: not a child, so
+    // no exit event. When it dies, db is nothing anybody depends on any more.
+    const db = runningChild();
+    t.after(() => { db.kill('SIGKILL'); });
+    const children = new Map([['api', await exitedChild()], ['db', db]]);
+    const calls: Array<boolean | undefined> = [];
+    const output: string[] = [];
+    t.mock.method(process.stderr, 'write', (text: string) => { output.push(text); return true; });
+    const listeners = process.listenerCount('SIGINT');
+    let replacementAlive = true;
+    let asked = 0;
+
+    const pending = waitForForegroundServices(
+      children,
+      async (options) => {
+        calls.push(options?.keepAdopted);
+        if (calls.length === 1) return ['db'];
+        db.kill('SIGTERM');
+        return [];
+      },
+      { dependentsAlive: async () => { asked += 1; return replacementAlive; }, recheckMs: 10 },
+    );
+    await until(() => output.some((text) => text.includes('still attached to db')));
+    await until(() => asked >= 3);
+    assert.deepEqual(calls, [true], 'no new pass while the replacement lives');
+    replacementAlive = false;
+    const code = await pending;
+    t.mock.restoreAll();
+
+    assert.equal(code, 0);
+    assert.deepEqual(calls, [true, true], 'its death runs the teardown again, which no longer keeps db');
+    assert.equal(process.listenerCount('SIGINT'), listeners, 'no signal handler is left behind');
+  });
 });

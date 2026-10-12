@@ -12,7 +12,7 @@ import { startPhase } from '../src/cli/commands/up.ts';
 import { loadConfig } from '../src/config/index.ts';
 import { PROXY_SERVICE_NAME } from '../src/constants.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { isPidRunning, readPids, updatePids, writePids } from '../src/process/pids.ts';
+import { isPidAlive, isPidRunning, readPids, updatePids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../src/state/lock.ts';
 
@@ -98,6 +98,35 @@ async function installFakeDocker(state: 'running' | 'exited' | 'unreachable'): P
   );
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ''}`;
   return { calls: async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean) };
+}
+
+/**
+ * A zombie: the child of a stopped parent exits and cannot be reaped until the
+ * parent runs again. A detached replacement that exited under a PID 1 that does
+ * not reap orphans looks exactly like this. `release` resumes the parent, which
+ * reaps it and exits.
+ */
+async function makeZombie(): Promise<{ pid: number; release: () => Promise<void> }> {
+  const script = [
+    "const { spawn } = require('node:child_process');",
+    "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 200)'], { stdio: 'ignore' });",
+    "process.stdout.write(child.pid + '\\n', () => process.kill(process.pid, 'SIGSTOP'));",
+  ].join('\n');
+  const helper = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const [chunk] = await once(helper.stdout!, 'data');
+  const pid = Number(String(chunk).trim());
+  for (let i = 0; i < 100 && isPidAlive(pid); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(isPidRunning(pid) && !isPidAlive(pid), true, 'the helper child is a zombie');
+  return {
+    pid,
+    release: async () => {
+      if (helper.exitCode !== null || helper.signalCode !== null) return;
+      helper.kill('SIGCONT');
+      const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
+      await once(helper, 'exit');
+      clearTimeout(fallback);
+    },
+  };
 }
 
 /** What a restart leaves for api: another identity, a Docker service, its supervising shell pid gone. */
@@ -597,6 +626,82 @@ describe('foreground teardown ownership', () => {
     assert.ok((await readRegistry()).ports[apiPort], 'and so is its reservation');
     assert.ok(after.services[PROXY_SERVICE_NAME], 'the proxy stays up for what may be live');
     assert.ok(!(await docker.calls()).some((call) => call.startsWith('rm ')), 'nothing is removed on a guess');
+  });
+
+  it('does not keep the proxy for a replacement that is a zombie', { timeout: 15_000, skip: process.platform === 'win32' }, async () => {
+    // A restart replaced api, and the replacement exited under a PID 1 that does
+    // not reap orphans: kill(pid, 0) still finds it and its start token is
+    // unchanged. That is no service, and no reason to keep the proxy.
+    const stack = await startForeground();
+    const proxyPid = (await readPids(projectDir))!.services[PROXY_SERVICE_NAME]!.pid;
+    const zombie = await makeZombie();
+    try {
+      const token = await readProcessStartToken(zombie.pid);
+      await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+        pids.services.api!.pid = zombie.pid;
+        pids.services.api!.startToken = token ?? 'unreadable-start-token';
+      }));
+
+      // The zombie's own entry goes to stopServices with the rest, and it, like
+      // `portler down`, cannot see the zombie gone: that is reported, not hidden.
+      await assert.rejects(
+        withLifecycleLockForTeardown(projectDir, () => stack.teardown()),
+        (error: Error) => error.name === 'IncompleteTeardownError',
+      );
+      assert.equal((await readPids(projectDir))!.services[PROXY_SERVICE_NAME], undefined, 'the proxy is not kept');
+      assert.equal(isPidRunning(proxyPid), false, 'the proxy was stopped');
+      assert.ok(
+        !Object.values((await readRegistry()).ports).some((entry) => entry.service === PROXY_SERVICE_NAME),
+        "the proxy's reservation is released",
+      );
+    } finally {
+      await zombie.release();
+    }
+  });
+
+  it('stops what a failed startup started, even when a live service depends on it', { timeout: 15_000 }, async () => {
+    // api runs from an earlier run and depends on db, which is not running. This
+    // up starts db for web, and web fails. The rollback restores what was there
+    // before: db stopped, api untouched. Keeping db for api would leave this
+    // failed run attached to a child nobody supervises.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3001',
+      '    port_env: PORT',
+      '  api:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3000',
+      '    port_env: PORT',
+      '    depends_on: [db]',
+      '  web:',
+      `    command: exec "${process.execPath}" -e "process.exit(3)"`,
+      '    port: 3002',
+      '    port_env: PORT',
+      '    depends_on: [db]',
+      '',
+    ].join('\n'));
+    const api = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    childPids.add(api.pid!);
+    const token = await readProcessStartToken(api.pid!);
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        api: { pid: api.pid!, command: 'earlier api', cwd: projectDir, startedAt, ...(token ? { startToken: token } : {}), dependsOn: ['db'] },
+      },
+    });
+
+    const config = await loadConfig(projectDir);
+    await assert.rejects(withLifecycleLock(projectDir, () => startPhase(config, 'local', ['web'], { detach: false })), /web/);
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.db, undefined, 'db, which this failed run started, is stopped and pruned');
+    assert.equal(after.services.api?.pid, api.pid, 'the earlier run\'s api is left alone');
+    assert.equal(isPidRunning(api.pid!), true);
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'the reservations this run made are released');
   });
 
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
