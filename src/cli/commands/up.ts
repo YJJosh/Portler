@@ -237,17 +237,21 @@ export async function startPhase(
     const current = await readPids(config.projectDir);
     const stopNames: string[] = [];
     const replaced = new Set<string>();
-    for (const serviceName of new Set([...reserveNames, ...startedEntries.keys()])) {
+    // Every service this run selected is examined, port or not: a stale entry
+    // for a portless service that never started is as much this run's to prune
+    // as one for a service with a reservation. Release stays on reserveNames.
+    for (const serviceName of new Set([...selectedNames, ...reserveNames, ...startedEntries.keys()])) {
       const info = current?.services[serviceName];
       if (!info) continue;
       const started = startedEntries.get(serviceName);
       if (started && info.pid === started.pid && info.startToken === started.startToken) {
         stopNames.push(serviceName);
       } else if (!started && !isPidRunning(info.pid)) {
-        // This run reserved the port but never spawned the service (startup
-        // failed first), and the entry is a stale one from an earlier run:
-        // nothing owns it. stopServices prunes it, and the reservation this
-        // run made is released below instead of lingering until the next prune.
+        // This run selected the service but never spawned it (startup failed
+        // first), and the entry is a stale one from an earlier run: nothing
+        // owns it. stopServices prunes it, and the reservation this run made,
+        // if the service has a port, is released below instead of lingering
+        // until the next prune.
         stopNames.push(serviceName);
       } else {
         replaced.add(serviceName);

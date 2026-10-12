@@ -166,6 +166,27 @@ describe('foreground teardown ownership', () => {
     assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'the reservation made for this run is released');
   });
 
+  it('prunes a stale entry for a portless service that never started', { timeout: 10_000 }, async () => {
+    // worker has no port, so it is in neither reserveNames nor startedEntries
+    // when startup fails before it is spawned. Its dead leftover entry is still
+    // this run's to prune; nothing is released because nothing was reserved.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  worker:', '    command: node -e ""', '    env:', '      URL: missing.url', ''].join('\n'),
+    );
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { worker: { pid: 4_194_303, command: 'old worker', cwd: projectDir, startedAt } },
+    });
+    const config = await loadConfig(projectDir);
+    await assert.rejects(withLifecycleLock(projectDir, () => startPhase(config, 'local', ['worker'], { detach: false })), /cannot resolve/);
+    assert.ok(!(await readPids(projectDir))?.services.worker, 'the stale entry is pruned');
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'nothing was reserved, nothing is left');
+  });
+
   it('still stops matching services and proxy and releases their reservations', { timeout: 10_000 }, async () => {
     const stack = await startForeground();
     await withLifecycleLockForTeardown(projectDir, stack.teardown);
