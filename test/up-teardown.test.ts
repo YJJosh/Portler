@@ -11,7 +11,7 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { startPhase } from '../src/cli/commands/up.ts';
 import { loadConfig } from '../src/config/index.ts';
 import { PROXY_SERVICE_NAME } from '../src/constants.ts';
-import { readRegistry } from '../src/ports/registry.ts';
+import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
 import { isPidRunning, readPids, updatePids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../src/state/lock.ts';
@@ -495,7 +495,53 @@ describe('foreground teardown ownership', () => {
     assert.ok(isPidRunning(original.services.api!.pid), 'the entry no longer names this run\'s process, so it is not signalled');
   });
 
-  it('leaves a Docker replacement alone while its container outlives its supervising pid', { timeout: 10_000 }, async () => {
+  it('releases the reservation of a dead replacement that gained a port this run never reserved', { timeout: 10_000 }, async () => {
+    // worker starts portless, so this run reserves nothing for it. portler.yml
+    // is then edited to give worker a port, a restart reserves one for its
+    // replacement, and the replacement exits before the teardown. The entry is
+    // pruned like any dead one, and the reservation the restart made goes too.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  api:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3000',
+      '    port_env: PORT',
+      '  worker:',
+      `    command: exec "${process.execPath}" -e "setInterval(() => {}, 1000)"`,
+      '',
+    ].join('\n'));
+    const config = await loadConfig(projectDir);
+    const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['api', 'worker'], { detach: false }));
+    for (const child of stack.children.values()) childPids.add(child.pid!);
+    const original = (await readPids(projectDir))!;
+    assert.equal(original.services.worker!.port, undefined, 'worker started portless');
+    const workerPort = 4_399;
+    await withLifecycleLock(projectDir, async () => {
+      await updatePids(projectDir, (pids) => {
+        pids.services.worker!.pid = 4_194_303;
+        pids.services.worker!.startToken = 'another-run-start-token';
+        pids.services.worker!.port = workerPort;
+      });
+      const registry = await readRegistry();
+      registry.ports[String(workerPort)] = {
+        project: projectDir,
+        service: 'worker',
+        port: workerPort,
+        desiredPort: 4_300,
+        host: '127.0.0.1',
+        assignedAt: new Date().toISOString(),
+      };
+      await writeRegistry(registry);
+    });
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    assert.ok(!(await readPids(projectDir))?.services.worker, 'the dead replacement entry is pruned');
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'the reservation the restart made for worker is released with the rest');
+    assert.ok(isPidRunning(original.services.worker!.pid), 'the entry no longer names this run\'s worker, so it is not signalled');
+  });
+
+  it('leaves a Docker replacement alone while its container outlives its supervising pid',{ timeout: 10_000 }, async () => {
     // A restart replaced this run's api with a Docker service. `docker run` is
     // supervised by a shell: its pid can be gone while the container runs on,
     // and stopServices removes a selected service's container by label whatever

@@ -388,10 +388,15 @@ export async function startPhase(
     }
     const result = await stopServices(config.projectDir, toStop);
     const incomplete = reportIncompleteTeardown(result);
+    // Release follows what was stopped or pruned, not only what this run
+    // reserved: a restart can give a service this run started portless a port
+    // (portler.yml edited in between), and if that replacement is dead its
+    // entry goes through stopServices above while its reservation would
+    // otherwise block the port until the next prune.
     const remaining = new Set([...result.remaining, ...replaced]);
     await releasePorts(
       config.projectDir,
-      reserveNames.filter((serviceName) => !remaining.has(serviceName)),
+      [...new Set([...reserveNames, ...toStop])].filter((serviceName) => !remaining.has(serviceName)),
     );
     if (incomplete) throw new IncompleteTeardownError(result);
     return kept;
