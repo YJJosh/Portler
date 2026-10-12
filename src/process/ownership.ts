@@ -72,7 +72,13 @@ export function parseInspectLabels(stdout: string): Record<string, string> {
 export type ResourceKind = 'container' | 'network';
 
 export type Inspection =
-  | { status: 'found'; id: string; labels: Record<string, string> }
+  | {
+      status: 'found';
+      id: string;
+      labels: Record<string, string>;
+      /** Containers only: `.State.Running` from the same inspect. */
+      running?: boolean;
+    }
   | { status: 'absent' }
   | { status: 'error'; message: string };
 
@@ -82,7 +88,10 @@ export type Inspection =
  * inspect — they cannot drift apart between two calls.
  */
 export function inspectArgs(kind: ResourceKind, name: string): string[] {
-  const template = kind === 'container' ? '{"id":{{json .Id}},"labels":{{json .Config.Labels}}}' : '{"id":{{json .Id}},"labels":{{json .Labels}}}';
+  const template =
+    kind === 'container'
+      ? '{"id":{{json .Id}},"labels":{{json .Config.Labels}},"running":{{json .State.Running}}}'
+      : '{"id":{{json .Id}},"labels":{{json .Labels}}}';
 
   return kind === 'container'
     ? ['inspect', '--type', 'container', '--format', template, name]
@@ -107,7 +116,7 @@ export function parseInspection(code: number, stdout: string, stderr: string): I
   if (!text) return { status: 'error', message: 'docker inspect returned no output' };
 
   try {
-    const parsed = JSON.parse(text) as { id?: unknown; labels?: unknown };
+    const parsed = JSON.parse(text) as { id?: unknown; labels?: unknown; running?: unknown };
     if (typeof parsed.id !== 'string' || parsed.id === '') {
       return { status: 'error', message: 'docker inspect returned no resource id' };
     }
@@ -117,7 +126,7 @@ export function parseInspection(code: number, stdout: string, stderr: string): I
         ? {}
         : parseInspectLabels(JSON.stringify(parsed.labels));
 
-    return { status: 'found', id: parsed.id, labels };
+    return { status: 'found', id: parsed.id, labels, ...(typeof parsed.running === 'boolean' ? { running: parsed.running } : {}) };
   } catch {
     return { status: 'error', message: `could not parse docker inspect output: ${text.slice(0, 120)}` };
   }
@@ -168,6 +177,34 @@ async function removeOwned(
  */
 export function removeOwnedContainer(name: string, projectDir: string, run: CommandRunner = runCommand): Promise<RemovalOutcome> {
   return removeOwned('container', name, projectDir, (id) => ['rm', '-f', id], run);
+}
+
+export type ContainerLiveness =
+  /** Carries this project's label and is running. */
+  | { status: 'running'; id: string }
+  /** No such container, a stranger's under that name, or ours but exited: nothing of the service is alive. */
+  | { status: 'gone' }
+  /** The daemon could not be asked (down, permission error, missing CLI). */
+  | { status: 'error'; message: string };
+
+/**
+ * Whether this project's container of that name is still running. A `docker
+ * run` container outlives the shell pid that supervises it, so a pids.json
+ * entry whose pid is gone can still name a live service. Only a container that
+ * carries this project's label counts: a stranger's container under the name
+ * is not our service, and an exited one of ours is nothing to keep. A failed
+ * inspect is reported as such, never guessed either way.
+ */
+export async function ownedContainerLiveness(
+  name: string,
+  projectDir: string,
+  run: CommandRunner = runCommand,
+): Promise<ContainerLiveness> {
+  const inspection = await inspectResource('container', name, run);
+  if (inspection.status === 'absent') return { status: 'gone' };
+  if (inspection.status === 'error') return { status: 'error', message: inspection.message };
+  if (ownershipVerdict(inspection.labels, projectDir) !== 'owned') return { status: 'gone' };
+  return inspection.running === true ? { status: 'running', id: inspection.id } : { status: 'gone' };
 }
 
 /** Remove a Docker network only when it carries this project's label (by ID). */

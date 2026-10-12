@@ -6,9 +6,12 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  identityVerdict,
   isPidAlive,
+  ownedContainerLiveness,
   pidInfoFor,
   readPids,
+  readProcessStartToken,
   runningServices,
   serviceLogPath,
   spawnService,
@@ -16,13 +19,13 @@ import {
   updatePids,
   waitForForegroundServices,
 } from '../../process/index.ts';
-import type { StopResult } from '../../process/index.ts';
+import type { ForegroundTeardownOptions, StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
-import type { Assignments, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { commandUpK8s } from './up-k8s.ts';
 import { printPortTable } from '../table.ts';
@@ -160,9 +163,85 @@ export interface StartedStack {
    * how to hold the lifecycle lock. Inside startPhase it runs on the
    * startup-failure path, where the lock is already held (taking it again would
    * deadlock: the lock is not reentrant); the foreground caller re-acquires it.
+   * Returns this run's own services it left running because a service another
+   * run started depends on them; `keepAdopted: false` stops those too.
    */
-  teardown: () => Promise<void>;
+  teardown: (options?: ForegroundTeardownOptions) => Promise<string[]>;
+  /**
+   * Whether every service another run started, the reason the last teardown
+   * kept something, is still alive. Those are not this run's children, so
+   * nothing reports their exit: the supervisor asks this while it stays
+   * attached, and the first one to go means another pass.
+   */
+  dependentsAlive: () => Promise<boolean>;
   detached: boolean;
+}
+
+type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status: 'dead' };
+
+/**
+ * Whether a pids.json entry still names something alive. The pid first, by
+ * identity: a live pid whose start token differs from the recorded one was
+ * recycled by the OS for an unrelated process, so the entry is as dead as one
+ * whose pid is gone or a zombie. A live pid
+ * that cannot be identified (no recorded token, or the platform will not say)
+ * counts as alive. Then, for a Docker service, its container: `docker run` is
+ * supervised by a shell whose pid can be gone while the container runs on, and
+ * handing such an entry to stopServices would remove a container that another
+ * run is serving through. An entry whose container cannot be inspected (daemon
+ * down, permission error) is 'unknown' and treated as alive: guessing "dead" is
+ * the one mistake that destroys something.
+ */
+async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
+  // A zombie counts as gone. Under a PID 1 that does not reap orphans (a
+  // container without an init), a replacement that exited keeps its pid and its
+  // start token, and the existence check alone would keep it, and everything it
+  // depends on, alive for good.
+  const exists = isPidAlive(info.pid);
+  const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
+  if (verdict === 'match' || verdict === 'unverifiable') return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  if (!info.dockerContainer) return { status: 'dead' };
+  const container = await ownedContainerLiveness(info.dockerContainer, projectDir);
+  if (container.status === 'running') {
+    return { status: 'alive', reason: `its container "${info.dockerContainer}" is still running under another run` };
+  }
+  if (container.status === 'error') {
+    return { status: 'unknown', reason: `its container "${info.dockerContainer}" could not be inspected (${container.message})` };
+  }
+  return { status: 'dead' };
+}
+
+/**
+ * Every service the given PID entries depend on, transitively, as each entry
+ * recorded when it started: what a service actually runs with, whichever
+ * portler.yml a run read. An entry written by an older Portler has no record;
+ * its dependencies come from the config as it is on disk now, the nearest
+ * thing to what started it, and a file that no longer loads means none.
+ */
+async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, roots: string[]): Promise<Set<string>> {
+  let fallback: PortlerConfig | null | undefined;
+  const dependenciesOf = async (serviceName: string): Promise<string[]> => {
+    const recorded = pids.services[serviceName]?.dependsOn;
+    if (recorded) return recorded;
+    if (fallback === undefined) {
+      try {
+        fallback = await loadConfig(config.projectDir, config.filePath, { volumeSet: config.volumeSet });
+      } catch {
+        fallback = null;
+      }
+    }
+    return fallback?.services[serviceName]?.dependsOn.map((dependency) => dependency.service) ?? [];
+  };
+  const closure = new Set<string>();
+  const queue = [...roots];
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    for (const dependency of await dependenciesOf(next)) {
+      if (closure.has(dependency)) continue;
+      closure.add(dependency);
+      queue.push(dependency);
+    }
+  }
+  return closure;
 }
 
 /**
@@ -230,23 +309,129 @@ export async function startPhase(
   // Fires exactly when a set variant is about to be created empty (typo guard).
   await warnMissingVolumeSetVariants(config, selectedNames);
 
-  const stopNames = startProxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames;
+  const startedEntries = new Map<string, PidServiceInfo>();
   const children = new Map<string, ReturnType<typeof spawnService>>();
+  // The live services of other runs the last teardown pass found, as their
+  // entries read then: what it kept, it kept for them.
+  let foreignRoots: Array<{ name: string; info: PidServiceInfo }> = [];
   // stopServices prunes its services' pids.json entries itself. It reports what
   // it could NOT stop, and a teardown that did not finish is an error: a
   // foreground `up` that exits 0 while a service it started is still running (and
   // still holding its port) tells a script the opposite of the truth — `down`
-  // exits non-zero in exactly this situation. The ports are released first, so an
-  // incomplete stop still gives back what it can.
-  const teardown = async (): Promise<void> => {
-    const result = await stopServices(config.projectDir, stopNames);
+  // exits non-zero in exactly this situation. Release only safe reservations
+  // before reporting an incomplete stop, so it still gives back what it can.
+  const teardown = async ({ keepAdopted = true }: ForegroundTeardownOptions = {}): Promise<string[]> => {
+    // The lifecycle lock is held here, but restart may have replaced an entry
+    // while this foreground run was waiting. Names alone do not prove ownership.
+    const current = await readPids(config.projectDir);
+    const stopNames: string[] = [];
+    const replaced = new Set<string>();
+    // Every service this run selected is examined, port or not: a stale entry
+    // for a portless service that never started is as much this run's to prune
+    // as one for a service with a reservation. Release stays on reserveNames.
+    // An entry is alive while its pid runs or, for a Docker service, while the
+    // container it names still runs under this project's label: `docker run`
+    // is supervised by a shell whose pid can be gone while the container runs
+    // on, and stopServices removes a selected service's container by label
+    // whatever its pid is doing. Each entry is inspected at most once.
+    const liveness = new Map<string, Promise<EntryLiveness>>();
+    const livenessOf = (serviceName: string, info: PidServiceInfo): Promise<EntryLiveness> => {
+      let pending = liveness.get(serviceName);
+      if (!pending) {
+        pending = entryLiveness(config.projectDir, info);
+        liveness.set(serviceName, pending);
+      }
+      return pending;
+    };
+    for (const serviceName of new Set([...selectedNames, ...reserveNames, ...startedEntries.keys()])) {
+      const info = current?.services[serviceName];
+      if (!info) continue;
+      const started = startedEntries.get(serviceName);
+      if (started && info.pid === started.pid && info.startToken === started.startToken) {
+        stopNames.push(serviceName);
+        continue;
+      }
+      const alive = await livenessOf(serviceName, info);
+      if (alive.status === 'dead') {
+        // A dead entry is nobody's, whoever wrote it: this run selected the
+        // service but never spawned it (startup failed first) and the entry is
+        // a stale one from an earlier run, or a restart replaced this run's
+        // service and its replacement has already exited (no readiness check,
+        // crashed at once; for a Docker service, container and all). stopServices
+        // prunes it, and the reservation, if the service has a port, is released
+        // below instead of lingering until the next prune. A live entry with
+        // another identity, or one whose container cannot be inspected, is left
+        // alone here.
+        stopNames.push(serviceName);
+      } else {
+        replaced.add(serviceName);
+        process.stderr.write(`[portler] leaving service "${serviceName}" alone: ${alive.reason}.\n`);
+      }
+    }
+    // What a later run adopted stays up. `restart api` replaces api and keeps
+    // this run's db and proxy as the replacement's dependencies, so their
+    // entries still match this run; stopping them here would leave another
+    // run's service without what it depends on. The dependencies walked are
+    // the ones each entry recorded when it started, not this run's captured
+    // config: portler.yml may have changed in between, and the restart read
+    // the newer file. Anything a live foreign service depends on, and the
+    // proxy while any such service remains, is left alone, reservation included.
+    const foreignLive: string[] = [];
+    for (const [serviceName, info] of Object.entries(current?.services ?? {})) {
+      if (serviceName === PROXY_SERVICE_NAME || stopNames.includes(serviceName)) continue;
+      if ((await livenessOf(serviceName, info)).status !== 'dead') foreignLive.push(serviceName);
+    }
+    foreignRoots = foreignLive.map((serviceName) => ({ name: serviceName, info: current!.services[serviceName]! }));
+    let toStop = stopNames;
+    let kept: string[] = [];
+    if (keepAdopted && foreignLive.length > 0) {
+      const adopted = await recordedDependencyClosure(config, current!, foreignLive);
+      if (startedEntries.has(PROXY_SERVICE_NAME)) adopted.add(PROXY_SERVICE_NAME);
+      // Only a live entry is kept. One of this run's that died before the
+      // teardown (db crashed while the replacement still depends on it) is
+      // nothing to keep: stopServices prunes it and its port is released.
+      for (const serviceName of stopNames) {
+        if (!adopted.has(serviceName)) continue;
+        if ((await livenessOf(serviceName, current!.services[serviceName]!)).status !== 'dead') kept.push(serviceName);
+      }
+      toStop = stopNames.filter((serviceName) => !kept.includes(serviceName));
+      for (const serviceName of kept) {
+        replaced.add(serviceName);
+        process.stderr.write(`[portler] leaving service "${serviceName}" alone: a service another run started depends on it.\n`);
+      }
+    }
+    const result = await stopServices(config.projectDir, toStop);
     const incomplete = reportIncompleteTeardown(result);
-    const remaining = new Set(result.remaining);
+    // Release follows what was stopped or pruned, not only what this run
+    // reserved: a restart can give a service this run started portless a port
+    // (portler.yml edited in between), and if that replacement is dead its
+    // entry goes through stopServices above while its reservation would
+    // otherwise block the port until the next prune.
+    const remaining = new Set([...result.remaining, ...replaced]);
     await releasePorts(
       config.projectDir,
-      reserveNames.filter((serviceName) => !remaining.has(serviceName)),
+      [...new Set([...reserveNames, ...toStop])].filter((serviceName) => !remaining.has(serviceName)),
     );
     if (incomplete) throw new IncompleteTeardownError(result);
+    return kept;
+  };
+
+  // False as soon as any root is gone, not only once all are: with api keeping
+  // db and worker keeping cache, api's exit alone must free db. A root whose
+  // entry was replaced since counts as gone too, checked before liveness: a
+  // Docker root restarted again reuses its container name, so the snapshot's
+  // container check would see the newer container and call the old root
+  // alive. The pass this triggers reads pids.json again and keeps whatever the
+  // survivors and newer services need.
+  const dependentsAlive = async (): Promise<boolean> => {
+    if (foreignRoots.length === 0) return true;
+    const now = await readPids(config.projectDir);
+    for (const { name, info } of foreignRoots) {
+      const entry = now?.services[name];
+      if (!entry || entry.pid !== info.pid || entry.startToken !== info.startToken) return false;
+      if ((await entryLiveness(config.projectDir, info)).status === 'dead') return false;
+    }
+    return true;
   };
 
   try {
@@ -320,7 +505,9 @@ export async function startPhase(
         children.set(serviceName, child);
         if (options.detach) child.unref();
 
-        await recordPidEntry(config, serviceName, await pidInfoFor(config, service, child, assignments[serviceName]));
+        const info = await pidInfoFor(config, service, child, assignments[serviceName]);
+        startedEntries.set(serviceName, info);
+        await recordPidEntry(config, serviceName, info);
         if (readinessNames.has(serviceName)) {
           readinessWaits.push(() =>
             waitForServiceReady(
@@ -360,7 +547,9 @@ export async function startPhase(
       children.set(PROXY_SERVICE_NAME, child);
       if (options.detach) child.unref();
 
-      await recordPidEntry(config, PROXY_SERVICE_NAME, await proxyPidInfoFor(config, child, assignments[PROXY_SERVICE_NAME]!));
+      const info = await proxyPidInfoFor(config, child, assignments[PROXY_SERVICE_NAME]!);
+      startedEntries.set(PROXY_SERVICE_NAME, info);
+      await recordPidEntry(config, PROXY_SERVICE_NAME, info);
       // The synthetic service config gives the default TCP readiness wait, so
       // the project URL below is only printed once the proxy accepts
       // connections.
@@ -381,8 +570,12 @@ export async function startPhase(
     // The rollback must not replace the startup error with a cleanup error: the
     // reason the start failed is what the user needs to see. Whatever the
     // teardown could not do it has already reported for itself.
+    // A rollback restores what was there before this run, so it keeps nothing
+    // for another run: a service it started was not running before it, even if
+    // a live service elsewhere depends on it. Keeping it would also leave this
+    // failed `up` attached to a child nobody supervises.
     try {
-      await teardown();
+      await teardown({ keepAdopted: false });
     } catch (teardownError) {
       process.stderr.write(`[portler] warning: rollback was incomplete: ${(teardownError as Error).message}\n`);
     }
@@ -397,7 +590,7 @@ export async function startPhase(
     process.stdout.write('[portler] services started in background\n');
   }
 
-  return { children, teardown, detached: options.detach };
+  return { children, teardown, dependentsAlive, detached: options.detach };
 }
 
 /**
@@ -425,8 +618,10 @@ export async function startServices(
 
   if (stack.detached) return 0;
 
-  return waitForForegroundServices(stack.children, () =>
-    withLifecycleLockForTeardown(rawConfig.projectDir, stack.teardown),
+  return waitForForegroundServices(
+    stack.children,
+    (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
+    { dependentsAlive: stack.dependentsAlive },
   );
 }
 

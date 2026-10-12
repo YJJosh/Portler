@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   dockerLabelArgs,
   inspectArgs,
+  ownedContainerLiveness,
   ownershipVerdict,
   parseInspection,
   parseInspectLabels,
@@ -258,5 +259,45 @@ describe('volume removal ownership (portler volumes remove)', () => {
 
   it('refuses a volume labelled for a different project root', () => {
     assert.equal(ownershipVerdict({ [PROJECT_LABEL]: '/home/dev/other' }, volumeRoot), 'foreign');
+  });
+});
+
+describe('ownedContainerLiveness', () => {
+  function inspectedState(id: string, labels: Record<string, string> | null, running: boolean): CommandResult {
+    return { code: 0, stdout: `${JSON.stringify({ id, labels, running })}\n`, stderr: '' };
+  }
+
+  it('reads the running state from the same inspect as the id and labels', () => {
+    // One call: a container replaced under the name between two inspects could
+    // be running while the one whose label we checked is gone.
+    assert.match(inspectArgs('container', 'portler-api')[4]!, /\{\{json \.State\.Running\}\}/);
+    assert.deepEqual(parseInspection(0, '{"id":"abc123","labels":{"portler.project":"/p"},"running":true}', ''), {
+      status: 'found',
+      id: 'abc123',
+      labels: { 'portler.project': '/p' },
+      running: true,
+    });
+  });
+
+  it("reports this project's running container as running", async () => {
+    const docker = fakeDocker([inspectedState('sha256:deadbeef', { [PROJECT_LABEL]: PROJECT }, true)]);
+    assert.deepEqual(await ownedContainerLiveness('portler-api', PROJECT, docker.run), { status: 'running', id: 'sha256:deadbeef' });
+    assert.equal(docker.calls.length, 1, 'one inspect, nothing removed');
+  });
+
+  it("reports an exited container, a missing one, and a stranger's as gone", async () => {
+    for (const outcome of [
+      inspectedState('sha256:deadbeef', { [PROJECT_LABEL]: PROJECT }, false),
+      NOT_FOUND,
+      inspectedState('sha256:strangers', null, true),
+      inspectedState('sha256:other', { [PROJECT_LABEL]: '/someone/else' }, true),
+    ]) {
+      assert.deepEqual(await ownedContainerLiveness('portler-api', PROJECT, fakeDocker([outcome]).run), { status: 'gone' });
+    }
+  });
+
+  it('does not guess when the daemon cannot be asked', async () => {
+    const result = await ownedContainerLiveness('portler-api', PROJECT, fakeDocker([DAEMON_DOWN]).run);
+    assert.equal(result.status, 'error');
   });
 });
