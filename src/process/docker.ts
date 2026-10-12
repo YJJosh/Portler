@@ -4,7 +4,7 @@ import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue } from '../env/index.ts';
 import { dockerLabelArgs, PROJECT_LABEL } from './ownership.ts';
 import type { Assignments, DockerConfig, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   if (value === '') return "''";
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replaceAll("'", `'"'"'`)}'`;

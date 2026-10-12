@@ -26,7 +26,7 @@ portler volumes fork postgres-data migration
 - `<volume>` can be the short name from portler.yml (`postgres-data`), a `name--set` variant (`postgres-data--migration`), or the full Docker volume name.
 - Set names may contain `a-z0-9_.-` but not `--`.
 
-Run the stack against the fork with `portler up --volume-set migration`.
+Run the stack against the fork with `portler up --volume-set migration`. A fork made with `--prod` (or `--file`) lives in that scope, so run `up` with the same flags: `portler up --prod --volume-set migration`. Without them `up` would mount the development variant instead. The command Portler prints after the fork already includes them.
 
 ## `volumes remove <volume> [--force]`
 
