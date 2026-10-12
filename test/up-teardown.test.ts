@@ -110,6 +110,99 @@ describe('foreground teardown ownership', () => {
     }
   });
 
+  it('keeps a dependency and the proxy that a named restart adopted', { timeout: 15_000 }, async (t) => {
+    // `restart api` replaces api and leaves db and the proxy as they are: their
+    // entries still match this run, but the replacement depends on them.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3001',
+      '    port_env: PORT',
+      '  api:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3000',
+      '    port_env: PORT',
+      '    depends_on: [db]',
+      'proxy:',
+      '  routes:',
+      '    /: api',
+      '',
+    ].join('\n'));
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    assert.ok(original.services.db && original.services.api && original.services[PROXY_SERVICE_NAME]);
+
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    assert.notEqual(afterRestart.services.api!.pid, original.services.api!.pid, 'api was replaced');
+    assert.deepEqual(afterRestart.services.db, original.services.db, 'db was kept by the restart');
+    assert.deepEqual(afterRestart.services[PROXY_SERVICE_NAME], original.services[PROXY_SERVICE_NAME], 'the proxy was kept by the restart');
+    const registry = await readRegistry();
+
+    const signals: number[] = [];
+    const kill = process.kill;
+    t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal !== 0) signals.push(pid);
+      return kill(pid, signal);
+    });
+    const notices: string[] = [];
+    t.mock.method(process.stderr, 'write', (text: string) => { notices.push(text); return true; });
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    t.mock.restoreAll();
+
+    assert.deepEqual(signals, [], 'nothing the replacement depends on may be signalled');
+    assert.deepEqual(await readPids(projectDir), afterRestart, 'api replacement, db and proxy entries survive');
+    assert.deepEqual(await readRegistry(), registry, 'their reservations survive');
+    for (const name of ['db', 'api', PROXY_SERVICE_NAME]) {
+      assert.ok(isPidRunning(afterRestart.services[name]!.pid), `${name} must still be alive`);
+    }
+    for (const name of ['db', PROXY_SERVICE_NAME]) {
+      assert.ok(notices.some((text) => text.includes(`"${name}"`) && text.includes('depends on it')), `notice for ${name}`);
+    }
+  });
+
+  it('still stops what no other run depends on after a named restart', { timeout: 15_000 }, async () => {
+    // db is this run's and nothing the replacement api needs: it is stopped and
+    // released as before. The proxy serves the replacement and stays.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3001',
+      '    port_env: PORT',
+      '  api:',
+      `    command: exec "${process.execPath}" server.cjs`,
+      '    port: 3000',
+      '    port_env: PORT',
+      'proxy:',
+      '  routes:',
+      '    /: api',
+      '',
+    ].join('\n'));
+    const config = await loadConfig(projectDir);
+    const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['db', 'api'], { detach: false }));
+    for (const child of stack.children.values()) childPids.add(child.pid!);
+    const original = (await readPids(projectDir))!;
+
+    assert.equal(await commandRestart(parseArgs(['api'], 'restart')), 0);
+    const afterRestart = (await readPids(projectDir))!;
+    childPids.add(afterRestart.services.api!.pid);
+    const dbPort = String(original.services.db!.port);
+    assert.ok((await readRegistry()).ports[dbPort], 'db holds a reservation before the teardown');
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.db, undefined, 'db, which nothing else needs, is stopped');
+    assert.ok(!isPidRunning(original.services.db!.pid), 'db is gone');
+    assert.equal((await readRegistry()).ports[dbPort], undefined, 'and its reservation is released');
+    assert.deepEqual(after.services.api, afterRestart.services.api, 'the api replacement is untouched');
+    assert.deepEqual(after.services[PROXY_SERVICE_NAME], afterRestart.services[PROXY_SERVICE_NAME], 'the proxy stays for the replacement');
+    assert.ok(isPidRunning(afterRestart.services.api!.pid) && isPidRunning(afterRestart.services[PROXY_SERVICE_NAME]!.pid));
+  });
+
   for (const changed of ['pid', 'startToken'] as const) {
     it(`preserves an entry when only its ${changed} differs`, { timeout: 10_000 }, async () => {
       const stack = await startForeground();
@@ -140,8 +233,11 @@ describe('foreground teardown ownership', () => {
       assert.deepEqual((await readRegistry()).ports[String(replacement.port)], reservation);
       assert.ok(isPidRunning(original.services.api!.pid), 'the changed entry must not authorize signalling');
       assert.ok(isPidRunning(replacementPid), 'the replacement must survive');
-      // The unchanged proxy is still ours and must be cleaned up normally.
-      assert.equal((await readPids(projectDir))?.services[PROXY_SERVICE_NAME], undefined);
+      // The proxy is still ours, but the foreign api is served through it: it stays,
+      // as something a service another run started depends on, reservation included.
+      const after = (await readPids(projectDir))!;
+      assert.deepEqual(after.services[PROXY_SERVICE_NAME], original.services[PROXY_SERVICE_NAME], 'the proxy stays for the foreign api');
+      assert.ok(isPidRunning(after.services[PROXY_SERVICE_NAME]!.pid));
     });
   }
 

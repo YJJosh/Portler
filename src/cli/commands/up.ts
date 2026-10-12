@@ -258,7 +258,32 @@ export async function startPhase(
         process.stderr.write(`[portler] leaving service "${serviceName}" alone: its PID entry belongs to another run.\n`);
       }
     }
-    const result = await stopServices(config.projectDir, stopNames);
+    // What a later run adopted stays up. `restart api` replaces api and keeps
+    // this run's db and proxy as the replacement's dependencies, so their
+    // entries still match this run; stopping them here would leave another
+    // run's service without what it depends on. Anything a live foreign
+    // service depends on, and the proxy while any such service remains, is
+    // left alone, reservation included.
+    const foreignLive = Object.entries(current?.services ?? {})
+      .filter(
+        ([serviceName, info]) =>
+          serviceName !== PROXY_SERVICE_NAME &&
+          !stopNames.includes(serviceName) &&
+          Object.hasOwn(rawConfig.services, serviceName) &&
+          isPidRunning(info.pid),
+      )
+      .map(([serviceName]) => serviceName);
+    let toStop = stopNames;
+    if (foreignLive.length > 0) {
+      const adopted = new Set(expandAndOrderServices(rawConfig, foreignLive));
+      if (startedEntries.has(PROXY_SERVICE_NAME)) adopted.add(PROXY_SERVICE_NAME);
+      toStop = stopNames.filter((serviceName) => !adopted.has(serviceName));
+      for (const serviceName of stopNames.filter((serviceName) => adopted.has(serviceName))) {
+        replaced.add(serviceName);
+        process.stderr.write(`[portler] leaving service "${serviceName}" alone: a service another run started depends on it.\n`);
+      }
+    }
+    const result = await stopServices(config.projectDir, toStop);
     const incomplete = reportIncompleteTeardown(result);
     const remaining = new Set([...result.remaining, ...replaced]);
     await releasePorts(
