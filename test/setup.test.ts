@@ -677,6 +677,43 @@ services: {app: {command: echo}}
     assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
   });
 
+  it('a watch step reads its files when it is reached and records them as they are after it succeeds', async () => {
+    await fs.writeFile(path.join(dir, 'source'), 'a');
+    const cfg = await config(`setup:
+  - {run: "cp source generated", always: true}
+  - {run: "echo use >> steps", watch: [generated]}
+  - {run: "echo own >> steps; echo x >> counter", watch: [counter]}
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own']);
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own'], 'a step that rewrote its own watched file does not run again for that');
+    await fs.writeFile(path.join(dir, 'source'), 'b');
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own', 'use'], 'an earlier step rewrote the watched file in this run, so the step runs');
+    await run();
+    assert.equal((await lines()).length, 3, 'and its receipt holds for what it ran against');
+  });
+
+  it('a watch step that fails loses its old receipt, even when the file goes back', async () => {
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    await fs.writeFile(path.join(dir, 'fail'), 'no');
+    const cfg = await config(`setup: [{run: "echo install >> steps; grep -q no fail", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await fs.writeFile(path.join(dir, 'fail'), 'yes');
+    await assert.rejects(run(), /failed/);
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    await fs.writeFile(path.join(dir, 'fail'), 'no');
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install', 'install'], 'the half-done run is not covered by the v1 receipt');
+  });
+
   it('setup skips a missing use_env file in development, like --prod does', async () => {
     await config(`use_env: .env
 setup: echo ok >> steps
