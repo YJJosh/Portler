@@ -13,6 +13,7 @@ import { loadConfig } from '../src/config/index.ts';
 import { PROXY_SERVICE_NAME } from '../src/constants.ts';
 import { readRegistry } from '../src/ports/registry.ts';
 import { isPidRunning, readPids, updatePids, writePids } from '../src/process/pids.ts';
+import { readProcessStartToken } from '../src/process/identity.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../src/state/lock.ts';
 
 let projectDir: string;
@@ -352,41 +353,64 @@ describe('foreground teardown ownership', () => {
     assert.deepEqual(after.services[PROXY_SERVICE_NAME], afterRestart.services[PROXY_SERVICE_NAME]);
   });
 
-  for (const changed of ['pid', 'startToken'] as const) {
-    it(`preserves an entry when only its ${changed} differs`, { timeout: 10_000 }, async () => {
+  it('preserves a replacement entry whose pid and start token name a live process', { timeout: 10_000 }, async () => {
+    // A restart replaced api while the teardown waited: the entry names another
+    // live process, recorded with that process's own start token.
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    childPids.add(child.pid!);
+    await once(child, 'spawn');
+    const token = await readProcessStartToken(child.pid!);
+    assert.ok(token, 'the platform reports a start token');
+    await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+      pids.services.api!.pid = child.pid!;
+      pids.services.api!.startToken = token;
+    }));
+    const replacement = (await readPids(projectDir))!.services.api!;
+    const reservation = (await readRegistry()).ports[String(replacement.port)];
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    assert.deepEqual((await readPids(projectDir))?.services.api, replacement);
+    assert.deepEqual((await readRegistry()).ports[String(replacement.port)], reservation);
+    assert.ok(isPidRunning(original.services.api!.pid), 'the changed entry must not authorize signalling');
+    assert.ok(isPidRunning(child.pid!), 'the replacement must survive');
+    // The proxy is still ours, but the foreign api is served through it: it stays,
+    // as something a service another run started depends on, reservation included.
+    const after = (await readPids(projectDir))!;
+    assert.deepEqual(after.services[PROXY_SERVICE_NAME], original.services[PROXY_SERVICE_NAME], 'the proxy stays for the foreign api');
+    assert.ok(isPidRunning(after.services[PROXY_SERVICE_NAME]!.pid));
+  });
+
+  for (const holder of ['an unrelated process', "this run's own process"] as const) {
+    it(`prunes, without signalling, an entry whose pid now holds ${holder}`, { timeout: 10_000 }, async () => {
+      // The replacement exited and the OS recycled its pid before the teardown
+      // ran: the pid is live, but its start token is not the recorded one. The
+      // entry names nothing alive, so it is pruned and its port released, and
+      // the process that holds the number now is never signalled.
       const stack = await startForeground();
       const original = (await readPids(projectDir))!;
-      assert.ok(original.services.api!.startToken);
-      // No OS PID recycling or timestamp timing required: change one field in
-      // the recorded generation, leaving the other identical to this run.
-      let replacementPid = original.services.api!.pid;
-      if (changed === 'pid') {
-        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-          detached: true,
-          stdio: 'ignore',
-        });
+      let holderPid = original.services.api!.pid;
+      if (holder === 'an unrelated process') {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
         childPids.add(child.pid!);
         await once(child, 'spawn');
-        replacementPid = child.pid!;
+        holderPid = child.pid!;
       }
       await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
-        if (changed === 'pid') pids.services.api!.pid = replacementPid;
-        else pids.services.api!.startToken = 'another-run-start-token';
+        pids.services.api!.pid = holderPid;
+        pids.services.api!.startToken = 'another-run-start-token';
       }));
-      const replacement = (await readPids(projectDir))!.services.api!;
-      const reservation = (await readRegistry()).ports[String(replacement.port)];
 
       await withLifecycleLockForTeardown(projectDir, stack.teardown);
 
-      assert.deepEqual((await readPids(projectDir))?.services.api, replacement);
-      assert.deepEqual((await readRegistry()).ports[String(replacement.port)], reservation);
-      assert.ok(isPidRunning(original.services.api!.pid), 'the changed entry must not authorize signalling');
-      assert.ok(isPidRunning(replacementPid), 'the replacement must survive');
-      // The proxy is still ours, but the foreign api is served through it: it stays,
-      // as something a service another run started depends on, reservation included.
-      const after = (await readPids(projectDir))!;
-      assert.deepEqual(after.services[PROXY_SERVICE_NAME], original.services[PROXY_SERVICE_NAME], 'the proxy stays for the foreign api');
-      assert.ok(isPidRunning(after.services[PROXY_SERVICE_NAME]!.pid));
+      const after = await readPids(projectDir);
+      assert.ok(!after?.services.api, 'the entry with a recycled pid is pruned');
+      assert.ok(!after?.services[PROXY_SERVICE_NAME], 'nothing foreign is live, so the proxy is stopped as usual');
+      assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'every reservation is released');
+      assert.ok(isPidRunning(holderPid), 'the process holding the pid now is not signalled');
+      assert.ok(isPidRunning(original.services.api!.pid), 'nor is this run\'s original api');
     });
   }
 

@@ -4,10 +4,12 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  identityVerdict,
   isPidRunning,
   ownedContainerLiveness,
   pidInfoFor,
   readPids,
+  readProcessStartToken,
   runningServices,
   serviceLogPath,
   spawnService,
@@ -169,16 +171,22 @@ export interface StartedStack {
 type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status: 'dead' };
 
 /**
- * Whether a pids.json entry still names something alive. The pid first; then,
- * for a Docker service, its container: `docker run` is supervised by a shell
- * whose pid can be gone while the container runs on, and handing such an entry
- * to stopServices would remove a container that another run is serving
- * through. An entry whose container cannot be inspected (daemon down,
- * permission error) is 'unknown' and treated as alive: guessing "dead" is the
- * one mistake that destroys something.
+ * Whether a pids.json entry still names something alive. The pid first, by
+ * identity: a live pid whose start token differs from the recorded one was
+ * recycled by the OS for an unrelated process, so the entry is as dead as one
+ * whose pid is gone (stopServices drops it without signalling). A live pid
+ * that cannot be identified (no recorded token, or the platform will not say)
+ * counts as alive. Then, for a Docker service, its container: `docker run` is
+ * supervised by a shell whose pid can be gone while the container runs on, and
+ * handing such an entry to stopServices would remove a container that another
+ * run is serving through. An entry whose container cannot be inspected (daemon
+ * down, permission error) is 'unknown' and treated as alive: guessing "dead" is
+ * the one mistake that destroys something.
  */
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
-  if (isPidRunning(info.pid)) return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  const exists = isPidRunning(info.pid);
+  const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
+  if (verdict === 'match' || verdict === 'unverifiable') return { status: 'alive', reason: 'its PID entry belongs to another run' };
   if (!info.dockerContainer) return { status: 'dead' };
   const container = await ownedContainerLiveness(info.dockerContainer, projectDir);
   if (container.status === 'running') {
