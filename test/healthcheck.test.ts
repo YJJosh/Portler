@@ -213,6 +213,63 @@ describe('waitForServiceReady', () => {
     }
   });
 
+  it('counts a Docker port as ready when the peer answers and hangs up', async () => {
+    // A banner-then-close protocol (an SMTP greeting, a server that redirects
+    // and closes) is a real listener. Docker's proxy never sends application
+    // data, so bytes from the peer settle the probe before the hold ends.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.end('220 ready\r\n');
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, DOCKER_TCP_HOLD_MS), true);
+      assert.ok(Date.now() - startedAt < DOCKER_TCP_HOLD_MS, 'the data settled it before the hold would have ended');
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 1_000, intervalMs: 25 },
+      });
+      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('lets an exit during the probe win over a late "ready"', async () => {
+    // The hold keeps ticking against a port whose process died meanwhile
+    // (Docker's proxy keeps accepting). The exit has to win.
+    const server = net.createServer(() => {});
+    const port = await listen(server);
+    try {
+      let exited = false;
+      setTimeout(() => {
+        exited = true;
+      }, 50);
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 },
+      });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => exited, DOCKER_TCP_HOLD_MS),
+        /exited before it became ready/,
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('names the detached log file instead of "the log lines above" when one is given', async () => {
+    const port = await findFreePort();
+    const service = makeService({ port: 4000, healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 } });
+    await assert.rejects(
+      waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, '/proj/.portler/logs/api.log'),
+      (error: Error) => /Check \/proj\/\.portler\/logs\/api\.log \(or "portler logs api"\) for the cause/.test(error.message) && !/above/.test(error.message),
+    );
+  });
+
   it('does not let the Docker hold run past the attempt deadline', async () => {
     // A connect that lands with less than the hold window left cannot prove the
     // port is held open before the deadline, so it is not ready, and it says so

@@ -15,7 +15,7 @@ import {
 } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
-import { DOCKER_TCP_HOLD_MS, waitForServiceReady } from '../../readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
@@ -281,6 +281,7 @@ export async function startPhase(
               assignments[serviceName],
               () => childExited,
               service.docker ? DOCKER_TCP_HOLD_MS : 0,
+              logFilePath,
             ),
           );
         }
@@ -293,6 +294,19 @@ export async function startPhase(
       // waiting for slower siblings to time out.
       for (const wait of waits) wait.catch(() => {});
       await Promise.all(waits);
+
+      // A member of an earlier level can die while this level was starting.
+      // Its own readiness wait returned long ago, so nothing else would notice
+      // and `up` would report a started stack with a dead member. Catch it
+      // before the next level, or the proxy, builds on it.
+      const died = [...children].filter(([, child]) => child.exitCode !== null || child.signalCode !== null).map(([name]) => name);
+      if (died.length > 0) {
+        const hints = died.map((name) => logLocationHint(name, options.detach ? serviceLogPath(config.projectDir, name) : undefined));
+        throw new Error(
+          `service${died.length > 1 ? 's' : ''} ${died.join(', ')} exited while the stack was still starting. ` +
+            `${hints.length === 1 ? hints[0] : hints.join('; ')}, then run the same command again.`,
+        );
+      }
     }
 
     // The proxy starts last so every routed service already listens; it

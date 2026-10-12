@@ -18,6 +18,7 @@ import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
 import { writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
+import { readPids } from '../src/process/index.ts';
 
 const CONFIG = ['services:', '  api:', '    command: node -e ""', '    port: 3000'].join('\n');
 
@@ -85,6 +86,46 @@ describe('CLI command contracts', () => {
 
     await assert.rejects(commandUp(parseArgs([], 'up')), /both use Docker container name "shared"/);
     assert.equal(await pathExists(path.join(projectDir, '.portler', 'state.json')), false);
+  });
+});
+
+describe('up startup liveness', () => {
+  it('fails when a member of an earlier level dies while a later level is still starting', async () => {
+    // db passes its check, then dies while api (which depends on it) is still
+    // coming up. api's own wait knows nothing about db, so without the scan
+    // after each level `up -d` would report a started stack with a dead db.
+    await fs.writeFile(
+      path.join(projectDir, 'db.js'),
+      "require('net').createServer().listen(process.env.PORT, '127.0.0.1'); setTimeout(() => process.exit(1), 1500);\n",
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'api.js'),
+      "setTimeout(() => require('net').createServer().listen(process.env.PORT, '127.0.0.1'), 2500); setInterval(() => {}, 1000);\n",
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      [
+        'services:',
+        '  db:',
+        '    command: node db.js',
+        '    port: 3001',
+        '    port_env: PORT',
+        '  api:',
+        '    command: node api.js',
+        '    port: 3000',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+      ].join('\n'),
+      'utf8',
+    );
+    await assert.rejects(
+      commandUp(parseArgs(['-d'], 'up')),
+      /service db exited while the stack was still starting\. Check .*db\.log \(or "portler logs db"\) for the cause, then run the same command again/,
+    );
+    const pids = await readPids(projectDir);
+    assert.ok(pids === null || !Object.hasOwn(pids.services, 'api'), 'the rollback stopped api');
   });
 });
 

@@ -9,7 +9,8 @@ import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssi
 /**
  * Docker's port proxy accepts every connection on a published port, then
  * closes it straight away while nothing listens inside the container yet.
- * A container port only counts as ready once a connection stays open.
+ * A container port only counts as ready once a connection stays open for
+ * this long, or once the peer sends something: the proxy never sends data.
  */
 export const DOCKER_TCP_HOLD_MS = 200;
 
@@ -34,8 +35,11 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
       // decides whether its overall timeout leaves room for another attempt.
       if (deadline - Date.now() <= holdMs) return finish(false);
       socket.setTimeout(0);
-      // Drain any banner so a peer close is noticed rather than buffered.
-      socket.resume();
+      // Bytes from the peer prove a real listener even if it hangs up right
+      // after (a banner, a protocol that answers and closes): Docker's proxy
+      // never sends application data. Attaching the listener also drains the
+      // socket, so a silent peer close is noticed rather than buffered.
+      socket.once('data', () => finish(true));
       holdTimer = setTimeout(() => finish(true), holdMs);
     });
     socket.on('end', () => finish(false));
@@ -156,6 +160,25 @@ function describeHealthcheck(
 }
 
 /**
+ * Where a service's output went, for error messages: on this terminal when
+ * `logFile` is undefined, otherwise in the detached log file.
+ */
+export function logLocationHint(serviceName: string, logFile: string | undefined): string {
+  return logFile === undefined
+    ? `Check the "[${serviceName}]" log lines above for the cause`
+    : `Check ${logFile} (or "portler logs ${serviceName}") for the cause`;
+}
+
+function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
+  const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
+  // "The same command": a bare `up <name>` would drop the mode and flags the
+  // stack was started with.
+  return new Error(
+    `service "${service.name}" exited before it became ready. ${logLocationHint(service.name, logFile)}${buildHint}, then run the same command again.`,
+  );
+}
+
+/**
  * Poll a service's healthcheck until it passes, the configured timeout
  * elapses, or the child process exits early.
  */
@@ -168,6 +191,8 @@ export async function waitForServiceReady(
   childHasExited: () => boolean,
   /** How long a TCP connection must stay open to count; see DOCKER_TCP_HOLD_MS. */
   tcpHoldMs = 0,
+  /** The detached log file of the service, named in errors; undefined when its output is on this terminal. */
+  logFile?: string,
 ): Promise<void> {
   const healthcheck = service.healthcheck ?? defaultHealthcheck(service, assignment);
   if (healthcheck.type === 'none') return;
@@ -176,16 +201,14 @@ export async function waitForServiceReady(
   process.stdout.write(`[portler] waiting for ${service.name} to be ready (${healthcheck.type})...\n`);
 
   while (Date.now() - startedAt <= healthcheck.timeoutMs) {
-    if (childHasExited()) {
-      const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
-      throw new Error(
-        `service "${service.name}" exited before it became ready. ` +
-          `Check the "[${service.name}]" log lines above for the cause${buildHint}, then run "portler up ${service.name}" again.`,
-      );
-    }
+    if (childHasExited()) throw exitedError(service, logFile);
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
-    if (await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs)) {
+    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs);
+    // The probe can pass against a port whose process died while it ran: Docker's
+    // proxy keeps accepting, a hold timer keeps ticking. The exit wins.
+    if (childHasExited()) throw exitedError(service, logFile);
+    if (ready) {
       process.stdout.write(`[portler] ${service.name} is ready\n`);
       return;
     }
