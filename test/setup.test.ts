@@ -447,6 +447,41 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('restart --prod checks prod.require before stopping anything', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`services:
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+      require: [DEPLOY_SECRET]
+`);
+    const oldSecret = process.env.DEPLOY_SECRET;
+    process.env.DEPLOY_SECRET = 's';
+    try {
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      const pid = (await readPids(dir))?.services.api?.pid;
+      assert.ok(pid);
+      delete process.env.DEPLOY_SECRET;
+      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /service api requires DEPLOY_SECRET in production/);
+      assert.equal((await readPids(dir))?.services.api?.pid, pid, 'api was not stopped');
+      assert.doesNotThrow(() => process.kill(pid, 0), 'api is still running');
+      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+    } finally {
+      if (oldSecret === undefined) delete process.env.DEPLOY_SECRET;
+      else process.env.DEPLOY_SECRET = oldSecret;
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';

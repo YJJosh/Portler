@@ -254,6 +254,35 @@ services:
     assert.match(dev.stderr, /--reveal applies to "env --prod"/);
   });
 
+  it('does not hand --prod the cached assignment of a service prod.services leaves out', async () => {
+    const cfg = await config(`prod: {services: [api]}
+services:
+  db: {command: echo, port: 5432}
+  api:
+    command: echo
+    port: 4000
+    env: {DB_URL: "\${db.url}"}
+    prod:
+      setup: node -e "require('fs').writeFileSync('seen', process.env.DB_URL)"
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--experimental-strip-types', cli, ...args], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    // A development run leaves db's assignment in state.json.
+    const dev = run('env');
+    assert.equal(dev.status, 0, dev.stderr);
+    assert.match(dev.stdout, /^PORTLER_DB_URL=/m);
+    const prod = run('env', '--prod');
+    assert.equal(prod.status, 0, prod.stderr);
+    assert.match(prod.stdout, /^PORTLER_API_URL=/m);
+    assert.doesNotMatch(prod.stdout, /^PORTLER_DB_/m, 'db is external under --prod');
+    const setup = run('setup', '--prod');
+    assert.equal(setup.status, 1, 'db.url does not resolve under --prod, as in up --prod');
+    assert.match(setup.stderr, /db\.url/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'seen')), 'the production setup step did not run');
+    assert.match(run('env').stdout, /^PORTLER_DB_URL=/m, 'state.json still holds the development assignment');
+  });
+
   it('validates flag combinations and rejects unsupported k8s flags before loading config', async () => {
     assert.equal(parseArgs(['--no-setup'], 'up').setup, false);
     assert.throws(() => parseArgs(['--setup', '--no-setup'], 'up'), /cannot be combined/);

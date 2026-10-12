@@ -328,6 +328,21 @@ describe('buildServiceEnv', () => {
     assert.deepEqual(masked, { SIGNING_KEY: '***', ENCRYPTION_KEY: '***', SSH_KEY: '***', KEY: '***', PASSPHRASE: '***', TLS_CERT: '***', KEYCLOAK_URL: 'http://kc', PUBLIC_PORT: '80' });
   });
 
+  it('masks the password of a URL whose user is empty, and leaves URLs without credentials alone', () => {
+    const masked = maskSecrets({
+      REDIS_URL: 'redis://:hunter2@cache:6379/0',
+      DATABASE_URL: 'postgres://app:hunter2@db:5432/app',
+      PLAIN_URL: 'http://cache:6379/path@v2',
+      USER_ONLY: 'http://me@cache',
+    });
+    assert.deepEqual(masked, {
+      REDIS_URL: 'redis://:***@cache:6379/0',
+      DATABASE_URL: 'postgres://app:***@db:5432/app',
+      PLAIN_URL: 'http://cache:6379/path@v2',
+      USER_ONLY: 'http://me@cache',
+    });
+  });
+
   it('prints the deployment view with secrets masked', () => {
     const service = makeService({ env: { DATABASE_URL: 'postgres://app:hunter2@db:5432/app', API_TOKEN: 'abc', PLAIN: 'x' } });
     const config = { ...makeConfig({ api: service }, { ROOT_VALUE: 'r' }), production: true };

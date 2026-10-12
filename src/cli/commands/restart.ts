@@ -1,6 +1,7 @@
-import { applyImageOverrides, configForRunMode, loadConfig } from '../../config/index.ts';
-import { productionServices } from '../../config/production.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
+import { applyProduction, productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
+import { assertProductionRequirements } from '../../env/index.ts';
 import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -108,18 +109,28 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
+    // The services startPhase will start once the stop is done: the requested roots and any
+    // dependency that is not running.
+    const runningNow = new Set(runningServices(before));
+    const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
+    const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
+      (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
+    );
+
     // Check --image before anything is stopped. applyImageOverrides rejects an unknown
     // service or one that does not run in Docker in this mode, and a target this restart
     // leaves running would keep its old image. Either failure after the stop would leave
     // the requested services down with nothing restarted.
     if (args.images) {
       applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
-      const runningNow = new Set(runningServices(before));
-      const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
-      const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
-        (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
-      );
       validateImageOverrideTargets(args.images, starting, runningNow);
+    }
+
+    // prod.require too: a deployment value that has gone missing is reported while the
+    // services are still up, not after they were stopped and could not start again.
+    if (args.prod) {
+      const runConfig = applyProduction(configForRunMode(rawConfig, mode), true);
+      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }));
     }
 
     // With no names, stop everything in pids.json (like `portler down`) so

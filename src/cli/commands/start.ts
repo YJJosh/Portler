@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { assertRequiredEnv, buildGeneratedEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
+import { assertRequiredEnv, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
 import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -95,7 +95,11 @@ export const DEFAULT_DRAIN_MS = 10_000;
 export async function commandStart(args: ParsedArgs): Promise<number> {
   const config = applyProduction(productionServices(await loadConfig(process.cwd(), args.file), args.prod, args.positionals), args.prod);
   const service = selectStartService(config, args.positionals);
-  const env = await buildStartEnv(config, service, await loadBaseEnv(config, { allowMissing: true }));
-  if (args.prod) assertRequiredEnv(`service ${service.name}`, requiredEnvKeys(config, service), env);
+  const baseEnv = await loadBaseEnv(config, { allowMissing: true });
+  // Checked against what the platform and the use_env file supply, before buildStartEnv picks
+  // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
+  // not pass on a free port the platform does not route to.
+  if (args.prod) assertRequiredEnv(`service ${service.name}`, requiredEnvKeys(config, service), deploymentEnv(baseEnv));
+  const env = await buildStartEnv(config, service, baseEnv);
   return runShell(service.command!, resolveServiceCwd(config, service), env, { drainMs: args.drainMs ?? DEFAULT_DRAIN_MS });
 }

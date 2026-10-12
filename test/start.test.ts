@@ -223,6 +223,25 @@ services:
     assert.equal((await fs.readFile(path.join(cfg.projectDir, 'started'), 'utf8')).trim(), 'started');
   });
 
+  it('does not count the port it picks as the required PORT from the platform', async () => {
+    const cfg = await config(`services:
+  api:
+    command: echo started > started
+    port: 4000
+    port_env: PORT
+    prod: {require: [PORT]}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    delete env.PORT;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1, 'the declared port 4000 must not satisfy require: [PORT]');
+    assert.match(refused.stderr, /service api requires PORT in production/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'started')), 'the command did not run');
+    const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, PORT: '4567' }, encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+  });
+
   it('returns the shell exit code and runs in the requested cwd', async () => {
     const cfg = await config('services: {api: {command: echo}}');
     assert.equal(await runShell('pwd > cwd; exit 17', cfg.projectDir, {}), 17);

@@ -2,7 +2,7 @@ import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxySe
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertRequiredEnv, buildGeneratedEnv, buildServiceEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
+import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
@@ -437,6 +437,10 @@ export async function startPhase(
   };
 
   try {
+    // prod.require: a deployment that forgot a value fails here, before setup runs or
+    // anything is spawned, naming the key instead of failing somewhere inside the app.
+    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv);
+
     // Resolve every selected service's env (and healthcheck references) up
     // front, so config mistakes like `backend.urll` fail before anything is
     // spawned instead of after some services have already started.
@@ -448,14 +452,6 @@ export async function startPhase(
     }
 
     const projectEnv = buildProjectEnv(config, baseEnv, assignments);
-    // prod.require: a deployment that forgot a value fails here, before setup runs or
-    // anything is spawned, naming the key instead of failing somewhere inside the app.
-    if (options.prod) {
-      assertRequiredEnv('the project', requiredEnvKeys(config), projectEnv);
-      for (const serviceName of selectedNames) {
-        assertRequiredEnv(`service ${serviceName}`, requiredEnvKeys(config, config.services[serviceName]!), serviceEnvs.get(serviceName)!.env);
-      }
-    }
 
     const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped

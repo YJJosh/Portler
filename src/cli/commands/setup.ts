@@ -1,6 +1,6 @@
 import { configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { assertRequiredEnv, buildServiceEnv, requiredEnvKeys } from '../../env/index.ts';
+import { assertProductionRequirements, buildServiceEnv } from '../../env/index.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { EnvMap } from '../../types/index.ts';
@@ -21,14 +21,11 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     // often what setup (or the tool that ran it) creates, and its values are read before
     // the steps run anyway. `up` in development still requires it.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true });
+    if (args.prod) assertProductionRequirements(config, names, baseEnv);
     const projectEnv = buildProjectEnv(config, baseEnv, assignments);
     const serviceEnvs = new Map<string, EnvMap>();
     for (const name of names) {
       serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments).env);
-    }
-    if (args.prod) {
-      assertRequiredEnv('the project', requiredEnvKeys(config), projectEnv);
-      for (const name of names) assertRequiredEnv(`service ${name}`, requiredEnvKeys(config, config.services[name]!), serviceEnvs.get(name)!);
     }
     const setupMode = `${mode}:${args.prod ? 'prod' : 'dev'}`;
     await pruneSetupReceipts(config, setupMode);

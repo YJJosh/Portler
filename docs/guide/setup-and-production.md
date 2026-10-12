@@ -75,7 +75,7 @@ services:
       require: [DATABASE_URL]
 ```
 
-`prod.require` names what the deployment has to supply. With `--prod`, `up`, `setup` and `start` check those keys before running anything and fail naming the missing ones, so a forgotten platform variable fails the deploy instead of starting the app against a development default. A required key is the deployment's to supply: its config value is not used, and it is forwarded to containers whether or not an `env:` names it. Top-level `require` applies to every service and to top-level setup; a service's `require` to that service only.
+`prod.require` names what the deployment has to supply. With `--prod`, `up`, `setup`, `start` and `restart` check those keys before running or stopping anything and fail naming the missing ones, so a forgotten platform variable fails the deploy instead of starting the app against a development default. A required key is the deployment's to supply: neither its config value nor a value Portler generates (`PORTLER_*`, a `port_env` name such as `PORT`) counts, and it is forwarded to containers whether or not an `env:` names it. Top-level `require` applies to every service and to top-level setup; a service's `require` to that service only.
 
 `prod.services` names the services that run under `--prod`. The rest are external, a managed database or a hosted queue reached through values the deployment supplies: they are not started, dependencies on them are dropped, a route in `proxy` to one is an error, and naming one on the command line is an error. A reference to a left-out service, such as `${postgres.port}`, must then be replaced by a deployment value, which `require` makes explicit.
 
