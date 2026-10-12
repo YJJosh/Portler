@@ -13,6 +13,8 @@ export interface HealthcheckConfig {
   type: HealthcheckType;
   command?: string;
   url?: string;
+  /** http only: the response statuses that mean ready. Default: any 2xx or 3xx. */
+  accept?: number[];
   timeoutMs: number;
   intervalMs: number;
 }

@@ -356,18 +356,30 @@ describe('waitForServiceReady', () => {
     }
   });
 
-  it('passes an http check for responses below 500', async () => {
+  it('passes an http check for 2xx and 3xx by default, and for listed statuses with accept', async () => {
+    // A 404 says the server is up but the route is missing, which is what a
+    // misconfigured path looks like, so it is not ready unless the config says so.
+    let status = 302;
     const server = http.createServer((_request, response) => {
-      response.statusCode = 404;
-      response.end('not found, but alive');
+      response.statusCode = status;
+      if (status === 302) response.setHeader('location', 'http://127.0.0.1/elsewhere');
+      response.end();
     });
     const port = await listen(server);
+    const check = (accept?: number[]) =>
+      waitForServiceReady(
+        makeConfig(),
+        makeService({ port: 4000, healthcheck: { type: 'http', timeoutMs: 300, intervalMs: 25, ...(accept ? { accept } : {}) } }),
+        {},
+        {},
+        makeAssignment(port),
+        notExited,
+      );
     try {
-      const service = makeService({
-        port: 4000,
-        healthcheck: { type: 'http', timeoutMs: 5_000, intervalMs: 25 },
-      });
-      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited);
+      await check();
+      status = 404;
+      await assert.rejects(check(), /not ready/);
+      await check([200, 404]);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -477,5 +489,16 @@ describe('waitForServiceReady', () => {
       waitForServiceReady(makeConfig(), service, commandEnv, {}, undefined, notExited),
       /healthcheck command is missing/,
     );
+  });
+});
+
+describe('healthcheck accept', () => {
+  it('parses a list or a single status and rejects anything that is not an http status', () => {
+    assert.deepEqual(normalizeHealthcheck({ url: 'http://x', accept: [200, 404] }, 'api')?.accept, [200, 404]);
+    assert.deepEqual(normalizeHealthcheck({ url: 'http://x', accept: 204 }, 'api')?.accept, [204]);
+    assert.equal(normalizeHealthcheck({ url: 'http://x' }, 'api')?.accept, undefined);
+    for (const bad of [[], [99], [600], ['ok'], [200.5]]) {
+      assert.throws(() => normalizeHealthcheck({ url: 'http://x', accept: bad }, 'api'), /accept must/);
+    }
   });
 });

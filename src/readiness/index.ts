@@ -55,19 +55,21 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
   });
 }
 
-async function isHttpReady(url: string, timeoutMs: number): Promise<boolean> {
+async function isHttpReady(url: string, timeoutMs: number, accept?: number[]): Promise<boolean> {
   try {
-    // Any response below 500 proves the server is up and routing requests —
-    // 404/401 still count as ready. redirect: 'manual' returns 3xx responses
-    // directly (passing the check) instead of following them to another host.
-    // A server that accepts and never responds must not defeat the overall
-    // healthcheck timeout, so every fetch has an explicit remaining-time signal.
+    // A 2xx or 3xx response proves the app answered the request. redirect:
+    // 'manual' returns 3xx responses directly (passing the check) instead of
+    // following them to another host. A 401 or 404 means the server is up but
+    // the route or the credentials are not, so it does not count unless the
+    // config lists it in `accept`. A server that accepts and never responds
+    // must not defeat the overall healthcheck timeout, so every fetch has an
+    // explicit remaining-time signal.
     const response = await fetch(url, {
       method: 'GET',
       redirect: 'manual',
       signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
     });
-    return response.status < 500;
+    return accept ? accept.includes(response.status) : response.status >= 200 && response.status < 400;
   } catch {
     return false;
   }
@@ -135,7 +137,7 @@ async function checkReady(
     case 'http': {
       const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
       if (!url) return true;
-      return isHttpReady(url, attemptTimeoutMs);
+      return isHttpReady(url, attemptTimeoutMs, healthcheck.accept);
     }
     case 'command': {
       if (!healthcheck.command) throw new Error(`service "${service.name}" healthcheck command is missing`);

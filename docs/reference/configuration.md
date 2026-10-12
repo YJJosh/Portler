@@ -85,9 +85,10 @@ healthcheck:                  # object form
   command: ./scripts/check.sh # for type: command; alias: test
   timeout_ms: 60000           # default 60000
   interval_ms: 500            # default 500
+  accept: [200, 401]          # http only: statuses that mean ready (default: any 2xx or 3xx)
 ```
 
-Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. For services that run in a container, the connection must also stay open for a moment (200 ms) or the peer must send something, because Docker's port proxy accepts connections even while nothing listens inside the container and never sends data itself; a `timeout_ms` shorter than that can never pass for a container whose listener stays silent. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
+Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. For services that run in a container, the connection must also stay open for a moment (200 ms) or the peer must send something, because Docker's port proxy accepts connections even while nothing listens inside the container and never sends data itself; a `timeout_ms` shorter than that can never pass for a container whose listener stays silent. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. An `http` check counts a 2xx or 3xx response as ready; a 401 or 404 is not (the server is up, but the route or the credentials are not), unless `accept:` lists the statuses that count, for example `accept: [200, 404]`. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
 
 ## build
 
