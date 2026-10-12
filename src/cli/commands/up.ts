@@ -222,18 +222,34 @@ export async function startPhase(
   // Fires exactly when a set variant is about to be created empty (typo guard).
   await warnMissingVolumeSetVariants(config, selectedNames);
 
-  const stopNames = startProxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames;
+  const startedEntries = new Map<string, PidServiceInfo>();
   const children = new Map<string, ReturnType<typeof spawnService>>();
   // stopServices prunes its services' pids.json entries itself. It reports what
   // it could NOT stop, and a teardown that did not finish is an error: a
   // foreground `up` that exits 0 while a service it started is still running (and
   // still holding its port) tells a script the opposite of the truth — `down`
-  // exits non-zero in exactly this situation. The ports are released first, so an
-  // incomplete stop still gives back what it can.
+  // exits non-zero in exactly this situation. Release only safe reservations
+  // before reporting an incomplete stop, so it still gives back what it can.
   const teardown = async (): Promise<void> => {
+    // The lifecycle lock is held here, but restart may have replaced an entry
+    // while this foreground run was waiting. Names alone do not prove ownership.
+    const current = await readPids(config.projectDir);
+    const stopNames: string[] = [];
+    const replaced = new Set<string>();
+    for (const serviceName of new Set([...reserveNames, ...startedEntries.keys()])) {
+      const info = current?.services[serviceName];
+      if (!info) continue;
+      const started = startedEntries.get(serviceName);
+      if (started && info.pid === started.pid && info.startToken === started.startToken) {
+        stopNames.push(serviceName);
+      } else {
+        replaced.add(serviceName);
+        process.stderr.write(`[portler] leaving service "${serviceName}" alone: its PID entry belongs to another run.\n`);
+      }
+    }
     const result = await stopServices(config.projectDir, stopNames);
     const incomplete = reportIncompleteTeardown(result);
-    const remaining = new Set(result.remaining);
+    const remaining = new Set([...result.remaining, ...replaced]);
     await releasePorts(
       config.projectDir,
       reserveNames.filter((serviceName) => !remaining.has(serviceName)),
@@ -270,7 +286,9 @@ export async function startPhase(
         children.set(serviceName, child);
         if (options.detach) child.unref();
 
-        await recordPidEntry(config, serviceName, await pidInfoFor(config, service, child, assignments[serviceName]));
+        const info = await pidInfoFor(config, service, child, assignments[serviceName]);
+        startedEntries.set(serviceName, info);
+        await recordPidEntry(config, serviceName, info);
         if (readinessNames.has(serviceName)) {
           readinessWaits.push(() =>
             waitForServiceReady(config, service, serviceEnv, assignments, assignments[serviceName], () => childExited),
@@ -298,7 +316,9 @@ export async function startPhase(
       children.set(PROXY_SERVICE_NAME, child);
       if (options.detach) child.unref();
 
-      await recordPidEntry(config, PROXY_SERVICE_NAME, await proxyPidInfoFor(config, child, assignments[PROXY_SERVICE_NAME]!));
+      const info = await proxyPidInfoFor(config, child, assignments[PROXY_SERVICE_NAME]!);
+      startedEntries.set(PROXY_SERVICE_NAME, info);
+      await recordPidEntry(config, PROXY_SERVICE_NAME, info);
       // The synthetic service config gives the default TCP readiness wait, so
       // the project URL below is only printed once the proxy accepts
       // connections.
