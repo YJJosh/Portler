@@ -30,17 +30,19 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
     socket.setTimeout(Math.max(1, timeoutMs));
     socket.on('connect', () => {
       if (holdMs <= 0) return finish(true);
-      // The hold must end inside this attempt's deadline. A connect that lands
-      // too late to be held for the whole window is not ready yet; the caller
-      // decides whether its overall timeout leaves room for another attempt.
-      if (deadline - Date.now() <= holdMs) return finish(false);
       socket.setTimeout(0);
       // Bytes from the peer prove a real listener even if it hangs up right
       // after (a banner, a protocol that answers and closes): Docker's proxy
       // never sends application data. Attaching the listener also drains the
       // socket, so a silent peer close is noticed rather than buffered.
       socket.once('data', () => finish(true));
-      holdTimer = setTimeout(() => finish(true), holdMs);
+      // A silent peer has to stay open for the whole hold, and the hold must
+      // end inside this attempt's deadline. A connect that lands with less than
+      // the hold left still gets the time that is left for the peer to answer;
+      // if it stays silent until then it is not ready yet, and the caller
+      // decides whether its overall timeout leaves room for another attempt.
+      const remaining = deadline - Date.now();
+      holdTimer = setTimeout(() => finish(remaining > holdMs), Math.min(holdMs, Math.max(1, remaining)));
     });
     socket.on('end', () => finish(false));
     socket.on('close', () => finish(false));
