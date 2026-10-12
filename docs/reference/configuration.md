@@ -10,6 +10,8 @@ Portler uses its own hand-rolled YAML parser covering a practical subset: mappin
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
+| `setup` | string \| list of commands and steps | — | Host shell commands run from the project root; a step object adds `if_missing` or `always`. See [Setup and prod](#setup-and-prod) |
+| `prod` | object | — | Production `setup` replacement and `env` overrides, used with `--prod` |
 | `services` | mapping | — (required) | The services to run; see [Service options](#service-options) |
 | `use_env` | string \| list | `[]` | `.env` file(s) loaded for all services, later files win. Alias: `env_file` |
 | `env` | mapping \| list | `{}` | Env values shared by all services; [references](#service-references) resolve |
@@ -29,11 +31,13 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
+| `setup` | string \| list of commands and steps | — | Host shell commands in service cwd, with resolved service env; steps as at the top level |
+| `prod` | object | — | Production `setup`, `command` replacements and `env` overrides |
 | `command` | string | — | Shell command that starts the service (local mode) |
 | `cwd` | string | `.` | Working directory, relative to the project root |
 | `port` | integer | — | Preferred port (local) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
 | `port_env` | string \| list | `[]` | Env variable name(s) that receive the port |
-| `env` | mapping \| list | `{}` | Service env; overrides everything else. Alias: `environment` |
+| `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development. Alias: `environment` |
 | `host` | string | top-level `host` | Bind/probe host override |
 | `url_host` | string | top-level `url_host` | URL host override |
 | `protocol` | string | top-level `protocol` | URL scheme override |
@@ -54,6 +58,32 @@ A service becomes a **Docker service** (runs in Docker even under plain `portler
 ::: warning Reserved service names
 `docker` and `k8s` are always reserved (they select run modes on the command line). `proxy` is reserved when a `proxy:` block exists.
 :::
+
+## Setup and prod
+
+`setup` accepts a command or a list; each entry runs sequentially through the shell, stopping on the first non-zero exit. Root setup runs from the project root; service setup runs in its `cwd`. Setup is always on the host, even for Docker services.
+
+`setup` may also be a single step object. A list entry is a command string or a step object with `run` and one of two modifiers:
+
+```yaml
+setup:
+  - pnpm install                          # once per checkout; again when the line or cwd changes
+  - run: pnpm install
+    if_missing: node_modules              # only while nothing exists at this path
+  - {run: pnpm run codegen, always: true} # on every up and setup
+```
+
+| Step | When it runs |
+| --- | --- |
+| `<command>` or `{run: <command>}` | Once per checkout. A receipt in `.portler/setup.json` records the success; the step runs again when its command or cwd changes, with `up --setup`, or on `portler setup`. Identical commands in one list are separate steps, told apart by their position among all entries with that command; adding or removing one of them runs every entry with that command again. A step that is removed loses its receipt before the next `up` or `setup`, even when its service is not part of that run, and so does every step of a service that leaves the config. |
+| `{run, if_missing: <path>}` | Only while nothing exists at `<path>`, resolved against the step's cwd. A file, a folder, or a link whose target exists all count. No receipt: the path is the receipt, so deleting what the step produced runs it again, and `--setup` does not override it. |
+| `{run, always: true}` | On every `up` (unless `--no-setup`) and every `setup`. No receipt. |
+
+Every command, bare or as `run`, must be non-empty; `if_missing` and `always` cannot be combined; other keys are rejected.
+
+Top-level `prod` accepts only `setup` and `env`; service `prod` additionally accepts `command`. Unknown keys are rejected. With `--prod`, setup and command replace their ordinary definitions, while env merges over env at the same level. Omitted overrides inherit ordinary values; `setup: []` disables an inherited setup.
+
+`prod.env` wins over Docker-mode env. `prod.command` only replaces a container command that comes from `command` (top-level `image`/`build` services); a `docker:` block keeps `docker.command` or the image `CMD`. With `--prod` and in `portler start`, the deployment wins over config: process env, then the `use_env` file (a missing one is skipped), then config env. Kubernetes does not apply production overrides or setup; production/setup flags are rejected in `up k8s`. `prod` is a config key but **not** a reserved service name or positional mode; use `--prod`. See [Setup & production](/guide/setup-and-production).
 
 ## depends_on
 
@@ -85,9 +115,10 @@ healthcheck:                  # object form
   command: ./scripts/check.sh # for type: command; alias: test
   timeout_ms: 60000           # default 60000
   interval_ms: 500            # default 500
+  accept: [200, 401]          # http only: statuses that mean ready (default: any 2xx or 3xx)
 ```
 
-Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
+Type inference: `command`/`test` present → `command`; `url` present → `http`; otherwise `tcp`. Default for a service with a `port` is a TCP check on the assigned port. For services that run in a container, the connection must also stay open for a moment (200 ms) or the peer must send something, because Docker's port proxy accepts connections even while nothing listens inside the container and never sends data itself; a `timeout_ms` shorter than that can never pass for a container whose listener stays silent. An explicit `command` check requires a command, an explicit `tcp` check requires a service port, and an `http` check requires either a URL or a service port. An `http` check counts a 2xx or 3xx response as ready; a 401 or 404 is not (the server is up, but the route or the credentials are not), unless `accept:` lists the statuses that count, for example `accept: [200, 404]`. `ready:` is an alias for `healthcheck:`. Timings must be positive and no greater than `2147483647`ms (Node clamps larger timers to 1ms).
 
 ## build
 
@@ -183,6 +214,14 @@ Env values (top-level and per-service) can reference other services, either as t
 ## Complete example
 
 ```yaml
+setup: npm install
+prod:
+  setup:
+    - npm ci
+    - npm run build
+  env:
+    NODE_ENV: production
+
 use_env: .env
 prefer_declared_port: false
 port_range: {start: 51000, end: 59999}
@@ -212,6 +251,12 @@ services:
 
   backend:
     command: npm run dev
+    setup: npm run generate
+    prod:
+      command: npm start
+      setup: []
+      env:
+        LOG_LEVEL: info
     cwd: backend
     port: 4000
     port_env: PORT

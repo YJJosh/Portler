@@ -1,10 +1,13 @@
-import { configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyProduction } from '../../config/production.ts';
+import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
   identityVerdict,
+  isPidAlive,
   isPidRunning,
   ownedContainerLiveness,
   pidInfoFor,
@@ -19,7 +22,7 @@ import {
 } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
-import { waitForServiceReady } from '../../readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
@@ -32,19 +35,13 @@ import {
   ensureNoOverlap,
   expandAndOrderServices,
   parseRunMode,
+  reportImageOverrides,
   selectServiceNames,
   servicesNeedingReadiness,
   servicesWithPorts,
+  validateDockerMode,
+  validateImageOverrideTargets,
 } from '../services.ts';
-
-function validateDockerMode(config: PortlerConfig, selectedNames: string[]): void {
-  for (const serviceName of selectedNames) {
-    const service = config.services[serviceName]!;
-    if (!service.docker) {
-      throw new Error(`service "${serviceName}" has no Docker config. Add image, build, dockerfile, or docker: {...}`);
-    }
-  }
-}
 
 function warnMissingPortEnv(config: PortlerConfig, selectedNames: string[]): void {
   for (const serviceName of selectedNames) {
@@ -149,10 +146,14 @@ export class IncompleteTeardownError extends Error {
 }
 
 export interface StartOptions {
+  prod?: boolean;
+  setup?: boolean;
   /** Start services in the background instead of attaching to them. */
   detach: boolean;
   /** Skip already-running services instead of failing (used by restart). */
   skipRunning?: boolean;
+  /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
+  images?: Readonly<Record<string, string>>;
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -249,8 +250,11 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const config = configForRunMode(rawConfig, mode);
-  const runningNames = new Set(runningServices(await readPids(config.projectDir)));
+  const modeConfig = configForRunMode(rawConfig, mode);
+  const images = options.images ?? {};
+  const config = applyProduction(applyImageOverrides(modeConfig, images), options.prod);
+  const pidsBefore = await readPids(config.projectDir);
+  const runningNames = new Set(runningServices(pidsBefore));
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -259,6 +263,10 @@ export async function startPhase(
     ensureNoOverlap(runningNames, orderedNames);
     selectedNames = orderedNames;
   }
+  // Only now is it known which services this run starts; a pinned image for any other
+  // service would be accepted and never used.
+  validateImageOverrideTargets(images, selectedNames, runningNames);
+  reportImageOverrides(modeConfig, images);
 
   if (mode === 'docker') validateDockerMode(config, selectedNames);
   validateCommands(config, selectedNames);
@@ -276,7 +284,7 @@ export async function startPhase(
   const readinessNames = servicesNeedingReadiness(config, selectedNames, requestedRootNames);
   const assignments = await allocateAssignments(config, state, reserveNames, runningNames);
   const generatedEnv = buildGeneratedEnv(assignments);
-  const baseEnv = await loadBaseEnv(config);
+  const baseEnv = await loadBaseEnv(config, { allowMissing: options.prod });
 
   await writeState(config.projectDir, assignments);
   await writeRuntimeEnv(config.projectDir, generatedEnv);
@@ -389,15 +397,57 @@ export async function startPhase(
       validateHealthcheckReferences(service, assignments);
     }
 
+    const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
+    // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
+    // must not keep a receipt that a later normal up would trust.
+    await pruneSetupReceipts(config, setupMode);
+    if (options.setup !== false) {
+      await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, options.setup);
+    }
+
     // Start level by level: services within a level are independent, so they
     // spawn together and their readiness checks run concurrently; the next
     // level only starts once the whole level is up.
+    // A member can die while something else is still starting: a service from
+    // an earlier level while a later level comes up, or any service while the
+    // proxy starts. Its own readiness wait returned long ago, so nothing else
+    // would notice and `up` would report a started stack with a dead member.
+    // The proxy's own exit is reported by its readiness wait.
+    // Dependencies this run leaves running (restart's skipRunning) are not in
+    // `children`, so their recorded pids are rechecked instead. For a Docker
+    // service that pid is the `docker run` client, which exits with the container.
+    // A zombie counts as dead: under a PID 1 that does not reap orphans, an
+    // exited leader keeps its pid, and kill(pid, 0) alone would call it alive.
+    const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
+    const assertMembersAlive = (): void => {
+      const spawnedDied = [...children]
+        .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
+        .map(([name]) => name);
+      const retainedDied = retained.filter((name) => {
+        const pid = pidsBefore?.services[name]?.pid;
+        return pid !== undefined && !isPidAlive(pid);
+      });
+      const died = [...spawnedDied, ...retainedDied];
+      if (died.length === 0) return;
+      // A retained service was started by an earlier run; its log file is the
+      // best pointer we have, whether or not that run was detached.
+      const hints = died.map((name) =>
+        logLocationHint(name, options.detach || retainedDied.includes(name) ? serviceLogPath(config.projectDir, name) : undefined),
+      );
+      throw new Error(
+        `service${died.length > 1 ? 's' : ''} ${died.join(', ')} exited while the stack was still starting. ` +
+          `${hints.length === 1 ? hints[0] : hints.join('; ')}, then run the same command again.`,
+      );
+    };
     for (const level of dependencyLevels(config, selectedNames)) {
       const readinessWaits: Array<() => Promise<void>> = [];
 
       for (const serviceName of level) {
         const service = config.services[serviceName]!;
         const { env: serviceEnv, explicitKeys } = serviceEnvs.get(serviceName)!;
+        if (options.setup !== false) {
+          await runSetupStep(config, service, serviceEnv, setupMode, options.setup);
+        }
         let childExited = false;
         const logFilePath = options.detach ? serviceLogPath(config.projectDir, serviceName) : undefined;
         const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath);
@@ -412,7 +462,16 @@ export async function startPhase(
         await recordPidEntry(config, serviceName, info);
         if (readinessNames.has(serviceName)) {
           readinessWaits.push(() =>
-            waitForServiceReady(config, service, serviceEnv, assignments, assignments[serviceName], () => childExited),
+            waitForServiceReady(
+              config,
+              service,
+              serviceEnv,
+              assignments,
+              assignments[serviceName],
+              () => childExited,
+              service.docker ? DOCKER_TCP_HOLD_MS : 0,
+              logFilePath,
+            ),
           );
         }
       }
@@ -424,6 +483,9 @@ export async function startPhase(
       // waiting for slower siblings to time out.
       for (const wait of waits) wait.catch(() => {});
       await Promise.all(waits);
+      // Catch a member of an earlier level that died while this one was
+      // starting, before the next level, or the proxy, builds on it.
+      assertMembersAlive();
     }
 
     // The proxy starts last so every routed service already listens; it
@@ -451,6 +513,9 @@ export async function startPhase(
         assignments[PROXY_SERVICE_NAME],
         () => proxyExited,
       );
+      // The proxy's wait took time too; a service that died meanwhile would
+      // otherwise sit behind a printed project URL.
+      assertMembersAlive();
     }
   } catch (error) {
     process.stderr.write('[portler] startup failed — stopping already-started services and releasing allocated ports\n');
@@ -509,11 +574,12 @@ export async function startServices(
 export async function commandUp(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   if (mode === 'k8s') {
+    if (args.prod || args.setup !== undefined) throw new Error('--prod, --setup and --no-setup do not apply to k8s mode; build images separately');
     if (args.volumeSet !== undefined) throw new Error('--volume-set applies to Docker volumes, not "portler up k8s"');
     return commandUpK8s(args, requested);
   }
 
   const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const requestedRootNames = selectServiceNames(rawConfig, requested);
-  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach });
+  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup, images: args.images });
 }

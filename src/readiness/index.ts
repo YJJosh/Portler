@@ -6,35 +6,70 @@ import { resolveEnvValue } from '../env/index.ts';
 import { sleep } from '../util/sleep.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-export function isTcpReady(host: string, port: number, timeoutMs = 1_000): Promise<boolean> {
+/**
+ * Docker's port proxy accepts every connection on a published port, then
+ * closes it straight away while nothing listens inside the container yet.
+ * A container port only counts as ready once a connection stays open for
+ * this long, or once the peer sends something: the proxy never sends data.
+ */
+export const DOCKER_TCP_HOLD_MS = 200;
+
+export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0): Promise<boolean> {
   return new Promise((resolve) => {
+    let settled = false;
+    let holdTimer: NodeJS.Timeout | undefined;
+    const deadline = Date.now() + Math.max(1, timeoutMs);
     const socket = net.createConnection({ host, port });
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(holdTimer);
+      socket.destroy();
+      resolve(ready);
+    };
     socket.setTimeout(Math.max(1, timeoutMs));
     socket.on('connect', () => {
-      socket.destroy();
-      resolve(true);
+      if (holdMs <= 0) return finish(true);
+      socket.setTimeout(0);
+      // Bytes from the peer prove a real listener even if it hangs up right
+      // after (a banner, a protocol that answers and closes): Docker's proxy
+      // never sends application data. Attaching the listener also drains the
+      // socket, so a silent peer close is noticed rather than buffered.
+      socket.once('data', () => finish(true));
+      // A silent peer has to stay open for the whole hold, and the hold must
+      // end inside this attempt's deadline. A connect that lands with less than
+      // the hold left still gets the time that is left for the peer to answer;
+      // if it stays silent until then it is not ready yet, and the caller
+      // decides whether its overall timeout leaves room for another attempt.
+      const remaining = deadline - Date.now();
+      const fullHoldFits = remaining > holdMs;
+      // Checked again when the timer fires: a blocked event loop can delay
+      // it past the deadline, and a hold that ended late has proved nothing
+      // in time.
+      holdTimer = setTimeout(() => finish(fullHoldFits && Date.now() <= deadline), Math.min(holdMs, Math.max(1, remaining)));
     });
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.on('error', () => resolve(false));
+    socket.on('end', () => finish(false));
+    socket.on('close', () => finish(false));
+    socket.on('timeout', () => finish(false));
+    socket.on('error', () => finish(false));
   });
 }
 
-async function isHttpReady(url: string, timeoutMs: number): Promise<boolean> {
+async function isHttpReady(url: string, timeoutMs: number, accept?: number[]): Promise<boolean> {
   try {
-    // Any response below 500 proves the server is up and routing requests —
-    // 404/401 still count as ready. redirect: 'manual' returns 3xx responses
-    // directly (passing the check) instead of following them to another host.
-    // A server that accepts and never responds must not defeat the overall
-    // healthcheck timeout, so every fetch has an explicit remaining-time signal.
+    // A 2xx or 3xx response proves the app answered the request. redirect:
+    // 'manual' returns 3xx responses directly (passing the check) instead of
+    // following them to another host. A 401 or 404 means the server is up but
+    // the route or the credentials are not, so it does not count unless the
+    // config lists it in `accept`. A server that accepts and never responds
+    // must not defeat the overall healthcheck timeout, so every fetch has an
+    // explicit remaining-time signal.
     const response = await fetch(url, {
       method: 'GET',
       redirect: 'manual',
       signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
     });
-    return response.status < 500;
+    return accept ? accept.includes(response.status) : response.status >= 200 && response.status < 400;
   } catch {
     return false;
   }
@@ -91,17 +126,18 @@ async function checkReady(
   assignment: ServiceAssignment | undefined,
   healthcheck: HealthcheckConfig,
   attemptTimeoutMs: number,
+  tcpHoldMs: number,
 ): Promise<boolean> {
   switch (healthcheck.type) {
     case 'none':
       return true;
     case 'tcp':
       if (!assignment) return true;
-      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs);
+      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs);
     case 'http': {
       const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
       if (!url) return true;
-      return isHttpReady(url, attemptTimeoutMs);
+      return isHttpReady(url, attemptTimeoutMs, healthcheck.accept);
     }
     case 'command': {
       if (!healthcheck.command) throw new Error(`service "${service.name}" healthcheck command is missing`);
@@ -132,6 +168,25 @@ function describeHealthcheck(
 }
 
 /**
+ * Where a service's output went, for error messages: on this terminal when
+ * `logFile` is undefined, otherwise in the detached log file.
+ */
+export function logLocationHint(serviceName: string, logFile: string | undefined): string {
+  return logFile === undefined
+    ? `Check the "[${serviceName}]" log lines above for the cause`
+    : `Check ${logFile} (or "portler logs ${serviceName}") for the cause`;
+}
+
+function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
+  const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
+  // "The same command": a bare `up <name>` would drop the mode and flags the
+  // stack was started with.
+  return new Error(
+    `service "${service.name}" exited before it became ready. ${logLocationHint(service.name, logFile)}${buildHint}, then run the same command again.`,
+  );
+}
+
+/**
  * Poll a service's healthcheck until it passes, the configured timeout
  * elapses, or the child process exits early.
  */
@@ -142,6 +197,10 @@ export async function waitForServiceReady(
   assignments: Assignments,
   assignment: ServiceAssignment | undefined,
   childHasExited: () => boolean,
+  /** How long a TCP connection must stay open to count; see DOCKER_TCP_HOLD_MS. */
+  tcpHoldMs = 0,
+  /** The detached log file of the service, named in errors; undefined when its output is on this terminal. */
+  logFile?: string,
 ): Promise<void> {
   const healthcheck = service.healthcheck ?? defaultHealthcheck(service, assignment);
   if (healthcheck.type === 'none') return;
@@ -150,16 +209,14 @@ export async function waitForServiceReady(
   process.stdout.write(`[portler] waiting for ${service.name} to be ready (${healthcheck.type})...\n`);
 
   while (Date.now() - startedAt <= healthcheck.timeoutMs) {
-    if (childHasExited()) {
-      const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
-      throw new Error(
-        `service "${service.name}" exited before it became ready. ` +
-          `Check the "[${service.name}]" log lines above for the cause${buildHint}, then run "portler up ${service.name}" again.`,
-      );
-    }
+    if (childHasExited()) throw exitedError(service, logFile);
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
-    if (await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs)) {
+    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs);
+    // The probe can pass against a port whose process died while it ran: Docker's
+    // proxy keeps accepting, a hold timer keeps ticking. The exit wins.
+    if (childHasExited()) throw exitedError(service, logFile);
+    if (ready) {
       process.stdout.write(`[portler] ${service.name} is ready\n`);
       return;
     }

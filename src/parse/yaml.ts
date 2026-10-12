@@ -629,7 +629,10 @@ class YamlParser {
       // "- key: value" and "- - item" start a nested node on the same line.
       // Rewrite the line as if the content began at its own column and
       // re-parse, so continuation lines at that indent join the same node.
-      if (isSequenceItem(content) || findKeySeparator(content) !== -1) {
+      // A flow collection ("- {run: x, always: true}") is an inline value:
+      // the ": " inside its braces must not turn it into a block mapping.
+      const flow = content.startsWith('[') || content.startsWith('{');
+      if (!flow && (isSequenceItem(content) || findKeySeparator(content) !== -1)) {
         this.lines[this.index] = ' '.repeat(contentIndent) + content;
         output.push(this.parseNode());
         continue;

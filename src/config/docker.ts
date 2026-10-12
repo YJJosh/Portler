@@ -1,4 +1,5 @@
 import { applyK8sMode } from './k8s.ts';
+import { didYouMean } from '../util/suggest.ts';
 import { defaultDockerContainer, defaultDockerImage } from './naming.ts';
 import { isObject, normalizeEnvObject, normalizeStringArray, optionalString } from './scalars.ts';
 import type { DockerBuildConfig, DockerConfig, PortlerConfig, ServiceConfig, UnknownMap } from '../types/index.ts';
@@ -85,13 +86,10 @@ export function normalizeTopLevelDockerConfig(
   if (!hasTopLevelDocker) return undefined;
   if (explicitType && explicitType !== 'docker') throw new Error(`services.${serviceName}.type only supports "docker" right now`);
 
-  return normalizeDockerConfigFromObject(
-    rawService,
-    serviceName,
-    projectDir,
-    `services.${serviceName}`,
-    rawImage ?? defaultDockerImage(projectDir, serviceName),
-  );
+  return {
+    ...normalizeDockerConfigFromObject(rawService, serviceName, projectDir, `services.${serviceName}`, rawImage ?? defaultDockerImage(projectDir, serviceName)),
+    commandFromService: true,
+  };
 }
 
 /**
@@ -159,6 +157,39 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
     ...config,
     services,
   };
+}
+
+/**
+ * `--image <service>=<ref>`: run a Docker service from a prebuilt image instead
+ * of building it. The override replaces `image` and drops `build`, so the
+ * command, env, ports and volumes still come from the config while the image
+ * is whatever was pinned on the command line — typically the digest reference
+ * CI pushed. Applied AFTER the run mode is resolved, so "runs in Docker" is
+ * judged for the mode actually being started.
+ */
+export function applyImageOverrides(config: PortlerConfig, images: Readonly<Record<string, string>>): PortlerConfig {
+  const entries = Object.entries(images);
+  if (entries.length === 0) return config;
+
+  const services = { ...config.services };
+  for (const [serviceName, image] of entries) {
+    const service = services[serviceName];
+    if (!service) {
+      throw new Error(`--image: unknown service "${serviceName}"${didYouMean(serviceName, Object.keys(config.services))}`);
+    }
+    if (!service.docker) {
+      throw new Error(
+        `--image: service "${serviceName}" does not run in Docker in this mode, so there is no image to replace. ` +
+          'Give it image/build/dockerfile or a docker: block, or use "portler up docker".',
+      );
+    }
+
+    const docker: DockerConfig = { ...service.docker, image };
+    delete docker.build;
+    services[serviceName] = { ...service, docker };
+  }
+
+  return { ...config, services };
 }
 
 export function configForRunMode(config: PortlerConfig, mode: RunMode): PortlerConfig {
