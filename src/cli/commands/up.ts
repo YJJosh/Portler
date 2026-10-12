@@ -6,6 +6,7 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  isPidAlive,
   pidInfoFor,
   readPids,
   runningServices,
@@ -17,7 +18,7 @@ import {
 } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
-import { waitForServiceReady } from '../../readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
@@ -179,7 +180,8 @@ export async function startPhase(
 ): Promise<StartedStack> {
   const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
   const config = applyProduction(configForRunMode(rawConfig, mode), options.prod);
-  const runningNames = new Set(runningServices(await readPids(config.projectDir)));
+  const pidsBefore = await readPids(config.projectDir);
+  const runningNames = new Set(runningServices(pidsBefore));
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -259,6 +261,37 @@ export async function startPhase(
     // Start level by level: services within a level are independent, so they
     // spawn together and their readiness checks run concurrently; the next
     // level only starts once the whole level is up.
+    // A member can die while something else is still starting: a service from
+    // an earlier level while a later level comes up, or any service while the
+    // proxy starts. Its own readiness wait returned long ago, so nothing else
+    // would notice and `up` would report a started stack with a dead member.
+    // The proxy's own exit is reported by its readiness wait.
+    // Dependencies this run leaves running (restart's skipRunning) are not in
+    // `children`, so their recorded pids are rechecked instead. For a Docker
+    // service that pid is the `docker run` client, which exits with the container.
+    // A zombie counts as dead: under a PID 1 that does not reap orphans, an
+    // exited leader keeps its pid, and kill(pid, 0) alone would call it alive.
+    const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
+    const assertMembersAlive = (): void => {
+      const spawnedDied = [...children]
+        .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
+        .map(([name]) => name);
+      const retainedDied = retained.filter((name) => {
+        const pid = pidsBefore?.services[name]?.pid;
+        return pid !== undefined && !isPidAlive(pid);
+      });
+      const died = [...spawnedDied, ...retainedDied];
+      if (died.length === 0) return;
+      // A retained service was started by an earlier run; its log file is the
+      // best pointer we have, whether or not that run was detached.
+      const hints = died.map((name) =>
+        logLocationHint(name, options.detach || retainedDied.includes(name) ? serviceLogPath(config.projectDir, name) : undefined),
+      );
+      throw new Error(
+        `service${died.length > 1 ? 's' : ''} ${died.join(', ')} exited while the stack was still starting. ` +
+          `${hints.length === 1 ? hints[0] : hints.join('; ')}, then run the same command again.`,
+      );
+    };
     for (const level of dependencyLevels(config, selectedNames)) {
       const readinessWaits: Array<() => Promise<void>> = [];
 
@@ -280,7 +313,16 @@ export async function startPhase(
         await recordPidEntry(config, serviceName, await pidInfoFor(config, service, child, assignments[serviceName]));
         if (readinessNames.has(serviceName)) {
           readinessWaits.push(() =>
-            waitForServiceReady(config, service, serviceEnv, assignments, assignments[serviceName], () => childExited),
+            waitForServiceReady(
+              config,
+              service,
+              serviceEnv,
+              assignments,
+              assignments[serviceName],
+              () => childExited,
+              service.docker ? DOCKER_TCP_HOLD_MS : 0,
+              logFilePath,
+            ),
           );
         }
       }
@@ -292,6 +334,9 @@ export async function startPhase(
       // waiting for slower siblings to time out.
       for (const wait of waits) wait.catch(() => {});
       await Promise.all(waits);
+      // Catch a member of an earlier level that died while this one was
+      // starting, before the next level, or the proxy, builds on it.
+      assertMembersAlive();
     }
 
     // The proxy starts last so every routed service already listens; it
@@ -317,6 +362,9 @@ export async function startPhase(
         assignments[PROXY_SERVICE_NAME],
         () => proxyExited,
       );
+      // The proxy's wait took time too; a service that died meanwhile would
+      // otherwise sit behind a printed project URL.
+      assertMembersAlive();
     }
   } catch (error) {
     process.stderr.write('[portler] startup failed — stopping already-started services and releasing allocated ports\n');

@@ -4,6 +4,7 @@
  * cluster.
  */
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -85,6 +86,88 @@ describe('CLI command contracts', () => {
 
     await assert.rejects(commandUp(parseArgs([], 'up')), /both use Docker container name "shared"/);
     assert.equal(await pathExists(path.join(projectDir, '.portler', 'state.json')), false);
+  });
+});
+
+describe('up startup liveness', () => {
+  it('fails when a member of an earlier level dies while a later level is still starting', async () => {
+    // db passes its check, then dies while api (which depends on it) is still
+    // coming up. api's own wait knows nothing about db, so without the scan
+    // after each level `up -d` would report a started stack with a dead db.
+    await fs.writeFile(
+      path.join(projectDir, 'db.js'),
+      "require('net').createServer().listen(process.env.PORT, '127.0.0.1'); setTimeout(() => process.exit(1), 1500);\n",
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'api.js'),
+      "setTimeout(() => require('net').createServer().listen(process.env.PORT, '127.0.0.1'), 2500); setInterval(() => {}, 1000);\n",
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      [
+        'services:',
+        '  db:',
+        '    command: node db.js',
+        '    port: 3001',
+        '    port_env: PORT',
+        '  api:',
+        '    command: node api.js',
+        '    port: 3000',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+      ].join('\n'),
+      'utf8',
+    );
+    await assert.rejects(
+      commandUp(parseArgs(['-d'], 'up')),
+      /service db exited while the stack was still starting\. Check .*db\.log \(or "portler logs db"\) for the cause, then run the same command again/,
+    );
+    const pids = await readPids(projectDir);
+    assert.ok(pids === null || !Object.hasOwn(pids.services, 'api'), 'the rollback stopped api');
+  });
+
+  it('sees a dependency the restart leaves running die while the restarted service starts', async () => {
+    // `restart api` leaves a running db untouched (skipRunning), so db is not
+    // among the children this run spawned. If db dies while api is still coming
+    // up, the scan has to see it through db's recorded pid.
+    const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      await fs.writeFile(
+        path.join(projectDir, 'api.js'),
+        "setTimeout(() => require('net').createServer().listen(process.env.PORT, '127.0.0.1'), 2000); setInterval(() => {}, 1000);\n",
+        'utf8',
+      );
+      await fs.writeFile(
+        path.join(projectDir, 'portler.yml'),
+        [
+          'services:',
+          '  db:',
+          '    command: node -e ""',
+          '    port: 3001',
+          '  api:',
+          '    command: node api.js',
+          '    port: 3000',
+          '    port_env: PORT',
+          '    depends_on: [db]',
+        ].join('\n'),
+        'utf8',
+      );
+      const startedAt = new Date().toISOString();
+      await writePids(projectDir, {
+        version: 1,
+        project: projectDir,
+        startedAt,
+        services: { db: { pid: sleeper.pid!, command: 'db', cwd: projectDir, port: 3001, startedAt } },
+      });
+      setTimeout(() => sleeper.kill(), 700);
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service db exited while the stack was still starting/);
+      const pids = await readPids(projectDir);
+      assert.ok(!pids?.services.api, 'the rollback stopped api');
+    } finally {
+      sleeper.kill();
+    }
   });
 });
 
