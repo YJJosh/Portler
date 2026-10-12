@@ -41,6 +41,9 @@ const KNOWN_FLAGS = [
   '--image',
 ];
 
+/** The longest delay a Node timer accepts; any larger --drain-ms is refused. */
+const MAX_DRAIN_MS = 2_147_483_647;
+
 /**
  * `-f` is overloaded across the CLI, so it is resolved per command rather than
  * globally: for `logs` it means `--follow` (what `docker logs -f` / `kubectl
@@ -128,7 +131,12 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
     if (arg === '--drain-ms' || arg.startsWith('--drain-ms=')) {
       const value = arg === '--drain-ms' ? args[index + 1] : arg.slice('--drain-ms='.length);
       if (value === undefined || !/^\d+$/.test(value)) throw new Error('--drain-ms requires a number of milliseconds');
-      parsed.drainMs = Number(value);
+      // Enough digits make Number() Infinity, and an infinite deadline is never
+      // reached, so start would never kill what the shell left behind. Cap it at
+      // the longest delay a Node timer accepts.
+      const drainMs = Number(value);
+      if (drainMs > MAX_DRAIN_MS) throw new Error(`--drain-ms must be at most ${MAX_DRAIN_MS} (about 24.8 days)`);
+      parsed.drainMs = drainMs;
       if (arg === '--drain-ms') index += 1;
       continue;
     }

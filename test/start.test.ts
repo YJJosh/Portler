@@ -203,6 +203,11 @@ services:
     assert.equal(parseArgs(['--drain-ms=0'], 'start').drainMs, 0);
     assert.equal(parseArgs([], 'start').drainMs, undefined);
     assert.throws(() => parseArgs(['--drain-ms', 'soon'], 'start'), /requires a number/);
+    assert.equal(parseArgs(['--drain-ms', '2147483647'], 'start').drainMs, 2147483647);
+    assert.throws(() => parseArgs(['--drain-ms', '2147483648'], 'start'), /at most 2147483647/);
+    // Enough digits for Number() to give Infinity, which would never reach its deadline.
+    assert.throws(() => parseArgs(['--drain-ms', '9'.repeat(400)], 'start'), /at most 2147483647/);
+    assert.throws(() => parseArgs([`--drain-ms=${'9'.repeat(400)}`], 'start'), /at most 2147483647/);
     await assert.rejects(main(['up', '--drain-ms', '1']), /does not apply/);
   });
 
