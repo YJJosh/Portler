@@ -5,6 +5,7 @@ import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
   isPidRunning,
+  ownedContainerLiveness,
   pidInfoFor,
   readPids,
   runningServices,
@@ -165,6 +166,30 @@ export interface StartedStack {
   detached: boolean;
 }
 
+type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status: 'dead' };
+
+/**
+ * Whether a pids.json entry still names something alive. The pid first; then,
+ * for a Docker service, its container: `docker run` is supervised by a shell
+ * whose pid can be gone while the container runs on, and handing such an entry
+ * to stopServices would remove a container that another run is serving
+ * through. An entry whose container cannot be inspected (daemon down,
+ * permission error) is 'unknown' and treated as alive: guessing "dead" is the
+ * one mistake that destroys something.
+ */
+async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
+  if (isPidRunning(info.pid)) return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  if (!info.dockerContainer) return { status: 'dead' };
+  const container = await ownedContainerLiveness(info.dockerContainer, projectDir);
+  if (container.status === 'running') {
+    return { status: 'alive', reason: `its container "${info.dockerContainer}" is still running under another run` };
+  }
+  if (container.status === 'error') {
+    return { status: 'unknown', reason: `its container "${info.dockerContainer}" could not be inspected (${container.message})` };
+  }
+  return { status: 'dead' };
+}
+
 /**
  * Every service the given PID entries depend on, transitively, as each entry
  * recorded when it started: what a service actually runs with, whichever
@@ -273,25 +298,43 @@ export async function startPhase(
     // Every service this run selected is examined, port or not: a stale entry
     // for a portless service that never started is as much this run's to prune
     // as one for a service with a reservation. Release stays on reserveNames.
+    // An entry is alive while its pid runs or, for a Docker service, while the
+    // container it names still runs under this project's label: `docker run`
+    // is supervised by a shell whose pid can be gone while the container runs
+    // on, and stopServices removes a selected service's container by label
+    // whatever its pid is doing. Each entry is inspected at most once.
+    const liveness = new Map<string, Promise<EntryLiveness>>();
+    const livenessOf = (serviceName: string, info: PidServiceInfo): Promise<EntryLiveness> => {
+      let pending = liveness.get(serviceName);
+      if (!pending) {
+        pending = entryLiveness(config.projectDir, info);
+        liveness.set(serviceName, pending);
+      }
+      return pending;
+    };
     for (const serviceName of new Set([...selectedNames, ...reserveNames, ...startedEntries.keys()])) {
       const info = current?.services[serviceName];
       if (!info) continue;
       const started = startedEntries.get(serviceName);
       if (started && info.pid === started.pid && info.startToken === started.startToken) {
         stopNames.push(serviceName);
-      } else if (!isPidRunning(info.pid)) {
+        continue;
+      }
+      const alive = await livenessOf(serviceName, info);
+      if (alive.status === 'dead') {
         // A dead entry is nobody's, whoever wrote it: this run selected the
         // service but never spawned it (startup failed first) and the entry is
         // a stale one from an earlier run, or a restart replaced this run's
         // service and its replacement has already exited (no readiness check,
-        // crashed at once). stopServices prunes it, and the reservation, if the
-        // service has a port, is released below instead of lingering until the
-        // next prune. A live entry with another identity is the only thing
-        // left alone here.
+        // crashed at once; for a Docker service, container and all). stopServices
+        // prunes it, and the reservation, if the service has a port, is released
+        // below instead of lingering until the next prune. A live entry with
+        // another identity, or one whose container cannot be inspected, is left
+        // alone here.
         stopNames.push(serviceName);
       } else {
         replaced.add(serviceName);
-        process.stderr.write(`[portler] leaving service "${serviceName}" alone: its PID entry belongs to another run.\n`);
+        process.stderr.write(`[portler] leaving service "${serviceName}" alone: ${alive.reason}.\n`);
       }
     }
     // What a later run adopted stays up. `restart api` replaces api and keeps
@@ -302,12 +345,11 @@ export async function startPhase(
     // config: portler.yml may have changed in between, and the restart read
     // the newer file. Anything a live foreign service depends on, and the
     // proxy while any such service remains, is left alone, reservation included.
-    const foreignLive = Object.entries(current?.services ?? {})
-      .filter(
-        ([serviceName, info]) =>
-          serviceName !== PROXY_SERVICE_NAME && !stopNames.includes(serviceName) && isPidRunning(info.pid),
-      )
-      .map(([serviceName]) => serviceName);
+    const foreignLive: string[] = [];
+    for (const [serviceName, info] of Object.entries(current?.services ?? {})) {
+      if (serviceName === PROXY_SERVICE_NAME || stopNames.includes(serviceName)) continue;
+      if ((await livenessOf(serviceName, info)).status !== 'dead') foreignLive.push(serviceName);
+    }
     let toStop = stopNames;
     if (foreignLive.length > 0) {
       const adopted = await recordedDependencyClosure(config, current!, foreignLive);

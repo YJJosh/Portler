@@ -19,11 +19,13 @@ let projectDir: string;
 let globalDir: string;
 let previousCwd: string;
 let previousGlobalDir: string | undefined;
+let previousPath: string | undefined;
 const childPids = new Set<number>();
 
 beforeEach(async () => {
   previousCwd = process.cwd();
   previousGlobalDir = process.env.PORTLER_GLOBAL_DIR;
+  previousPath = process.env.PATH;
   projectDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-test-teardown-')));
   globalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portler-test-global-'));
   process.env.PORTLER_GLOBAL_DIR = globalDir;
@@ -60,6 +62,8 @@ afterEach(async () => {
   process.chdir(previousCwd);
   if (previousGlobalDir === undefined) delete process.env.PORTLER_GLOBAL_DIR;
   else process.env.PORTLER_GLOBAL_DIR = previousGlobalDir;
+  if (previousPath === undefined) delete process.env.PATH;
+  else process.env.PATH = previousPath;
   await fs.rm(projectDir, { recursive: true, force: true });
   await fs.rm(globalDir, { recursive: true, force: true });
 });
@@ -69,6 +73,39 @@ async function startForeground() {
   const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['api'], { detach: false }));
   for (const child of stack.children.values()) childPids.add(child.pid!);
   return stack;
+}
+
+/**
+ * A fake `docker` on PATH. Both the teardown's container check and
+ * stopServices' removal go through it: it answers `inspect` for any container
+ * with the scripted state under this project's label, succeeds at `rm`, and
+ * logs every argv so the test can see what was asked.
+ */
+async function installFakeDocker(state: 'running' | 'exited' | 'unreachable'): Promise<{ calls: () => Promise<string[]> }> {
+  const bin = path.join(projectDir, 'fake-bin');
+  const log = path.join(projectDir, 'docker-calls.log');
+  await fs.mkdir(bin, { recursive: true });
+  const inspected = JSON.stringify({ id: 'sha256:replacement', labels: { 'portler.project': projectDir }, running: state === 'running' });
+  const inspect =
+    state === 'unreachable'
+      ? 'echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1'
+      : `printf '%s\\n' '${inspected}'`;
+  await fs.writeFile(
+    path.join(bin, 'docker'),
+    ['#!/bin/sh', `printf '%s\\n' "$*" >> '${log}'`, 'case "$1" in', `  inspect) ${inspect} ;;`, '  rm) ;;', '  *) echo "unexpected docker $*" >&2; exit 1 ;;', 'esac', ''].join('\n'),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ''}`;
+  return { calls: async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean) };
+}
+
+/** What a restart leaves for api: another identity, a Docker service, its supervising shell pid gone. */
+async function replaceApiWithDockerService(): Promise<void> {
+  await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+    pids.services.api!.pid = 4_194_303;
+    pids.services.api!.startToken = 'another-run-start-token';
+    pids.services.api!.dockerContainer = 'portler-api-replacement';
+  }));
 }
 
 describe('foreground teardown ownership', () => {
@@ -376,6 +413,64 @@ describe('foreground teardown ownership', () => {
     assert.ok(!after?.services[PROXY_SERVICE_NAME], 'nothing foreign is live, so the proxy is stopped as usual');
     assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'every reservation, the dead replacement\'s included, is released');
     assert.ok(isPidRunning(original.services.api!.pid), 'the entry no longer names this run\'s process, so it is not signalled');
+  });
+
+  it('leaves a Docker replacement alone while its container outlives its supervising pid', { timeout: 10_000 }, async () => {
+    // A restart replaced this run's api with a Docker service. `docker run` is
+    // supervised by a shell: its pid can be gone while the container runs on,
+    // and stopServices removes a selected service's container by label whatever
+    // the pid is doing. A gone pid alone must not hand a Docker entry over.
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    const docker = await installFakeDocker('running');
+    await replaceApiWithDockerService();
+    const apiPort = String(original.services.api!.port);
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.api?.dockerContainer, 'portler-api-replacement', 'the entry is left alone');
+    assert.ok((await readRegistry()).ports[apiPort], 'and so is its reservation');
+    assert.ok(after.services[PROXY_SERVICE_NAME], 'the proxy stays up for the live replacement');
+    assert.ok(isPidRunning(after.services[PROXY_SERVICE_NAME]!.pid));
+    const calls = await docker.calls();
+    assert.ok(calls.some((call) => call.startsWith('inspect --type container ')), 'the container was inspected');
+    assert.ok(!calls.some((call) => call.startsWith('rm ')), 'and never removed');
+    assert.ok(isPidRunning(original.services.api!.pid), 'this run\'s original process is not signalled either');
+  });
+
+  it('prunes a Docker replacement whose container has exited with its pid, removing the container', { timeout: 10_000 }, async () => {
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    const docker = await installFakeDocker('exited');
+    await replaceApiWithDockerService();
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = await readPids(projectDir);
+    assert.ok(!after?.services.api, 'the dead replacement entry is pruned');
+    assert.ok(!after?.services[PROXY_SERVICE_NAME], 'nothing foreign is live, so the proxy is stopped as usual');
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'every reservation is released');
+    assert.ok((await docker.calls()).includes('rm -f sha256:replacement'), 'stopServices removes the exited container by id');
+    assert.ok(isPidRunning(original.services.api!.pid), 'this run\'s original process is not signalled');
+  });
+
+  it('leaves a Docker replacement alone when the daemon cannot be asked', { timeout: 10_000 }, async () => {
+    // Unknown is not dead: guessing would remove a container another run may be
+    // serving through. The entry, its reservation and the proxy stay, with a notice.
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    const docker = await installFakeDocker('unreachable');
+    await replaceApiWithDockerService();
+    const apiPort = String(original.services.api!.port);
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.api?.dockerContainer, 'portler-api-replacement', 'the entry is left alone');
+    assert.ok((await readRegistry()).ports[apiPort], 'and so is its reservation');
+    assert.ok(after.services[PROXY_SERVICE_NAME], 'the proxy stays up for what may be live');
+    assert.ok(!(await docker.calls()).some((call) => call.startsWith('rm ')), 'nothing is removed on a guess');
   });
 
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
