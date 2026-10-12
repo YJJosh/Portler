@@ -1,10 +1,11 @@
+import { spawnSync, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ChildProcess } from 'node:child_process';
 import { resolveServiceCwd } from '../config/index.ts';
 import { portlerDir } from '../state/index.ts';
 import { withProjectLock } from '../state/lock.ts';
-import { isObject, isOptionalPort, isOptionalString, isPositiveInteger, isString } from '../util/guards.ts';
+import { isObject, isOptionalBoolean, isOptionalPort, isOptionalString, isPositiveInteger, isString } from '../util/guards.ts';
 import { readValidatedJsonFile, readValidatedJsonFileOrNull, writeJsonFile } from '../util/json-file.ts';
 import { readProcessStartToken } from './identity.ts';
 import type { PidsFile, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -19,6 +20,7 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     isOptionalString(value.url) &&
     isOptionalString(value.dockerContainer) &&
     isOptionalString(value.dockerNetwork) &&
+    isOptionalBoolean(value.prod) &&
     isOptionalString(value.startToken) &&
     isString(value.startedAt)
   );
@@ -130,6 +132,43 @@ export function isPidRunning(pid: number): boolean {
   }
 }
 
+/**
+ * Like isPidRunning, but a zombie counts as dead. kill(pid, 0) succeeds for a
+ * process that exited and has not been reaped by its parent, and under a PID 1
+ * that does not reap orphans (a container without an init) a dead service's
+ * leader stays one, so the existence check alone would call it alive. The
+ * state comes from /proc on Linux and `ps` on macOS, the two platforms Portler
+ * supports; anywhere else, or when the state cannot be read, the existence
+ * check decides.
+ */
+export function isPidAlive(pid: number): boolean {
+  if (!isPidRunning(pid)) return false;
+  if (process.platform === 'linux') {
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    } catch {
+      // A zombie still has a /proc entry, so a failed read never means
+      // "zombie". It means gone since the existence check, or that the state
+      // is unreadable: no /proc mount, a permission error, or a procfs with
+      // hidepid, which answers ENOENT for a live process of another user.
+      // Ask the existence check again and take its answer. A hidden zombie
+      // stays indistinguishable from a hidden live process.
+      return isPidRunning(pid);
+    }
+    // `pid (comm) S ...`; comm may contain spaces or parentheses.
+    const state = stat.charAt(stat.lastIndexOf(')') + 2);
+    return state !== 'Z' && state !== 'X';
+  }
+  if (process.platform === 'darwin') {
+    const result = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+    if (result.error) return true;
+    if (result.status !== 0) return false;
+    return !result.stdout.trim().startsWith('Z');
+  }
+  return true;
+}
+
 export function runningServices(pids: PidsFile | null, serviceNames?: string[]): string[] {
   if (!pids) return [];
   const serviceSet = serviceNames ? new Set(serviceNames) : null;
@@ -166,6 +205,7 @@ export async function pidInfoFor(
     url: assignment?.url,
     dockerContainer: service.docker?.containerName,
     dockerNetwork: service.docker ? config.dockerNetwork : undefined,
+    prod: config.production === true,
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
   };

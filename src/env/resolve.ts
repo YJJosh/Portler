@@ -115,13 +115,19 @@ export function resolveEnvValue(value: unknown, assignments: Assignments): strin
   });
 }
 
-export function resolveEnvMap(env: UnknownMap, assignments: Assignments): EnvMap {
+/**
+ * Resolve every value of an env map. Keys in `skip` are validated but neither
+ * resolved nor returned: a caller passes the keys a higher layer supplies, whose
+ * config value never applies and so must not fail on a dangling reference.
+ */
+export function resolveEnvMap(env: UnknownMap, assignments: Assignments, skip?: ReadonlySet<string>): EnvMap {
   const output: EnvMap = {};
 
   for (const [key, value] of Object.entries(env)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw new Error(`invalid env key "${key}" (keys must start with a letter or "_" and contain only letters, digits, and "_")`);
     }
+    if (skip?.has(key)) continue;
     output[key] = resolveEnvValue(value, assignments);
   }
 

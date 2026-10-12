@@ -5,7 +5,7 @@ import os from 'node:os';
 import { describe, it } from 'node:test';
 import { normalizeHealthcheck } from '../src/config/healthcheck.ts';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../src/constants.ts';
-import { waitForServiceReady } from '../src/readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, isTcpReady, waitForServiceReady } from '../src/readiness/index.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment, ServiceConfig } from '../src/types/index.ts';
 
 describe('normalizeHealthcheck', () => {
@@ -176,18 +176,210 @@ describe('waitForServiceReady', () => {
     );
   });
 
-  it('passes an http check for responses below 500', async () => {
-    const server = http.createServer((_request, response) => {
-      response.statusCode = 404;
-      response.end('not found, but alive');
+  it('does not count a Docker port as ready while the proxy closes every connection', async () => {
+    // Docker's port proxy accepts on the published port and closes at once
+    // while nothing listens inside the container.
+    const proxy = net.createServer((socket) => socket.destroy());
+    const port = await listen(proxy);
+    try {
+      assert.equal(await isTcpReady('127.0.0.1', port), true, 'a plain connect is fooled by the proxy');
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, 100), false);
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 300, intervalMs: 25 },
+      });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS),
+        /service "api" was not ready after/,
+      );
+    } finally {
+      await new Promise((resolve) => proxy.close(resolve));
+    }
+  });
+
+  it('passes a Docker tcp check once a connection stays open', async () => {
+    const server = net.createServer((socket) => socket.write('ready\n'));
+    const port = await listen(server);
+    try {
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 },
+      });
+      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('counts a Docker port as ready when the peer answers and hangs up', async () => {
+    // A banner-then-close protocol (an SMTP greeting, a server that redirects
+    // and closes) is a real listener. Docker's proxy never sends application
+    // data, so bytes from the peer settle the probe before the hold ends.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.end('220 ready\r\n');
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, DOCKER_TCP_HOLD_MS), true);
+      assert.ok(Date.now() - startedAt < DOCKER_TCP_HOLD_MS, 'the data settled it before the hold would have ended');
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 1_000, intervalMs: 25 },
+      });
+      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('lets an exit during the probe win over a late "ready"', async () => {
+    // The hold keeps ticking against a port whose process died meanwhile
+    // (Docker's proxy keeps accepting). The exit has to win.
+    const server = net.createServer(() => {});
+    const port = await listen(server);
+    try {
+      let exited = false;
+      setTimeout(() => {
+        exited = true;
+      }, 50);
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 },
+      });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => exited, DOCKER_TCP_HOLD_MS),
+        /exited before it became ready/,
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('names the detached log file instead of "the log lines above" when one is given', async () => {
+    const port = await findFreePort();
+    const service = makeService({ port: 4000, healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 } });
+    await assert.rejects(
+      waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, '/proj/.portler/logs/api.log'),
+      (error: Error) => /Check \/proj\/\.portler\/logs\/api\.log \(or "portler logs api"\) for the cause/.test(error.message) && !/above/.test(error.message),
+    );
+  });
+
+  it('does not let the Docker hold run past the attempt deadline', async () => {
+    // A silent peer has to stay open for the whole hold. A connect that lands
+    // with less than the hold window left cannot prove that before the
+    // deadline, so it is not ready, and it says so at the deadline instead of
+    // after the hold would have ended.
+    const server = net.createServer((socket) => {
+      // The probe may have destroyed its end already; a reset here is expected.
+      socket.on('error', () => {});
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      assert.equal(await isTcpReady('127.0.0.1', port, 25, 200), false);
+      const elapsed = Date.now() - startedAt;
+      assert.ok(elapsed < 150, `answered after ${elapsed}ms, the hold would have ended at 200ms`);
+      assert.equal(await isTcpReady('127.0.0.1', port, 1_000, 100), true, 'with room for the hold the same port is ready');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('lets a peer that answers inside a short attempt count as ready', async () => {
+    // The data listener goes on before the short-window decision: a container
+    // whose app answers at once is ready even when the attempt leaves less than
+    // the hold, so a healthcheck timeout under the hold is only hopeless for a
+    // listener that stays silent.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.write('ready\n');
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      assert.equal(await isTcpReady('127.0.0.1', port, 25, 200), true);
+      assert.ok(Date.now() - startedAt < 150, 'the answer settled it inside the 25 ms window');
+      const service = makeService({
+        port: 4000,
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 100, intervalMs: 25 },
+      });
+      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('still reports a silent container not ready when the healthcheck timeout is under the hold', async () => {
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
     });
     const port = await listen(server);
     try {
       const service = makeService({
         port: 4000,
-        healthcheck: { type: 'http', timeoutMs: 5_000, intervalMs: 25 },
+        docker: { image: 'app', containerName: 'portler-api', volumes: [], env: {} },
+        healthcheck: { type: 'tcp', timeoutMs: 100, intervalMs: 25 },
       });
-      await waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited);
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), notExited, DOCKER_TCP_HOLD_MS),
+        /not ready/,
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('rechecks the deadline when the hold timer fires', async () => {
+    // A blocked event loop can delay the hold timer past the attempt deadline.
+    // A silent peer whose hold ended late has proved nothing in time, so the
+    // answer is still "not ready". The block lands after the connect (loopback
+    // connects within a few ms) and before the 200 ms hold would have ended.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+    });
+    const port = await listen(server);
+    try {
+      const startedAt = Date.now();
+      const probe = isTcpReady('127.0.0.1', port, 300, 200);
+      setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 50);
+      assert.equal(await probe, false);
+      assert.ok(Date.now() - startedAt >= 300, 'the answer came after the deadline the block ran through');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('passes an http check for 2xx and 3xx by default, and for listed statuses with accept', async () => {
+    // A 404 says the server is up but the route is missing, which is what a
+    // misconfigured path looks like, so it is not ready unless the config says so.
+    let status = 302;
+    const server = http.createServer((_request, response) => {
+      response.statusCode = status;
+      if (status === 302) response.setHeader('location', 'http://127.0.0.1/elsewhere');
+      response.end();
+    });
+    const port = await listen(server);
+    const check = (accept?: number[]) =>
+      waitForServiceReady(
+        makeConfig(),
+        makeService({ port: 4000, healthcheck: { type: 'http', timeoutMs: 300, intervalMs: 25, ...(accept ? { accept } : {}) } }),
+        {},
+        {},
+        makeAssignment(port),
+        notExited,
+      );
+    try {
+      await check();
+      status = 404;
+      await assert.rejects(check(), /not ready/);
+      await check([200, 404]);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -297,5 +489,16 @@ describe('waitForServiceReady', () => {
       waitForServiceReady(makeConfig(), service, commandEnv, {}, undefined, notExited),
       /healthcheck command is missing/,
     );
+  });
+});
+
+describe('healthcheck accept', () => {
+  it('parses a list or a single status and rejects anything that is not an http status', () => {
+    assert.deepEqual(normalizeHealthcheck({ url: 'http://x', accept: [200, 404] }, 'api')?.accept, [200, 404]);
+    assert.deepEqual(normalizeHealthcheck({ url: 'http://x', accept: 204 }, 'api')?.accept, [204]);
+    assert.equal(normalizeHealthcheck({ url: 'http://x' }, 'api')?.accept, undefined);
+    for (const bad of [[], [99], [600], ['ok'], [200.5]]) {
+      assert.throws(() => normalizeHealthcheck({ url: 'http://x', accept: bad }, 'api'), /accept must/);
+    }
   });
 });

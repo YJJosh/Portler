@@ -66,6 +66,13 @@ describe('parseYaml', () => {
       empty_arr: [],
       empty_obj: {},
     });
+
+  it('parses flow collections as block sequence items', () => {
+    const text = ['steps:', '  - {run: npm install, if_missing: node_modules}', '  - [a, {b: c}]', '  - plain: {x: 1}'].join('\n');
+    assert.deepEqual(parseYaml(text), {
+      steps: [{ run: 'npm install', if_missing: 'node_modules' }, ['a', { b: 'c' }], { plain: { x: 1 } }],
+    });
+  });
   });
 
   it('parses a bare key as null when nothing nests under it', () => {
