@@ -1,6 +1,6 @@
 # What is Portler?
 
-Portler is a local development process runner — like a small `docker compose`, but with **automatic port assignment**.
+Portler is a process runner for multi-service projects — like a small `docker compose`, but with **automatic port assignment**. The same `portler.yml` runs your stack on a developer machine and in production.
 
 It reads a `portler.yml` file, assigns free localhost ports to your services, resolves service references like `backend.url` in environment values, and starts each service with the right environment variables.
 
@@ -53,11 +53,19 @@ The same `portler.yml` can run your stack three ways:
 
 In every mode, the generated URLs and environment variables keep working the same way, so your app code never has to care.
 
+## Development and production
+
+The same file also describes production. `--prod` applies the `prod:` overrides (production commands, setup steps and env), and the deployment's own environment wins over the file:
+
+- **On a platform** with a build command and a start command, run `portler setup --prod` as the build step and `portler start <service> --prod` as the start command. The platform's `PORT` and secrets apply.
+- **On a server with Docker**, `portler up docker --prod -d` starts the stack, and `--image` with a digest reference (`api=ghcr.io/org/api@sha256:…`) runs the exact images CI built instead of building on the host. A tag is not enough: Docker reuses a cached copy of it without checking the registry.
+
+See [Setup & production](/guide/setup-and-production) and [Docker](/guide/docker) for the details.
+
 ## What Portler is not
 
-- **Not a production orchestrator.** Portler targets local development only. Kubernetes mode explicitly supports local clusters (kind, minikube, Docker Desktop), not remote ones.
-- **Not a replacement for Docker Compose in CI.** It shines where ports collide: developer machines running several stacks at once.
-- **Not a process supervisor for long-lived daemons.** It starts, watches, and stops your dev stack; it does not do restarts-on-crash policies or boot integration.
+- **Not a cluster orchestrator.** Portler runs a project on one machine: a developer machine, a CI runner or a server. It does not spread services across hosts, and it has no rolling or zero-downtime deploys: `restart` stops a service and then starts its replacement. Kubernetes mode is meant for local clusters (kind, k3d, minikube, Docker Desktop and the like): by default it refuses a context or API endpoint it does not recognize as local, and runs against one only when you allow it by its exact name (`PORTLER_ALLOW_K8S_CONTEXT` for the context, `PORTLER_ALLOW_K8S_ENDPOINT` for the API server URL). It is not built to deploy to a production cluster.
+- **Not a crash supervisor.** `up` does not restart a service that crashes, and nothing comes back by itself after a reboot. In production, leave that to the platform or an init system: `portler start` runs one service in the foreground so the platform can supervise and restart it.
 
 ## Requirements
 

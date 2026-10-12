@@ -7,7 +7,7 @@ const packageVersion = (
 
 export default defineConfig({
   title: 'Portler',
-  description: 'Local development process runner with automatic port assignment and env resolution.',
+  description: 'Process runner with automatic port assignment and env resolution, from local development to production.',
   base: '/Portler/',
   cleanUrls: true,
   lastUpdated: true,

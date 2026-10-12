@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Portler
   text: Ports that sort themselves out.
-  tagline: A local development process runner like a small docker compose, but with automatic port assignment and environment resolution.
+  tagline: A process runner like a small docker compose, with automatic port assignment and environment resolution, from local development to production.
   image:
     src: /logo.svg
     alt: Portler
