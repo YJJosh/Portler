@@ -313,7 +313,7 @@ export async function startPhase(
   const children = new Map<string, ReturnType<typeof spawnService>>();
   // The live services of other runs the last teardown pass found, as their
   // entries read then: what it kept, it kept for them.
-  let foreignRoots: PidServiceInfo[] = [];
+  let foreignRoots: Array<{ name: string; info: PidServiceInfo }> = [];
   // stopServices prunes its services' pids.json entries itself. It reports what
   // it could NOT stop, and a teardown that did not finish is an error: a
   // foreground `up` that exits 0 while a service it started is still running (and
@@ -381,7 +381,7 @@ export async function startPhase(
       if (serviceName === PROXY_SERVICE_NAME || stopNames.includes(serviceName)) continue;
       if ((await livenessOf(serviceName, info)).status !== 'dead') foreignLive.push(serviceName);
     }
-    foreignRoots = foreignLive.map((serviceName) => current!.services[serviceName]!);
+    foreignRoots = foreignLive.map((serviceName) => ({ name: serviceName, info: current!.services[serviceName]! }));
     let toStop = stopNames;
     let kept: string[] = [];
     if (keepAdopted && foreignLive.length > 0) {
@@ -418,10 +418,17 @@ export async function startPhase(
 
   // False as soon as any root is gone, not only once all are: with api keeping
   // db and worker keeping cache, api's exit alone must free db. A root whose
-  // entry was replaced since counts as gone too; the pass this triggers reads
-  // pids.json again and keeps whatever the survivors and newer services need.
+  // entry was replaced since counts as gone too, checked before liveness: a
+  // Docker root restarted again reuses its container name, so the snapshot's
+  // container check would see the newer container and call the old root
+  // alive. The pass this triggers reads pids.json again and keeps whatever the
+  // survivors and newer services need.
   const dependentsAlive = async (): Promise<boolean> => {
-    for (const info of foreignRoots) {
+    if (foreignRoots.length === 0) return true;
+    const now = await readPids(config.projectDir);
+    for (const { name, info } of foreignRoots) {
+      const entry = now?.services[name];
+      if (!entry || entry.pid !== info.pid || entry.startToken !== info.startToken) return false;
       if ((await entryLiveness(config.projectDir, info)).status === 'dead') return false;
     }
     return true;

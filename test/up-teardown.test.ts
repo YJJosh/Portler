@@ -760,6 +760,62 @@ describe('foreground teardown ownership', () => {
     assert.equal(await stack.dependentsAlive(), true, 'the remaining root, worker, is alive');
   });
 
+  it('reports the kept services\' reason gone when a root\'s entry is replaced, even while the old process lives', { timeout: 15_000 }, async () => {
+    // A Docker root restarted again reuses its container name, so the old
+    // snapshot would read alive through the newer container. The same holds
+    // for any root whose entry another restart rewrote: the snapshot is no
+    // longer what pids.json names, and a newer restart may have dropped the
+    // dependency this run kept for it.
+    const server = `exec "${process.execPath}" server.cjs`;
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:', `    command: ${server}`, '    port: 3001', '    port_env: PORT',
+      '  api:', `    command: ${server}`, '    port: 3000', '    port_env: PORT', '    depends_on: [db]',
+      '',
+    ].join('\n'));
+    const config = await loadConfig(projectDir);
+    const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['db', 'api'], { detach: false }));
+    for (const child of stack.children.values()) childPids.add(child.pid!);
+    const original = (await readPids(projectDir))!;
+
+    const replace = async (dependsOn: string[]) => {
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+      childPids.add(child.pid!);
+      const token = await readProcessStartToken(child.pid!);
+      await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+        pids.services.api = {
+          ...pids.services.api!,
+          pid: child.pid!,
+          startedAt: new Date().toISOString(),
+          ...(token ? { startToken: token } : {}),
+          dependsOn,
+        };
+      }));
+      return child.pid!;
+    };
+
+    const first = await replace(['db']);
+    const kept = await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    assert.deepEqual(kept, ['db'], 'the replacement api keeps db');
+    assert.equal(await stack.dependentsAlive(), true, 'the root is alive and still named in pids.json');
+
+    // A newer restart replaces api again and no longer depends on db; the
+    // first replacement is still running.
+    const second = await replace([]);
+    assert.equal(isPidRunning(first), true, 'the first replacement still runs');
+    assert.equal(await stack.dependentsAlive(), false, 'the root was replaced, so the reason for keeping db is gone');
+
+    const keptAfter = await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    assert.deepEqual(keptAfter, [], 'nothing needs db any more');
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.db, undefined, 'db is stopped and pruned');
+    assert.equal(isPidRunning(original.services.db!.pid), false);
+    assert.equal(after.services.api?.pid, second, 'the newer replacement is left alone');
+    assert.equal(isPidRunning(second), true);
+    const registry = await readRegistry();
+    assert.equal(Object.values(registry.ports).some((entry) => entry.project === projectDir && entry.service === 'db'), false, 'db\'s reservation is released');
+  });
+
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
     // Startup fails before api is spawned (its env has a dangling reference).
     // A dead entry for api left by an earlier run is not another run's: nothing
