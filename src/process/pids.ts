@@ -1,6 +1,7 @@
+import { spawnSync, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ChildProcess } from 'node:child_process';
 import { resolveServiceCwd } from '../config/index.ts';
 import { portlerDir } from '../state/index.ts';
 import { withProjectLock } from '../state/lock.ts';
@@ -128,6 +129,37 @@ export function isPidRunning(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Like isPidRunning, but a zombie counts as dead. kill(pid, 0) succeeds for a
+ * process that exited and has not been reaped by its parent, and under a PID 1
+ * that does not reap orphans (a container without an init) a dead service's
+ * leader stays one, so the existence check alone would call it alive. The
+ * state comes from /proc on Linux and `ps` on macOS, the two platforms Portler
+ * supports; anywhere else, or if the probe itself fails, the existence check
+ * decides.
+ */
+export function isPidAlive(pid: number): boolean {
+  if (!isPidRunning(pid)) return false;
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // `pid (comm) S ...`; comm may contain spaces or parentheses.
+      const state = stat.charAt(stat.lastIndexOf(')') + 2);
+      return state !== 'Z' && state !== 'X';
+    } catch {
+      // No /proc entry: gone since the existence check.
+      return false;
+    }
+  }
+  if (process.platform === 'darwin') {
+    const result = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+    if (result.error) return true;
+    if (result.status !== 0) return false;
+    return !result.stdout.trim().startsWith('Z');
+  }
+  return true;
 }
 
 export function runningServices(pids: PidsFile | null, serviceNames?: string[]): string[] {

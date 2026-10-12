@@ -4,7 +4,7 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
-  isPidRunning,
+  isPidAlive,
   pidInfoFor,
   readPids,
   runningServices,
@@ -265,6 +265,8 @@ export async function startPhase(
     // Dependencies this run leaves running (restart's skipRunning) are not in
     // `children`, so their recorded pids are rechecked instead. For a Docker
     // service that pid is the `docker run` client, which exits with the container.
+    // A zombie counts as dead: under a PID 1 that does not reap orphans, an
+    // exited leader keeps its pid, and kill(pid, 0) alone would call it alive.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = (): void => {
       const spawnedDied = [...children]
@@ -272,7 +274,7 @@ export async function startPhase(
         .map(([name]) => name);
       const retainedDied = retained.filter((name) => {
         const pid = pidsBefore?.services[name]?.pid;
-        return pid !== undefined && !isPidRunning(pid);
+        return pid !== undefined && !isPidAlive(pid);
       });
       const died = [...spawnedDied, ...retainedDied];
       if (died.length === 0) return;
