@@ -1,8 +1,8 @@
 import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
-import { applyProduction } from '../../config/production.ts';
+import { applyProduction, productionServices } from '../../config/production.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
+import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
@@ -261,8 +261,10 @@ export async function startPhase(
   requestedRootNames: string[],
   options: StartOptions,
 ): Promise<StartedStack> {
-  const orderedNames = expandAndOrderServices(rawConfig, requestedRootNames);
-  const modeConfig = configForRunMode(rawConfig, mode);
+  // Under --prod only prod.services run; dependencies on left-out services are dropped.
+  const raw = productionServices(rawConfig, options.prod);
+  const orderedNames = expandAndOrderServices(raw, requestedRootNames);
+  const modeConfig = configForRunMode(raw, mode);
   const images = options.images ?? {};
   const config = applyProduction(applyImageOverrides(modeConfig, images), options.prod);
   const pidsBefore = await readPids(config.projectDir);
@@ -435,6 +437,10 @@ export async function startPhase(
   };
 
   try {
+    // prod.require: a deployment that forgot a value fails here, before setup runs or
+    // anything is spawned, naming the key instead of failing somewhere inside the app.
+    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
+
     // Resolve every selected service's env (and healthcheck references) up
     // front, so config mistakes like `backend.urll` fail before anything is
     // spawned instead of after some services have already started.
@@ -445,12 +451,14 @@ export async function startPhase(
       validateHealthcheckReferences(service, assignments);
     }
 
+    const projectEnv = buildProjectEnv(config, baseEnv, assignments);
+
     const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);
     if (options.setup !== false) {
-      await runSetupStep(config, null, buildProjectEnv(config, baseEnv, assignments), setupMode, options.setup);
+      await runSetupStep(config, null, projectEnv, setupMode, options.setup);
     }
 
     // Start level by level: services within a level are independent, so they
@@ -633,7 +641,7 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
     return commandUpK8s(args, requested);
   }
 
-  const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
+  const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
   const requestedRootNames = selectServiceNames(rawConfig, requested);
   return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup, images: args.images });
 }

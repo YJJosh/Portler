@@ -447,6 +447,41 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('restart --prod checks prod.require before stopping anything', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`services:
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+      require: [DEPLOY_SECRET]
+`);
+    const oldSecret = process.env.DEPLOY_SECRET;
+    process.env.DEPLOY_SECRET = 's';
+    try {
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      const pid = (await readPids(dir))?.services.api?.pid;
+      assert.ok(pid);
+      delete process.env.DEPLOY_SECRET;
+      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /service api requires DEPLOY_SECRET in production/);
+      assert.equal((await readPids(dir))?.services.api?.pid, pid, 'api was not stopped');
+      assert.doesNotThrow(() => process.kill(pid, 0), 'api is still running');
+      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+    } finally {
+      if (oldSecret === undefined) delete process.env.DEPLOY_SECRET;
+      else process.env.DEPLOY_SECRET = oldSecret;
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
@@ -587,6 +622,131 @@ services: {api: {command: echo}}
       } finally {
         if (child.exitCode === null) child.kill('SIGKILL');
       }
+    }
+  });
+
+  it('a watch step runs again when one of its files changes, appears or disappears', async () => {
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'unchanged file: the receipt holds');
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await run();
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install'], 'a changed file runs the step once');
+    await fs.rm(path.join(dir, 'lock'));
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install', 'install'], 'a missing file is a state of its own');
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await run();
+    assert.equal((await lines()).length, 4, 'and so is its return');
+  });
+
+  it('a watched file that appears with any content runs the step, even content that looked like absence', async () => {
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock, other]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'both files absent: the step runs once');
+    await fs.writeFile(path.join(dir, 'lock'), '<missing>');
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install'], 'a file appearing runs the step, whatever it holds');
+    await fs.rm(path.join(dir, 'lock'));
+    await run();
+    assert.equal((await lines()).length, 3, 'and so does its disappearing');
+    await fs.writeFile(path.join(dir, 'lock'), '<missing>\0other\0');
+    await run();
+    assert.equal((await lines()).length, 4, 'content cannot pass for the next file\'s entry either');
+  });
+
+  it('a watched path that exists but cannot be read is an error, not absence', async () => {
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'the file is absent: the step runs once');
+    // A directory cannot be read as a file on any platform (EISDIR), like an unreadable file.
+    await fs.mkdir(path.join(dir, 'lock'));
+    await assert.rejects(run(), /watch file "lock" cannot be read/);
+    assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+  });
+
+  it('a watch step reads its files when it is reached and records them as they are after it succeeds', async () => {
+    await fs.writeFile(path.join(dir, 'source'), 'a');
+    const cfg = await config(`setup:
+  - {run: "cp source generated", always: true}
+  - {run: "echo use >> steps", watch: [generated]}
+  - {run: "echo own >> steps; echo x >> counter", watch: [counter]}
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own']);
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own'], 'a step that rewrote its own watched file does not run again for that');
+    await fs.writeFile(path.join(dir, 'source'), 'b');
+    await run();
+    assert.deepEqual(await lines(), ['use', 'own', 'use'], 'an earlier step rewrote the watched file in this run, so the step runs');
+    await run();
+    assert.equal((await lines()).length, 3, 'and its receipt holds for what it ran against');
+  });
+
+  it('a watch step that fails loses its old receipt, even when the file goes back', async () => {
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    await fs.writeFile(path.join(dir, 'fail'), 'no');
+    const cfg = await config(`setup: [{run: "echo install >> steps; grep -q no fail", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await fs.writeFile(path.join(dir, 'fail'), 'yes');
+    await assert.rejects(run(), /failed/);
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    await fs.writeFile(path.join(dir, 'fail'), 'no');
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install', 'install'], 'the half-done run is not covered by the v1 receipt');
+  });
+
+  it('setup skips a missing use_env file in development, like --prod does', async () => {
+    await config(`use_env: .env
+setup: echo ok >> steps
+services: {app: {command: echo}}
+`);
+    assert.equal(await commandSetup(parseArgs([], 'setup')), 0);
+    assert.deepEqual(await lines(), ['ok']);
+  });
+
+  it('prod.require fails up and setup before anything runs, naming the missing keys', async () => {
+    await config(`prod: {require: [DEPLOY_SECRET]}
+setup: echo ran >> steps
+services:
+  app:
+    command: node -e "setInterval(() => {}, 1000)"
+    port: 3000
+    prod: {require: [APP_TOKEN]}
+`);
+    delete process.env.DEPLOY_SECRET;
+    delete process.env.APP_TOKEN;
+    try {
+      await assert.rejects(commandSetup(parseArgs(['--prod'], 'setup')), /the project requires DEPLOY_SECRET in production/);
+      await assert.rejects(commandUp(parseArgs(['-d', '--prod'], 'up')), /the project requires DEPLOY_SECRET in production/);
+      await assert.rejects(fs.access(path.join(dir, 'steps')));
+      assert.equal(await readPids(dir), null, 'nothing was started');
+      process.env.DEPLOY_SECRET = 's';
+      await assert.rejects(commandSetup(parseArgs(['--prod'], 'setup')), /service app requires APP_TOKEN in production/);
+      process.env.APP_TOKEN = 't';
+      assert.equal(await commandSetup(parseArgs(['--prod'], 'setup')), 0);
+      assert.deepEqual(await lines(), ['ran']);
+    } finally {
+      delete process.env.DEPLOY_SECRET;
+      delete process.env.APP_TOKEN;
     }
   });
 

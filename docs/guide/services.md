@@ -68,7 +68,7 @@ Each service's final environment is composed from (lowest to highest precedence)
 
 On top of that, `port_env` keys are set to the service's port. Local services receive the **assigned host port**; Docker services receive their declared **container port** (the Docker port mapping translates between the two).
 
-**Production.** With `--prod` (and always in `portler start`) the deployment wins over `portler.yml`: the order becomes top-level `env:`, the service's `env:`, then `.env` files, then your shell's environment. Generated `PORTLER_*` values and `port_env` keys are still Portler's own. A config value the deployment overrides is not resolved, so a reference that only works in development cannot block it. Containers receive the same keys in both orders; only the values differ. See [Setup & production](/guide/setup-and-production).
+**Production.** With `--prod` (and always in `portler start`) the deployment wins over `portler.yml`: the order becomes top-level `env:`, the service's `env:`, then `.env` files, then your shell's environment. Generated `PORTLER_*` values and `port_env` keys are still Portler's own. A config value the deployment overrides is not resolved, so a reference that only works in development cannot block it. In production a container receives only the keys `portler.yml` names for it: root and service `env` (with `prod.env`), `prod.require`, generated values and `port_env`; in development the `use_env` files' keys are forwarded too. See [Setup & production](/guide/setup-and-production).
 
 Inspect the result at any time:
 

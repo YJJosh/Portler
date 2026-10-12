@@ -7,7 +7,10 @@ import { parseArgs } from '../src/cli/args.ts';
 import { main } from '../src/cli/index.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyDockerMode } from '../src/config/docker.ts';
-import { applyProduction } from '../src/config/production.ts';
+import { applyProduction, productionServices } from '../src/config/production.ts';
+import { expandAndOrderServices } from '../src/cli/services.ts';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const dirs: string[] = [];
 async function config(text: string) {
@@ -149,7 +152,7 @@ services:
 
   for (const [text, error] of [
     ['setup: 42\nservices: {api: {command: echo}}', /setup must be a string or a list/],
-    ['services: {api: {setup: [echo, 42]}}', /services.api.setup\[1\] must be a command string or a \{run, if_missing, always\} step/],
+    ['services: {api: {setup: [echo, 42]}}', /services.api.setup\[1\] must be a command string or a \{run, if_missing, always, watch\} step/],
     ['setup: [{if_missing: node_modules}]\nservices: {api: {command: echo}}', /setup\[0\].run must be a shell command/],
     ['setup: ""\nservices: {api: {command: echo}}', /setup must be a shell command/],
     ['services: {api: {setup: ["   "]}}', /services.api.setup\[0\] must be a shell command/],
@@ -158,7 +161,7 @@ services:
     ['setup: [{run: x, if_missing: ""}]\nservices: {api: {command: echo}}', /setup\[0\].if_missing must be a path/],
     ['setup: [{run: x, if_missing: y, always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine if_missing with always/],
     ['setup: [{run: x, always: yes}]\nservices: {api: {command: echo}}', /setup\[0\].always must be true or false/],
-    ['setup: [{run: x, cwd: y}]\nservices: {api: {command: echo}}', /unknown key "setup\[0\].cwd"; allowed keys: run, if_missing, always/],
+    ['setup: [{run: x, cwd: y}]\nservices: {api: {command: echo}}', /unknown key "setup\[0\].cwd"; allowed keys: run, if_missing, always, watch/],
     ['services: {api: {prod: {setup: [{run: x, when: y}]}}}', /unknown key "services.api.prod.setup\[0\].when"/],
     ['prod: nope\nservices: {api: {command: echo}}', /prod must be an object/],
     ['prod: {command: echo}\nservices: {api: {command: echo}}', /unknown key "prod.command"/],
@@ -167,11 +170,188 @@ services:
     ['services: {api: {prod: {setup: false}}}', /services.api.prod.setup must be a string or a list/],
     ['prod: {env: 5}\nservices: {api: {command: echo}}', /prod.env must be a mapping/],
     ['setup: null\nservices: {api: {command: echo}}', /setup must be a string or a list/],
+    ['setup: [{run: x, watch: []}]\nservices: {api: {command: echo}}', /setup\[0\].watch must list at least one file/],
+    ['setup: [{run: x, watch: [""]}]\nservices: {api: {command: echo}}', /setup\[0\].watch must not contain an empty path/],
+    ['setup: [{run: x, watch: 4}]\nservices: {api: {command: echo}}', /setup\[0\].watch must be a file path or a list/],
+    ['setup: [{run: x, watch: [f], always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with always/],
+    ['setup: [{run: x, watch: [f], if_missing: p}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with if_missing/],
+    ['prod: {require: [bad-key]}\nservices: {api: {command: echo}}', /prod.require\[0\] must be an environment variable name/],
+    ['prod: {require: 7}\nservices: {api: {command: echo}}', /prod.require must be a variable name or a list/],
+    ['prod: {services: []}\nservices: {api: {command: echo}}', /prod.services must list at least one service/],
+    ['prod: {services: [ghost]}\nservices: {api: {command: echo}}', /prod.services names unknown service "ghost"/],
+    ['services: {api: {prod: {services: [api]}}}', /unknown key "services.api.prod.services"/],
   ] as const) {
     it(`rejects invalid config: ${text.split('\n')[0]}`, async () => {
       await assert.rejects(config(text), error);
     });
   }
+
+  it('normalizes require, services and watch', async () => {
+    const cfg = await config(`prod: {require: [SECRET, SECRET, DATABASE_URL], services: [api]}
+setup: [{run: pnpm install, watch: pnpm-lock.yaml}]
+services:
+  api: {command: echo, prod: {require: TOKEN}}
+  db: {image: postgres:16}
+`);
+    assert.deepEqual(cfg.prod?.require, ['SECRET', 'DATABASE_URL']);
+    assert.deepEqual(cfg.prod?.services, ['api']);
+    assert.deepEqual(cfg.services.api!.prod?.require, ['TOKEN']);
+    assert.deepEqual(cfg.setup, [{ run: 'pnpm install', watch: ['pnpm-lock.yaml'] }]);
+  });
+
+  it('runs only prod.services under --prod and drops dependencies on the rest', async () => {
+    const cfg = await config(`prod: {services: [api, web]}
+services:
+  postgres: {image: postgres:16, port: 5432}
+  api: {command: echo, port: 4000, depends_on: [postgres]}
+  web: {command: echo, port: 3000, depends_on: [api]}
+`);
+    assert.deepEqual(Object.keys(productionServices(cfg, false).services), ['postgres', 'api', 'web']);
+    const prod = productionServices(cfg, true);
+    assert.deepEqual(Object.keys(prod.services), ['api', 'web']);
+    assert.deepEqual(prod.services.api!.dependsOn, []);
+    assert.deepEqual(prod.services.web!.dependsOn.map((dependency) => dependency.service), ['api']);
+    assert.deepEqual(Object.keys(applyProduction(cfg, true).services), ['api', 'web'], 'applyProduction applies the list too');
+    assert.throws(() => productionServices(cfg, true, ['postgres']), /service "postgres" is not in prod.services/);
+    assert.doesNotThrow(() => productionServices(cfg, true, ['api']));
+  });
+
+  it('keeps the production service map prototype-free, so an inherited name is an unknown service', async () => {
+    const cfg = await config(`prod: {services: [api, web]}
+services:
+  postgres: {image: postgres:16, port: 5432}
+  api: {command: echo, port: 4000, depends_on: [postgres]}
+  web: {command: echo, port: 3000, depends_on: [api]}
+`);
+    const filtered = productionServices(cfg, true, ['constructor']);
+    assert.equal(Object.getPrototypeOf(filtered.services), null);
+    assert.equal(Object.getPrototypeOf(applyProduction(cfg, true).services), null);
+    for (const name of ['constructor', 'toString']) {
+      assert.throws(() => expandAndOrderServices(filtered, [name]), new RegExp(`unknown service "${name}"`));
+      assert.throws(() => expandAndOrderServices(applyProduction(cfg, true), [name]), new RegExp(`unknown service "${name}"`));
+    }
+  });
+
+  it('refuses a proxy route to a service that prod.services leaves out', async () => {
+    const cfg = await config(`prod: {services: [web]}
+proxy: {port: auto, routes: {/api: api, /: web}}
+services:
+  api: {command: echo, port: 4000}
+  web: {command: echo, port: 3000}
+`);
+    assert.throws(() => productionServices(cfg, true), /proxy route \/api targets service "api", which prod.services leaves out/);
+  });
+
+  it('env --prod prints the deployment view with secrets masked, and --reveal shows them', async () => {
+    const cfg = await config(`prod: {require: [API_TOKEN]}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {DATABASE_URL: "postgres://app:hunter2@localhost:5432/app", PLAIN: dev}
+    prod: {env: {PLAIN: ''}}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global'), API_TOKEN: 'abc', PLAIN: 'from-platform' };
+    const run = (...extra: string[]) =>
+      spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--prod', ...extra], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    const masked = run();
+    assert.equal(masked.status, 0, masked.stderr);
+    assert.match(masked.stdout, /^API_TOKEN="?\*\*\*"?$/m);
+    assert.match(masked.stdout, /^DATABASE_URL="?postgres:\/\/app:\*\*\*@localhost:5432\/app"?$/m);
+    assert.match(masked.stdout, /^PLAIN="?from-platform"?$/m, 'the platform wins over the blank prod.env entry');
+    assert.match(run('--reveal').stdout, /^API_TOKEN="?abc"?$/m);
+    delete env.API_TOKEN;
+    const missing = run();
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.match(missing.stderr, /service api requires API_TOKEN in production/);
+    assert.doesNotMatch(missing.stdout, /^API_TOKEN=/m);
+    const dev = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--reveal'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(dev.status, 1);
+    assert.match(dev.stderr, /--reveal applies to "env --prod"/);
+  });
+
+  it('setup --prod fails before running when a key blanked in prod.env is not supplied', async () => {
+    const cfg = await config(`prod: {setup: ["echo ran >> steps"]}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {DATABASE_URL: "postgres://localhost/dev"}
+    prod: {env: {DATABASE_URL: ''}}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.DATABASE_URL;
+    const run = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'setup', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    const missing = run();
+    assert.equal(missing.status, 1, missing.stderr);
+    assert.match(missing.stderr, /service api requires DATABASE_URL in production/);
+    await assert.rejects(fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'nothing ran');
+    env.DATABASE_URL = 'postgres://db.internal/app';
+    const supplied = run();
+    assert.equal(supplied.status, 0, supplied.stderr);
+    assert.equal(await fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'ran\n');
+  });
+
+  it('setup --prod does not require of the project a root blank that the service overrides', async () => {
+    const cfg = await config('services: {api: {command: echo, port: 4000}}');
+    const write = (top: string) => fs.writeFile(path.join(cfg.projectDir, 'portler.yml'), `${top}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {PUBLIC_URL: "https://api.example.com"}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.PUBLIC_URL;
+    const run = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'setup', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    // api sets PUBLIC_URL itself and there are no top-level steps: nothing needs the deployment's value.
+    await write("prod: {env: {PUBLIC_URL: ''}}");
+    const overridden = run();
+    assert.equal(overridden.status, 0, overridden.stderr);
+    // Top-level steps see the root env, so with them the blank is the project's requirement.
+    await write("prod: {env: {PUBLIC_URL: ''}, setup: ['echo ran >> steps']}");
+    const withSteps = run();
+    assert.equal(withSteps.status, 1, withSteps.stderr);
+    assert.match(withSteps.stderr, /the project requires PUBLIC_URL in production/);
+    await assert.rejects(fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'nothing ran');
+    // An explicit top-level require holds always.
+    await write('prod: {require: [PUBLIC_URL]}');
+    const explicit = run();
+    assert.equal(explicit.status, 1, explicit.stderr);
+    assert.match(explicit.stderr, /the project requires PUBLIC_URL in production/);
+  });
+
+  it('does not hand --prod the cached assignment of a service prod.services leaves out', async () => {
+    const cfg = await config(`prod: {services: [api]}
+services:
+  db: {command: echo, port: 5432}
+  api:
+    command: echo
+    port: 4000
+    env: {DB_URL: "\${db.url}"}
+    prod:
+      setup: node -e "require('fs').writeFileSync('seen', process.env.DB_URL)"
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--experimental-strip-types', cli, ...args], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    // A development run leaves db's assignment in state.json.
+    const dev = run('env');
+    assert.equal(dev.status, 0, dev.stderr);
+    assert.match(dev.stdout, /^PORTLER_DB_URL=/m);
+    const prod = run('env', '--prod');
+    assert.equal(prod.status, 0, prod.stderr);
+    assert.match(prod.stdout, /^PORTLER_API_URL=/m);
+    assert.doesNotMatch(prod.stdout, /^PORTLER_DB_/m, 'db is external under --prod');
+    const setup = run('setup', '--prod');
+    assert.equal(setup.status, 1, 'db.url does not resolve under --prod, as in up --prod');
+    assert.match(setup.stderr, /db\.url/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'seen')), 'the production setup step did not run');
+    assert.match(run('env').stdout, /^PORTLER_DB_URL=/m, 'state.json still holds the development assignment');
+  });
 
   it('validates flag combinations and rejects unsupported k8s flags before loading config', async () => {
     assert.equal(parseArgs(['--no-setup'], 'up').setup, false);

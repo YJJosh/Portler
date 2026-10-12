@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
-import { applyProduction } from '../../config/production.ts';
-import { buildGeneratedEnv, resolveEnvValue } from '../../env/index.ts';
+import { applyProduction, productionServices } from '../../config/production.ts';
+import { assertRequiredEnv, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
 import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -60,11 +60,13 @@ export async function buildStartEnv(
   // written, exactly as `up` and `setup` treat it, and a config key the file or the platform
   // supplies is not resolved at all.
   const configured = { ...config.env, ...service.env };
+  // A required key is the deployment's to supply; its config value is not used or resolved.
+  const required = new Set(config.production ? requiredEnvKeys(config, service) : []);
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
     // Own-property checks: `toString` or `constructor` are valid variable names, and a
     // plain `in` or index lookup would find the inherited Object.prototype member instead.
-    if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key)) continue;
+    if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key) || required.has(key)) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
       env[key] = resolveEnvValue(value, assignments);
@@ -87,9 +89,41 @@ export async function buildStartEnv(
   return env;
 }
 
+/**
+ * prod.require for `start`. The port_env names are start's own: they always carry the port it
+ * listens on, and only the platform's PORT chooses that port. So a required port_env name is met
+ * when the platform sets PORT, and not by the same name in the use_env file or the shell, which
+ * start would overwrite; every other key is met by what the deployment supplies.
+ */
+export function assertStartRequirements(
+  config: PortlerConfig,
+  service: ServiceConfig,
+  baseEnv: EnvMap,
+  platformEnv: NodeJS.ProcessEnv = process.env,
+): void {
+  const required = requiredEnvKeys(config, service);
+  const portKeys = required.filter((key) => service.portEnv.includes(key));
+  if (portKeys.length > 0 && (platformEnv.PORT === undefined || platformEnv.PORT === '')) {
+    throw new Error(
+      `service ${service.name} requires ${portKeys.join(', ')} in production (prod.require), and the platform sets no PORT. ` +
+        `start fills its port_env names (${service.portEnv.join(', ')}) with the port it listens on, and only the platform's PORT chooses that port; ` +
+        'a use_env file does not.',
+    );
+  }
+  assertRequiredEnv(`service ${service.name}`, required.filter((key) => !service.portEnv.includes(key)), deploymentEnv(baseEnv));
+}
+
+/** How long `start` waits for the rest of the process group after the shell exits. */
+export const DEFAULT_DRAIN_MS = 10_000;
+
 export async function commandStart(args: ParsedArgs): Promise<number> {
-  const config = applyProduction(await loadConfig(process.cwd(), args.file), args.prod);
+  const config = applyProduction(productionServices(await loadConfig(process.cwd(), args.file), args.prod, args.positionals), args.prod);
   const service = selectStartService(config, args.positionals);
-  const env = await buildStartEnv(config, service, await loadBaseEnv(config, { allowMissing: true }));
-  return runShell(service.command!, resolveServiceCwd(config, service), env);
+  const baseEnv = await loadBaseEnv(config, { allowMissing: true });
+  // Checked against what the platform and the use_env file supply, before buildStartEnv picks
+  // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
+  // not pass on a free port the platform does not route to.
+  if (args.prod) assertStartRequirements(config, service, baseEnv);
+  const env = await buildStartEnv(config, service, baseEnv);
+  return runShell(service.command!, resolveServiceCwd(config, service), env, { drainMs: args.drainMs ?? DEFAULT_DRAIN_MS });
 }

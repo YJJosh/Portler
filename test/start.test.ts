@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -6,7 +6,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { parseArgs } from '../src/cli/args.ts';
 import { buildStartEnv, selectStartService } from '../src/cli/commands/start.ts';
+import { main } from '../src/cli/index.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyProduction } from '../src/config/production.ts';
 import { runShell } from '../src/process/shell.ts';
@@ -164,6 +166,107 @@ services:
     assert.throws(() => selectStartService(cfg, ['db']), /start is for local processes/);
     assert.throws(() => selectStartService(cfg, ['empty']), /has no command/);
     assert.throws(() => selectStartService(cfg, ['api', 'web']), /exactly one service/);
+  });
+
+  it('drains the process group after the shell exits, with a deadline', async () => {
+    const cfg = await config('services: {api: {command: echo}}');
+    // The shell exits at once; a backgrounded sleep stays in the group.
+    let startedAt = Date.now();
+    assert.equal(await runShell('sleep 30 & echo $! > bg.pid; exit 0', cfg.projectDir, {}, { drainMs: 300 }), 0);
+    const waited = Date.now() - startedAt;
+    assert.ok(waited >= 250 && waited < 5000, `waited ${waited} ms for the deadline`);
+    const pid = Number((await fs.readFile(path.join(cfg.projectDir, 'bg.pid'), 'utf8')).trim());
+    let gone = false;
+    for (let attempt = 0; attempt < 40 && !gone; attempt += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch {
+        gone = true;
+      }
+    }
+    assert.ok(gone, 'the leftover was killed at the deadline');
+    // A group that empties on its own ends the wait early.
+    startedAt = Date.now();
+    assert.equal(await runShell('sleep 0.2 & exit 0', cfg.projectDir, {}, { drainMs: 5000 }), 0);
+    const early = Date.now() - startedAt;
+    assert.ok(early >= 150 && early < 3000, `returned after ${early} ms, when the group emptied`);
+    // Without drainMs the call returns with the shell, whatever it left running.
+    startedAt = Date.now();
+    assert.equal(await runShell('sleep 30 & echo $! > bg2.pid; exit 0', cfg.projectDir, {}), 0);
+    assert.ok(Date.now() - startedAt < 1000);
+    process.kill(Number((await fs.readFile(path.join(cfg.projectDir, 'bg2.pid'), 'utf8')).trim()), 'SIGKILL');
+  });
+
+  it('parses --drain-ms and scopes it to start', async () => {
+    assert.equal(parseArgs(['--drain-ms', '500'], 'start').drainMs, 500);
+    assert.equal(parseArgs(['--drain-ms=0'], 'start').drainMs, 0);
+    assert.equal(parseArgs([], 'start').drainMs, undefined);
+    assert.throws(() => parseArgs(['--drain-ms', 'soon'], 'start'), /requires a number/);
+    assert.equal(parseArgs(['--drain-ms', '2147483647'], 'start').drainMs, 2147483647);
+    assert.throws(() => parseArgs(['--drain-ms', '2147483648'], 'start'), /at most 2147483647/);
+    // Enough digits for Number() to give Infinity, which would never reach its deadline.
+    assert.throws(() => parseArgs(['--drain-ms', '9'.repeat(400)], 'start'), /at most 2147483647/);
+    assert.throws(() => parseArgs([`--drain-ms=${'9'.repeat(400)}`], 'start'), /at most 2147483647/);
+    await assert.rejects(main(['up', '--drain-ms', '1']), /does not apply/);
+  });
+
+  it('refuses to start without the required production values', async () => {
+    const cfg = await config(`prod: {require: [DEPLOY_SECRET]}
+services:
+  api: {command: echo started > started, port: 4000}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    delete env.DEPLOY_SECRET;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /service api requires DEPLOY_SECRET in production/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'started')), 'the command did not run');
+    const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, DEPLOY_SECRET: 's' }, encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal((await fs.readFile(path.join(cfg.projectDir, 'started'), 'utf8')).trim(), 'started');
+  });
+
+  it('does not count the port it picks as the required PORT from the platform', async () => {
+    const cfg = await config(`services:
+  api:
+    command: echo started > started
+    port: 4000
+    port_env: PORT
+    prod: {require: [PORT]}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    delete env.PORT;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1, 'the declared port 4000 must not satisfy require: [PORT]');
+    assert.match(refused.stderr, /service api requires PORT in production/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'started')), 'the command did not run');
+    const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, PORT: '4567' }, encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+  });
+
+  it('does not let a PORT in the use_env file meet require: [PORT], since only the platform picks the port', async () => {
+    const cfg = await config(`use_env: .env.production
+services:
+  api:
+    command: node -e "require('fs').writeFileSync('port', process.env.PORT)"
+    port: 4000
+    port_env: PORT
+    prod: {require: [PORT]}
+`);
+    await fs.writeFile(path.join(cfg.projectDir, '.env.production'), 'PORT=8123\n');
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    delete env.PORT;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1, 'the file PORT would be overwritten by the declared port 4000');
+    assert.match(refused.stderr, /service api requires PORT in production \(prod\.require\), and the platform sets no PORT/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'port')), 'the command did not run');
+    const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, PORT: '4567' }, encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
   });
 
   it('returns the shell exit code and runs in the requested cwd', async () => {

@@ -5,6 +5,10 @@ export interface ParsedArgs {
   prod?: boolean;
   setup?: boolean;
   detach: boolean;
+  /** `env --prod`: print secret-looking values instead of masking them. */
+  reveal: boolean;
+  /** `start`: how long to wait for the rest of the process group after the shell exits. */
+  drainMs?: number;
   follow: boolean;
   help: boolean;
   global: boolean;
@@ -23,6 +27,8 @@ const KNOWN_FLAGS = [
   '--prod',
   '--setup',
   '--no-setup',
+  '--reveal',
+  '--drain-ms',
   '--help',
   '--detach',
   '--global',
@@ -34,6 +40,9 @@ const KNOWN_FLAGS = [
   '--file',
   '--image',
 ];
+
+/** The longest delay a Node timer accepts; any larger --drain-ms is refused. */
+const MAX_DRAIN_MS = 2_147_483_647;
 
 /**
  * `-f` is overloaded across the CLI, so it is resolved per command rather than
@@ -69,6 +78,7 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
   const positionals: string[] = [];
   const parsed: ParsedArgs = {
     detach: false,
+    reveal: false,
     follow: false,
     help: false,
     global: false,
@@ -110,6 +120,24 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
 
     if (arg === '--global') {
       parsed.global = true;
+      continue;
+    }
+
+    if (arg === '--reveal') {
+      parsed.reveal = true;
+      continue;
+    }
+
+    if (arg === '--drain-ms' || arg.startsWith('--drain-ms=')) {
+      const value = arg === '--drain-ms' ? args[index + 1] : arg.slice('--drain-ms='.length);
+      if (value === undefined || !/^\d+$/.test(value)) throw new Error('--drain-ms requires a number of milliseconds');
+      // Enough digits make Number() Infinity, and an infinite deadline is never
+      // reached, so start would never kill what the shell left behind. Cap it at
+      // the longest delay a Node timer accepts.
+      const drainMs = Number(value);
+      if (drainMs > MAX_DRAIN_MS) throw new Error(`--drain-ms must be at most ${MAX_DRAIN_MS} (about 24.8 days)`);
+      parsed.drainMs = drainMs;
+      if (arg === '--drain-ms') index += 1;
       continue;
     }
 

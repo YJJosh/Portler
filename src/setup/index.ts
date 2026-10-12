@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
+import { requiredEnvKeys } from '../env/index.ts';
 import { resolveEnvMap } from '../env/resolve.ts';
 import { runShell } from '../process/shell.ts';
 import { portlerDir } from '../state/index.ts';
@@ -12,8 +14,11 @@ import type { Assignments, EnvMap, PortlerConfig, ServiceConfig, SetupStep } fro
 /**
  * Receipts of the plain setup steps that succeeded in this checkout, keyed by
  * run mode and step owner (`local:dev:project`, `local:prod:service:api`).
- * Version 1 kept one fingerprint per owner for the whole command list; a file
- * in that shape is accepted and treated as empty, so the steps run once more.
+ * A receipt is the step's identity (see setupFingerprint), followed for a
+ * `watch` step by `:` and the digest of its watched files as they were when
+ * it last succeeded. Version 1 kept one fingerprint per owner for the whole
+ * command list; a file in that shape is accepted and treated as empty, so the
+ * steps run once more.
  */
 interface SetupState {
   version: 1 | 2;
@@ -37,8 +42,37 @@ function isSetupState(value: unknown): value is SetupState {
  * removing a duplicate of a command invalidates every receipt of that
  * command, so an old receipt is never handed to a newly inserted entry.
  */
-export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1): string {
-  return createHash('sha256').update(JSON.stringify({ command, cwd, mode, occurrence, total })).digest('hex');
+export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1, watch?: string): string {
+  const identity = watch === undefined ? { command, cwd, mode, occurrence, total } : { command, cwd, mode, occurrence, total, watch };
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+}
+
+/**
+ * The content of a plain step's `watch` files, folded into its receipt: the
+ * step runs again when any of them changes, appears or disappears. Paths are
+ * relative to the step's cwd. A missing file is a state of its own; one that
+ * exists but cannot be read is an error. Each file contributes one record, its
+ * name and the digest of its content (or null when it is absent), so no content
+ * can pass for absence or for another file's entry.
+ */
+function watchDigest(step: SetupStep, cwd: string): string | undefined {
+  if (!step.watch) return undefined;
+  const records = step.watch.map((file) => {
+    let content: string | null;
+    try {
+      content = createHash('sha256').update(readFileSync(path.resolve(cwd, file))).digest('hex');
+    } catch (error) {
+      // Only absence is a state of its own. A file that exists but cannot be read
+      // (EACCES, a directory) must not pass for a missing one and skip the step.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw new Error(`watch file "${file}" cannot be read: ${(error as Error).message}`);
+      }
+      content = null;
+    }
+    return [file, content];
+  });
+  return createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 
 /** A step that keeps a receipt: neither guarded by a path nor marked `always`. */
@@ -46,16 +80,22 @@ export function isPlainSetupStep(step: SetupStep): boolean {
   return step.ifMissing === undefined && step.always !== true;
 }
 
+/** The identity a receipt belongs to: everything before the watch digest. */
+function receiptIdentity(receipt: string): string {
+  return receipt.split(':', 1)[0];
+}
+
 /**
- * Fingerprints of the plain steps of one list, in list order; `undefined` for
- * guarded and `always` entries. Identical commands are told apart by their
+ * Identities of the plain steps of one list, in list order; `undefined` for
+ * guarded and `always` entries. The watch digest is not part of it: it is
+ * taken when the step is reached, after the steps before it have run. Identical commands are told apart by their
  * rank among the entries with that command, of any kind, and each fingerprint
  * carries how many such entries the list has. So a receipt stays with its own
  * entry when a neighbour changes kind, and a duplicate inserted before an
  * entry cannot take over its receipt: the count changed, so every entry with
  * that command runs again. Receipts never move between entries.
  */
-function plainFingerprints(steps: SetupStep[], cwd: string, mode: string): (string | undefined)[] {
+function plainIdentities(steps: SetupStep[], cwd: string, mode: string): (string | undefined)[] {
   const totals = new Map<string, number>();
   for (const step of steps) totals.set(step.run, (totals.get(step.run) ?? 0) + 1);
   const seen = new Map<string, number>();
@@ -88,7 +128,7 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
   const live = new Map<string, Set<string>>();
   for (const [name, steps, cwd] of owners) {
     if (!steps?.length) continue;
-    const current = plainFingerprints(steps, cwd, mode).filter((fingerprint): fingerprint is string => fingerprint !== undefined);
+    const current = plainIdentities(steps, cwd, mode).filter((identity): identity is string => identity !== undefined);
     live.set(`${mode}:${name}`, new Set(current));
   }
   let changed = false;
@@ -100,7 +140,7 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
       changed = true;
       continue;
     }
-    const kept = recorded.filter((fingerprint) => current.has(fingerprint));
+    const kept = recorded.filter((receipt) => current.has(receiptIdentity(receipt)));
     if (kept.length === recorded.length) continue;
     previous.steps[key] = kept;
     changed = true;
@@ -116,7 +156,7 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
  */
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
   if (config.production) {
-    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env)]);
+    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env), ...requiredEnvKeys(config)]);
     return { ...resolveEnvMap(config.env, assignments, overridden), ...baseEnv, ...process.env } as EnvMap;
   }
   return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
@@ -130,9 +170,12 @@ export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignme
  *   against the step's cwd); runs otherwise. The path is the receipt, so
  *   `force` does not override it.
  * - `always`: runs every time.
- * - plain: runs once per checkout; again when its command or cwd changed, or
- *   with `force`. Each success is written to `.portler/setup.json` right away,
- *   so a later failure does not make the earlier steps run again.
+ * - plain: runs once per checkout; again when its command or cwd changed, when
+ *   one of its `watch` files changed, or with `force`. Watch files are read when
+ *   the step is reached, so a change an earlier step made counts, and recorded
+ *   as they are after it succeeds, so a step that rewrites its own input does
+ *   not run again for that. Each success is written to `.portler/setup.json`
+ *   right away, so a later failure does not make the earlier steps run again.
  *
  * The first failure stops the run. Caller holds the lifecycle lock.
  */
@@ -166,14 +209,22 @@ export async function runSetupStep(
   // Receipts of steps that are no longer defined are dropped, and a forced
   // run drops every receipt BEFORE anything runs, so a failure in a forced
   // rerun cannot leave an old success masking it.
-  const fingerprints = plainFingerprints(steps, cwd, mode);
-  const recorded = force ? new Set<string>() : new Set(state.steps[key] ?? []);
-  const done = new Set(fingerprints.filter((fingerprint): fingerprint is string => fingerprint !== undefined && recorded.has(fingerprint)));
+  const identities = plainIdentities(steps, cwd, mode);
+  const live = new Set(identities.filter((identity): identity is string => identity !== undefined));
+  const recorded = force ? [] : (state.steps[key] ?? []).filter((receipt) => live.has(receiptIdentity(receipt)));
+  const done = new Map(recorded.map((receipt) => [receiptIdentity(receipt), receipt]));
   const persist = async (): Promise<void> => {
-    state.steps[key] = [...done];
+    state.steps[key] = [...done.values()];
     await writeJsonFile(filePath, state);
   };
   if (previous !== state || done.size !== (state.steps[key] ?? []).length) await persist();
+  const receiptFor = (step: SetupStep, identity: string): string => {
+    try {
+      return step.watch ? `${identity}:${watchDigest(step, cwd)}` : identity;
+    } catch (error) {
+      throw new Error(`setup ${name}: ${(error as Error).message}`);
+    }
+  };
 
   let ran = 0;
   for (const [index, step] of steps.entries()) {
@@ -181,8 +232,13 @@ export async function runSetupStep(
       process.stdout.write(`[portler] setup ${name}: skip ${step.run} (${step.ifMissing} exists)\n`);
       continue;
     }
-    const fingerprint = fingerprints[index];
-    if (fingerprint !== undefined && done.has(fingerprint)) continue;
+    const identity = identities[index];
+    if (identity !== undefined) {
+      if (done.get(identity) === receiptFor(step, identity)) continue;
+      // An outdated receipt goes before the command runs, so a failed rerun
+      // cannot leave it standing for inputs the step never finished with.
+      if (done.delete(identity)) await persist();
+    }
 
     process.stdout.write(`[portler] setup ${name}: ${step.run}\n`);
     ran += 1;
@@ -195,8 +251,8 @@ export async function runSetupStep(
       throw new Error(`setup ${name}: interrupted by ${interrupted} while running "${step.run}"; the step is not recorded as done`);
     }
     if (code !== 0) throw new Error(`setup ${name}: command "${step.run}" failed (exit code ${code})`);
-    if (fingerprint !== undefined) {
-      done.add(fingerprint);
+    if (identity !== undefined) {
+      done.set(identity, receiptFor(step, identity));
       await persist();
     }
   }

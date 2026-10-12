@@ -238,6 +238,12 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
 
   if (knownServices.length === 0) throw new Error(`${path.basename(filePath)} has no services`);
 
+  for (const name of config.prod?.services ?? []) {
+    if (!config.services[name]) {
+      throw new Error(`prod.services names unknown service "${name}"${didYouMean(name, knownServices)}. Available services: ${knownServices.join(', ')}.`);
+    }
+  }
+
   config.proxy = normalizeProxyConfig(root, config.services);
 
   config.volumes = collectDeclaredVolumes(config.services);

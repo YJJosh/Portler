@@ -1,5 +1,7 @@
-import { applyImageOverrides, configForRunMode, loadConfig } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
+import { applyProduction, productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
+import { assertProductionRequirements } from '../../env/index.ts';
 import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -21,8 +23,8 @@ import { startPhase } from './up.ts';
  * without the source toolchain restarts with `--no-setup`.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
-  const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const { mode, requested } = parseRunMode(args.positionals);
+  const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
 
   // `restart k8s` used to be accepted and then quietly do the wrong thing: it
   // applied the k8s config overlay (k8s.env, in-cluster DNS hostnames) but ran
@@ -107,18 +109,28 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
+    // The services startPhase will start once the stop is done: the requested roots and any
+    // dependency that is not running.
+    const runningNow = new Set(runningServices(before));
+    const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
+    const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
+      (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
+    );
+
     // Check --image before anything is stopped. applyImageOverrides rejects an unknown
     // service or one that does not run in Docker in this mode, and a target this restart
     // leaves running would keep its old image. Either failure after the stop would leave
     // the requested services down with nothing restarted.
     if (args.images) {
       applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
-      const runningNow = new Set(runningServices(before));
-      const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
-      const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
-        (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
-      );
       validateImageOverrideTargets(args.images, starting, runningNow);
+    }
+
+    // prod.require too: a deployment value that has gone missing is reported while the
+    // services are still up, not after they were stopped and could not start again.
+    if (args.prod) {
+      const runConfig = applyProduction(configForRunMode(rawConfig, mode), true);
+      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), { projectSetup: args.setup !== false });
     }
 
     // With no names, stop everything in pids.json (like `portler down`) so
