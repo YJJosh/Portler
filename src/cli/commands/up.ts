@@ -513,7 +513,11 @@ export async function startPhase(
         children.set(serviceName, child);
         if (options.detach) child.unref();
 
-        const info = await pidInfoFor(config, service, child, assignments[serviceName]);
+        const info = await pidInfoFor(config, service, child, assignments[serviceName], {
+          runMode: mode,
+          ...(options.images?.[serviceName] !== undefined ? { image: options.images[serviceName] } : {}),
+          ...(options.setup === false ? { setup: false } : {}),
+        });
         startedEntries.set(serviceName, info);
         await recordPidEntry(config, serviceName, info);
         if (readinessNames.has(serviceName)) {

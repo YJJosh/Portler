@@ -13,6 +13,7 @@ export {
 } from './ownership.ts';
 export type { ContainerLiveness, Inspection, OwnershipVerdict, RemovalOutcome } from './ownership.ts';
 export { isPidAlive, isPidRunning, pidInfoFor, readPids, readPidsOrNull, runningServices, updatePids, writePids } from './pids.ts';
+export type { LaunchPlan } from './pids.ts';
 export { spawnService } from './spawn.ts';
 export { signalDecision, stopServices } from './stop.ts';
 export type { StopOptions, StopResult } from './stop.ts';

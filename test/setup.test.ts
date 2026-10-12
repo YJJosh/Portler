@@ -414,7 +414,7 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
-  it('restart --prod keeps a production stack in production mode', async () => {
+  it('a plain restart keeps a production stack in production mode', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -435,13 +435,14 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       assert.deepEqual(await lines(), ['prod']);
       assert.equal((await readPids(dir))?.services.api?.prod, true, 'the run mode is recorded');
 
-      // A routine restart must not flip the stack to development.
-      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /started with --prod/);
-      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+      // A routine restart replays the recorded launch: the stack stays in production.
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.api?.prod, true, 'replayed and recorded again');
+      assert.equal((await readPids(dir))?.services.api?.runMode, 'local', 'the run mode is recorded');
 
       await commandRestart(parseArgs(['api', '--prod'], 'restart'));
-      assert.deepEqual(await lines(), ['prod', 'prod']);
-      assert.equal((await readPids(dir))?.services.api?.prod, true);
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
     } finally {
       await commandDown(parseArgs([], 'down'));
     }
@@ -482,6 +483,74 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('a restart that replays --prod checks prod.require first and leaves out what prod.services does', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    // db is the deployment's under --prod; its own requirement is never supplied here.
+    await config(`prod:
+  services: [api]
+services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      require: [DB_HOST_ONLY]
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+      require: [DEPLOY_SECRET]
+`);
+    const oldSecret = process.env.DEPLOY_SECRET;
+    const oldDbHost = process.env.DB_HOST_ONLY;
+    process.env.DEPLOY_SECRET = 's';
+    delete process.env.DB_HOST_ONLY;
+    try {
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      const pid = (await readPids(dir))?.services.api?.pid;
+      assert.ok(pid);
+      assert.deepEqual(await lines(), ['prod']);
+
+      // No --prod on the command line: the replayed one still checks prod.require
+      // while api is up.
+      delete process.env.DEPLOY_SECRET;
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service api requires DEPLOY_SECRET in production/);
+      assert.equal((await readPids(dir))?.services.api?.pid, pid, 'api was not stopped');
+      assert.doesNotThrow(() => process.kill(pid, 0), 'api is still running');
+      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+
+      // And it narrows to prod.services like a typed --prod: db is neither checked nor started.
+      process.env.DEPLOY_SECRET = 's';
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod']);
+      const after = await readPids(dir);
+      assert.equal(after?.services.api?.prod, true, 'replayed and recorded again');
+      assert.equal(after?.services.db, undefined, 'db stays the deployment\'s');
+
+      // Without names too: every service in the config would include db, which the
+      // replayed --prod leaves to the deployment.
+      await commandRestart(parseArgs([], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
+      assert.deepEqual(Object.keys((await readPids(dir))?.services ?? {}), ['api']);
+    } finally {
+      if (oldSecret === undefined) delete process.env.DEPLOY_SECRET;
+      else process.env.DEPLOY_SECRET = oldSecret;
+      if (oldDbHost === undefined) delete process.env.DB_HOST_ONLY;
+      else process.env.DB_HOST_ONLY = oldDbHost;
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
@@ -513,18 +582,24 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
 
       // restart skips the running db, so db would stay in development while api
       // came back in production: refused before anything is stopped.
-      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db, api were started in development mode/);
+      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db is running in development mode/);
       assert.deepEqual(await lines(), ['dev', 'dev'], 'nothing was restarted');
 
       // Same mode: api restarts and db is left running.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
+
+      // Restarting everything may switch the whole stack: nothing is left behind in the other mode.
+      await commandRestart(parseArgs(['--prod'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev', 'dev', 'prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.db?.prod, true);
+      assert.equal((await readPids(dir))?.services.api?.prod, true);
     } finally {
       await commandDown(parseArgs([], 'down'));
     }
   });
 
-  it('restart --no-setup restarts without running setup steps, which a server without the toolchain needs', async () => {
+  it('a restart replays --no-setup, which a server without the toolchain needs', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -542,17 +617,21 @@ services:
     try {
       await commandUp(parseArgs(['api', '-d', '--no-setup'], 'up'));
       assert.deepEqual(await lines(), ['dev']);
-      await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
+      assert.equal((await readPids(dir))?.services.api?.setup, false, '--no-setup is recorded');
+      // Without the flag, restart replays --no-setup.
+      await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev']);
-      assert.notEqual((await readPids(dir))?.services.api, undefined, 'api is running again');
-      // Without the flag, restart runs setup like up does: here that fails after api was stopped.
-      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /failed \(exit code 17\)/);
+      assert.equal((await readPids(dir))?.services.api?.setup, false, 'and records it again');
+      await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
+      // --setup overrides the recorded policy: the failing step runs, after api was stopped.
+      await assert.rejects(commandRestart(parseArgs(['api', '--setup'], 'restart')), /failed \(exit code 17\)/);
     } finally {
       await commandDown(parseArgs([], 'down')).catch(() => {});
     }
   });
 
-  it('a restart without names checks the mode of recorded services that left the config', async () => {
+  it('a restart without names replays the mode of recorded services that left the config', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -578,10 +657,12 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     port_env: PORT
     env: {MODE: dev}
 `);
-      // old is no longer in the config but is recorded in production mode, and this restart would stop it.
-      await assert.rejects(commandRestart(parseArgs([], 'restart')), /old was started with --prod/);
-      assert.deepEqual(await lines(), ['prod'], 'nothing was stopped or started');
-      assert.notEqual((await readPids(dir))?.services.old, undefined, 'old is still running');
+      // old is no longer in the config but is recorded in production mode: the stack was
+      // production, so the restart stops old and starts the current config in production.
+      await commandRestart(parseArgs([], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'dev'], 'new has no prod env, so its MODE stays dev');
+      assert.equal((await readPids(dir))?.services.old, undefined, 'old is gone');
+      assert.equal((await readPids(dir))?.services.new?.prod, true, 'new was started in production mode');
     } finally {
       await commandDown(parseArgs([], 'down'));
     }

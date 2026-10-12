@@ -18,16 +18,18 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   }
 
   const hasDocker = entries.some(([, info]) => info.dockerContainer);
-  const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : [])];
+  const hasImage = entries.some(([, info]) => info.image);
+  const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : [])];
   const rows = entries.map(([serviceName, info]) => {
     return [
       serviceName,
-      info.dockerContainer ? 'docker' : 'local',
+      `${info.dockerContainer ? 'docker' : 'local'}${info.prod ? ' (prod)' : ''}`,
       String(info.pid),
       isPidRunning(info.pid) ? 'running' : 'dead (stale)',
       info.port !== undefined ? String(info.port) : '-',
       info.url ?? '-',
       ...(hasDocker ? [info.dockerContainer ?? '-'] : []),
+      ...(hasImage ? [info.image ?? '-'] : []),
     ];
   });
 

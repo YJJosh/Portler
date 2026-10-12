@@ -1,12 +1,171 @@
-import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
 import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
+import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { startPhase } from './up.ts';
+
+export interface RestartLaunch {
+  prod: boolean;
+  mode: RunMode;
+  images: Record<string, string>;
+  setup: boolean | undefined;
+  /** What was taken from pids.json rather than from the command line, for the notice. */
+  replayed: string[];
+  /** Recorded pins that do not apply in the chosen run mode (the service is not a container there). */
+  droppedPins: string[];
+}
+
+export interface RestartPlanInput {
+  rawConfig: PortlerConfig;
+  /** Every recorded entry, live or stale. */
+  running: Readonly<Record<string, PidServiceInfo>>;
+  /** Names whose process is alive. */
+  runningNow: ReadonlySet<string>;
+  /** Recorded names this restart stops. */
+  stopping: readonly string[];
+  /** Recorded names this restart touches: the ones it stops and the dependencies it leaves running. */
+  involved: readonly string[];
+  /** Names startPhase will start again. */
+  starting: readonly string[];
+  requestedMode: RunMode;
+  modeExplicit: boolean;
+  prod: boolean | undefined;
+  setup: boolean | undefined;
+  images: Readonly<Record<string, string>> | undefined;
+}
+
+function list(names: readonly string[]): string {
+  return names.join(', ');
+}
+
+function verb(names: readonly string[], singular: string, plural: string): string {
+  return names.length === 1 ? singular : plural;
+}
+
+/**
+ * Decide how a restart launches the services it starts again. pids.json records
+ * how each service was started (--prod, the run mode, an --image pin,
+ * --no-setup); without flags the restart replays that, so a routine
+ * `portler restart api` on a production Docker stack comes back as a production
+ * container with the same pin and without setup steps. Flags override for the
+ * services being restarted. What the restart leaves running has to agree with
+ * the result: a dependency left in the other mode, or started in the other run
+ * mode, is refused here, before anything is stopped. Restarting everything may
+ * switch the whole stack, since nothing is left behind.
+ */
+export function planRestart(input: RestartPlanInput): RestartLaunch {
+  const { rawConfig, running, runningNow, involved, starting } = input;
+  const entry = (name: string): PidServiceInfo => {
+    const info = running[name];
+    if (info === undefined) throw new Error(`restart: no recorded entry for ${name}`);
+    return info;
+  };
+  const stoppingSet = new Set(input.stopping);
+  const restarted = involved.filter((name) => stoppingSet.has(name));
+  const leftAlone = involved.filter((name) => !stoppingSet.has(name) && runningNow.has(name));
+  const replayed: string[] = [];
+
+  // Entries without runMode predate the field. A container of a service whose
+  // docker: block only applies under `up docker` must have come from docker
+  // mode; anything else counts as local, the conservative reading.
+  const localConfig = configForRunMode(rawConfig, 'local');
+  const recordedMode = (name: string): RunMode => {
+    const info = entry(name);
+    if (info.runMode !== undefined) return info.runMode;
+    return info.dockerContainer !== undefined && localConfig.services[name]?.docker === undefined ? 'docker' : 'local';
+  };
+  const modeWord = (prod: boolean): string => (prod ? 'production' : 'development');
+
+  let prod: boolean;
+  if (input.prod === true) {
+    prod = true;
+  } else {
+    const modes = new Set(involved.map((name) => entry(name).prod === true));
+    if (modes.size > 1) {
+      const prodNames = involved.filter((name) => entry(name).prod === true);
+      const devNames = involved.filter((name) => entry(name).prod !== true);
+      throw new Error(
+        `${list(prodNames)} ${verb(prodNames, 'was', 'were')} started with --prod and ${list(devNames)} in development mode, ` +
+          'so there is no one mode to replay. Pass --prod to restart everything in production mode, or run "portler down" and then "portler up" to start over.',
+      );
+    }
+    prod = modes.has(true);
+    if (prod) replayed.push('--prod');
+  }
+
+  let mode: RunMode;
+  if (input.modeExplicit) {
+    mode = input.requestedMode;
+  } else {
+    const modes = new Set(involved.map(recordedMode));
+    if (modes.size > 1) {
+      const dockerNames = involved.filter((name) => recordedMode(name) === 'docker');
+      const localNames = involved.filter((name) => recordedMode(name) !== 'docker');
+      throw new Error(
+        `${list(dockerNames)} ${verb(dockerNames, 'was', 'were')} started in Docker mode and ${list(localNames)} as local ${verb(localNames, 'process', 'processes')}, ` +
+          'so there is no one run mode to replay. Pass "docker" to restart in Docker mode, or run "portler down" and then "portler up" to start over.',
+      );
+    }
+    mode = input.requestedMode;
+    for (const recorded of modes) mode = recorded;
+    if (mode === 'docker') replayed.push('docker');
+  }
+
+  // Nothing this restart leaves running may end up next to the restarted
+  // services in the other mode: its command, env and addresses would not match.
+  const restartedText = restarted.length > 0 ? list(restarted) : 'the restarted services';
+  const otherProd = leftAlone.filter((name) => (entry(name).prod === true) !== prod);
+  if (otherProd.length > 0) {
+    const flag = prod ? ' --prod' : '';
+    throw new Error(
+      `${list(otherProd)} ${verb(otherProd, 'is', 'are')} running in ${modeWord(!prod)} mode, and this restart would leave ${verb(otherProd, 'it', 'them')} there next to ` +
+        `${restartedText} in ${modeWord(prod)} mode. Restart ${verb(otherProd, 'it', 'them')} as well ("portler restart${flag}" with no names restarts everything), ` +
+        `or run "portler down" and then "portler up${flag}" to switch modes.`,
+    );
+  }
+  const otherMode = leftAlone.filter((name) => recordedMode(name) !== mode);
+  if (otherMode.length > 0) {
+    const dockerFlag = mode === 'docker' ? ' docker' : '';
+    const theirs = mode === 'docker' ? 'as a local process' : 'in Docker mode';
+    const ours = mode === 'docker' ? 'in Docker mode' : 'as local processes';
+    throw new Error(
+      `${list(otherMode)} ${verb(otherMode, 'is', 'are')} running ${theirs}, and this restart would run ${restartedText} ${ours} next to ${verb(otherMode, 'it', 'them')}; ` +
+        `Portler does not mix the two in one stack. Restart ${verb(otherMode, 'it', 'them')} as well ("portler restart${dockerFlag}" with no names restarts everything), ` +
+        `or run "portler down" and then "portler up${dockerFlag}".`,
+    );
+  }
+
+  // A recorded pin is replayed for a service this restart starts again, unless
+  // the command pins it anew, and only where the service is a container in the
+  // chosen run mode; elsewhere it would be a flag that changes nothing.
+  const modeConfig = configForRunMode(rawConfig, mode);
+  const images: Record<string, string> = {};
+  const droppedPins: string[] = [];
+  for (const name of starting) {
+    const pin = Object.hasOwn(running, name) ? entry(name).image : undefined;
+    if (pin === undefined || (input.images !== undefined && Object.hasOwn(input.images, name))) continue;
+    if (modeConfig.services[name]?.docker === undefined) {
+      droppedPins.push(name);
+      continue;
+    }
+    images[name] = pin;
+    replayed.push(`--image ${name}=${pin}`);
+  }
+  Object.assign(images, input.images ?? {});
+
+  let setup = input.setup;
+  if (setup === undefined && restarted.some((name) => entry(name).setup === false)) {
+    setup = false;
+    replayed.push('--no-setup');
+  }
+
+  return { prod, mode, images, setup, replayed, droppedPins };
+}
 
 /**
  * Restart services: stop the requested services (all by default), then start
@@ -14,17 +173,14 @@ import { startPhase } from './up.ts';
  * between, so allocateAssignments reclaims the previous registry
  * reservations and services keep their ports whenever they are still free.
  * Dependencies that are not running are started too; dependencies that are
- * still running are left untouched. `--prod` restarts with the production
- * overrides, exactly like `up --prod`. restart keeps the mode a service was
- * started in: a production service refuses a plain restart and a development
- * one refuses `restart --prod`, so a routine restart can neither flip a stack
- * to the other mode nor mix the two modes in one dependency graph. `--setup`
- * and `--no-setup` apply to the services it starts again, like `up`: a server
- * without the source toolchain restarts with `--no-setup`.
+ * still running are left untouched. Without flags the restart replays how the
+ * services were started (--prod, the run mode, --image pins, --no-setup), as
+ * recorded in pids.json; `--prod`, `docker`, `--image` and `--setup`/
+ * `--no-setup` override that for the services it starts again. See planRestart.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
-  const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
+  const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
 
   // `restart k8s` used to be accepted and then quietly do the wrong thing: it
   // applied the k8s config overlay (k8s.env, in-cluster DNS hostnames) but ran
@@ -38,99 +194,83 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     );
   }
 
-  const requestedRootNames = selectServiceNames(rawConfig, requested);
+  // Under --prod the services prod.services leaves out are the deployment's, as for
+  // `up --prod`: naming one is refused and none is stopped or started. A --prod that is
+  // replayed from pids.json narrows the same way once the plan has read it (below).
+  const explicitConfig = productionServices(loadedConfig, args.prod, requested);
+  selectServiceNames(explicitConfig, requested);
 
   // Stop and start under ONE lifecycle lock. Taking it twice (once per half)
   // would leave a window in which another `portler up` sees the services as
   // stopped and starts them itself, and this restart then starts them again.
   // restart always detaches, so the lock is released as soon as startup is done.
-  return withLifecycleLock(rawConfig.projectDir, async () => {
-    // restart keeps the mode a service was started in. A service started with
-    // --prod must not be relaunched in development mode by a routine restart
-    // (its dev command, setup and env would replace the production ones
-    // without a word), and a development service must not be relaunched with
-    // --prod either: the dependencies this restart leaves running would stay
-    // in development next to it. The check covers every service the restart
-    // touches, the roots it stops and the running dependencies it skips, and
-    // runs before anything is stopped. Switching modes is down and then up.
-    // Entries without `prod` predate the field and count as development.
-    const before = await readPids(rawConfig.projectDir);
+  return withLifecycleLock(loadedConfig.projectDir, async () => {
+    // What this restart touches: the recorded entries it stops and the running
+    // dependencies it leaves alone. pids.json says how each was started, and the
+    // launch is decided from that, and from the flags, before anything is stopped.
+    const before = await readPids(loadedConfig.projectDir);
     const running = before?.services ?? {};
-    // A restart without names stops every recorded service, including ones no longer in
-    // the config; they are part of the running stack and count for the check too. The
-    // proxy's entry is Portler's own and carries no mode.
-    const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
-    const involved = [...new Set([...expandAndOrderServices(rawConfig, requestedRootNames), ...stopping])].filter(
-      (name) => Object.hasOwn(running, name),
-    );
-    const prodStarted = involved.filter((name) => running[name]?.prod === true);
-    const devStarted = involved.filter((name) => running[name]?.prod !== true);
-    if (!args.prod && prodStarted.length > 0) {
-      throw new Error(
-        `${prodStarted.join(', ')} ${prodStarted.length === 1 ? 'was' : 'were'} started with --prod, and restart keeps the ` +
-          'mode a service was started in. Pass --prod to restart in production mode, or run "portler down" and then ' +
-          '"portler up" to switch modes.',
-      );
-    }
-    if (args.prod && devStarted.length > 0) {
-      throw new Error(
-        `${devStarted.join(', ')} ${devStarted.length === 1 ? 'was' : 'were'} started in development mode, and restart keeps ` +
-          'the mode a service was started in. Run "portler down" and then "portler up --prod" to switch modes.',
-      );
-    }
-
-    // The run mode is kept the same way. A service `up docker` started from its docker:
-    // block is recorded with its container name; a plain restart would relaunch it as a
-    // local process, and a local process must not come back as a container: command, env
-    // and the addresses other services use all differ between the two. Services with a
-    // top-level image/build run in Docker in both modes and never mismatch. Services no
-    // longer in the config are only stopped, so they do not take part.
-    const modeConfig = configForRunMode(rawConfig, mode);
-    const inConfig = involved.filter((name) => Object.hasOwn(modeConfig.services, name));
-    const containerToProcess = inConfig.filter(
-      (name) => running[name]?.dockerContainer !== undefined && modeConfig.services[name]?.docker === undefined,
-    );
-    const processToContainer = inConfig.filter(
-      (name) => running[name]?.dockerContainer === undefined && modeConfig.services[name]?.docker !== undefined,
-    );
-    const again = `${requested.length > 0 ? ` ${requested.join(' ')}` : ''}${args.prod ? ' --prod' : ''}`;
-    if (containerToProcess.length > 0) {
-      throw new Error(
-        `${containerToProcess.join(', ')} ${containerToProcess.length === 1 ? 'is' : 'are'} running in Docker, and restart keeps ` +
-          `the mode a service was started in. Run "portler restart docker${again}", or "portler down" and then ` +
-          '"portler up" to switch modes.',
-      );
-    }
-    if (processToContainer.length > 0) {
-      throw new Error(
-        `${processToContainer.join(', ')} ${processToContainer.length === 1 ? 'is' : 'are'} running as a local process, and ` +
-          `restart keeps the mode a service was started in. Run "portler restart${again}" without "docker", or ` +
-          '"portler down" and then "portler up docker" to switch modes.',
-      );
-    }
-
-    // The services startPhase will start once the stop is done: the requested roots and any
-    // dependency that is not running.
     const runningNow = new Set(runningServices(before));
-    const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
-    const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
-      (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
-    );
+    const planFor = (config: PortlerConfig) => {
+      const requestedRootNames = selectServiceNames(config, requested);
+      // A restart without names stops every recorded service, including ones no longer in
+      // the config; they are part of the running stack and count. The proxy's entry is
+      // Portler's own and carries no mode.
+      const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
+      const involved = [...new Set([...expandAndOrderServices(config, requestedRootNames), ...stopping])].filter(
+        (name) => Object.hasOwn(running, name),
+      );
+      const stoppingSet = new Set(stopping);
+      const starting = expandAndOrderServices(config, requestedRootNames).filter(
+        (serviceName) => !runningNow.has(serviceName) || stoppingSet.has(serviceName),
+      );
+      const launch = planRestart({
+        rawConfig: config,
+        running,
+        runningNow,
+        stopping,
+        involved,
+        starting,
+        requestedMode: mode,
+        modeExplicit: args.positionals.length > requested.length,
+        prod: args.prod,
+        setup: args.setup,
+        images: args.images,
+      });
+      return { requestedRootNames, starting, launch };
+    };
+    let rawConfig = explicitConfig;
+    let plan = planFor(rawConfig);
+    if (plan.launch.prod && !args.prod) {
+      // A replayed --prod narrows to prod.services exactly as a typed one does, and the
+      // plan is made again on what is left.
+      rawConfig = productionServices(loadedConfig, true, requested);
+      plan = planFor(rawConfig);
+    }
+    const { requestedRootNames, starting, launch } = plan;
+    if (launch.replayed.length > 0) {
+      process.stdout.write(`[portler] restart keeps the recorded launch: ${launch.replayed.join(', ')}\n`);
+    }
+    for (const name of launch.droppedPins) {
+      process.stdout.write(`[portler] ${name}: the recorded image pin does not apply in this run mode and is dropped\n`);
+    }
 
     // Check --image before anything is stopped. applyImageOverrides rejects an unknown
     // service or one that does not run in Docker in this mode, and a target this restart
     // leaves running would keep its old image. Either failure after the stop would leave
     // the requested services down with nothing restarted.
-    if (args.images) {
-      applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
-      validateImageOverrideTargets(args.images, starting, runningNow);
+    if (Object.keys(launch.images).length > 0) {
+      applyImageOverrides(configForRunMode(rawConfig, launch.mode), launch.images);
+      validateImageOverrideTargets(launch.images, starting, runningNow);
     }
 
     // prod.require too: a deployment value that has gone missing is reported while the
     // services are still up, not after they were stopped and could not start again.
-    if (args.prod) {
-      const runConfig = applyProduction(configForRunMode(rawConfig, mode), true);
-      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), { projectSetup: args.setup !== false });
+    if (launch.prod) {
+      const runConfig = applyProduction(configForRunMode(rawConfig, launch.mode), true);
+      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), {
+        projectSetup: launch.setup !== false,
+      });
     }
 
     // With no names, stop everything in pids.json (like `portler down`) so
@@ -156,7 +296,13 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, mode, requestedRootNames, { detach: true, skipRunning: true, prod: args.prod, setup: args.setup, images: args.images });
+    await startPhase(rawConfig, launch.mode, requestedRootNames, {
+      detach: true,
+      skipRunning: true,
+      prod: launch.prod,
+      ...(launch.setup !== undefined ? { setup: launch.setup } : {}),
+      images: launch.images,
+    });
 
     return 0;
   });

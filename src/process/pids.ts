@@ -29,6 +29,9 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     isOptionalString(value.dockerContainer) &&
     isOptionalString(value.dockerNetwork) &&
     isOptionalBoolean(value.prod) &&
+    (value.runMode === undefined || value.runMode === 'local' || value.runMode === 'docker' || value.runMode === 'k8s') &&
+    isOptionalString(value.image) &&
+    isOptionalBoolean(value.setup) &&
     isOptionalString(value.startToken) &&
     isOptionalStringArray(value.dependsOn) &&
     isString(value.startedAt)
@@ -196,11 +199,20 @@ export function runningServices(pids: PidsFile | null, serviceNames?: string[]):
  * process's start token so a later `down` can prove the pid still refers to
  * this process and not to something the OS recycled the number onto.
  */
+export interface LaunchPlan {
+  runMode: 'local' | 'docker' | 'k8s';
+  /** The `--image` pin for this service, if one was given. */
+  image?: string;
+  /** `false` when started with `--no-setup`. */
+  setup?: boolean;
+}
+
 export async function pidInfoFor(
   config: PortlerConfig,
   service: ServiceConfig,
   child: ChildProcess,
   assignment: ServiceAssignment | undefined,
+  launch?: LaunchPlan,
 ): Promise<PidServiceInfo> {
   if (child.pid === undefined) {
     throw new Error(`service "${service.name}" did not start with a process id`);
@@ -215,6 +227,9 @@ export async function pidInfoFor(
     dockerContainer: service.docker?.containerName,
     dockerNetwork: service.docker ? config.dockerNetwork : undefined,
     prod: config.production === true,
+    ...(launch ? { runMode: launch.runMode } : {}),
+    ...(launch?.image !== undefined ? { image: launch.image } : {}),
+    ...(launch?.setup === false ? { setup: false } : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     // Always recorded, empty included: an entry without the field was written
     // by an older Portler, which is a different fact from "no dependencies".

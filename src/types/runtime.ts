@@ -35,6 +35,16 @@ export interface PidServiceInfo {
    */
   prod?: boolean;
   /**
+   * The run mode of the command that started the service (`up docker` or
+   * plain `up`), replayed by `restart` unless it is given a mode. Entries
+   * without it predate the field; `restart` then infers it from the container.
+   */
+  runMode?: 'local' | 'docker' | 'k8s';
+  /** The `--image` pin the service was started with; `restart` replays it unless given a new one. */
+  image?: string;
+  /** `false` when the service was started with `--no-setup`; `restart` replays that unless given `--setup`. */
+  setup?: boolean;
+  /**
    * Opaque OS start-time token for `pid`, captured at spawn. A pid can be
    * recycled onto an unrelated process; re-reading this token before signalling
    * proves the pid still refers to the process Portler started. Absent in PID
