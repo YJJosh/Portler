@@ -123,6 +123,8 @@ This is how a server runs exactly what CI built, with no toolchain on the host: 
 
 A pin lasts for that invocation. `restart` applies only the `--image` flags it is given: a `restart` without them rebuilds the service from its Dockerfile, or pulls its `image:`, and replaces the pinned one, and `ps` does not show which image a service runs. On a deployed stack pass the same `--image` flags to `restart`, or run `down` and start again from the pinned references.
 
+`up --prod` still runs the `setup:` steps of `portler.yml` on the host, so a server with no toolchain adds `--no-setup`. That skips every setup step, including a migration declared there, so keep such steps in the image or run them separately.
+
 ## Requirements & failure behavior
 
 Docker services need the Docker daemon; when it is not running, commands that need it fail with a clear error. `portler down` stops and removes the project's containers.

@@ -113,7 +113,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // the requested services down with nothing restarted.
     if (args.images) {
       applyImageOverrides(configForRunMode(rawConfig, mode), args.images);
-      const runningNow = new Set(runningServices(await readPids(rawConfig.projectDir)));
+      const runningNow = new Set(runningServices(before));
       const stoppingNow = requested.length > 0 ? new Set(requestedRootNames) : runningNow;
       const starting = expandAndOrderServices(rawConfig, requestedRootNames).filter(
         (serviceName) => !runningNow.has(serviceName) || stoppingNow.has(serviceName),
