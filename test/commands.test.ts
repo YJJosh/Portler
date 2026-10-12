@@ -15,10 +15,9 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { writePids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
-import { readPids } from '../src/process/index.ts';
 
 const CONFIG = ['services:', '  api:', '    command: node -e ""', '    port: 3000'].join('\n');
 
