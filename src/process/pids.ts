@@ -1,5 +1,5 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
@@ -143,15 +143,20 @@ export function isPidRunning(pid: number): boolean {
 export function isPidAlive(pid: number): boolean {
   if (!isPidRunning(pid)) return false;
   if (process.platform === 'linux') {
+    let stat: string;
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      // `pid (comm) S ...`; comm may contain spaces or parentheses.
-      const state = stat.charAt(stat.lastIndexOf(')') + 2);
-      return state !== 'Z' && state !== 'X';
-    } catch {
-      // No /proc entry: gone since the existence check.
-      return false;
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    } catch (error) {
+      // Only a missing entry on a mounted /proc means the process is gone.
+      // Without a /proc mount (a restricted chroot or container), or on a
+      // permission error, the probe is unavailable and the existence check
+      // decides.
+      const code = (error as { code?: string }).code;
+      return !(code === 'ENOENT' && existsSync('/proc/self/stat'));
     }
+    // `pid (comm) S ...`; comm may contain spaces or parentheses.
+    const state = stat.charAt(stat.lastIndexOf(')') + 2);
+    return state !== 'Z' && state !== 'X';
   }
   if (process.platform === 'darwin') {
     const result = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });

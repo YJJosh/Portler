@@ -21,16 +21,25 @@ describe('isPidAlive', () => {
       "process.stdout.write(child.pid + '\\n', () => process.kill(process.pid, 'SIGSTOP'));",
     ].join('\n');
     const helper = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let zombie = 0;
     try {
       const [chunk] = await once(helper.stdout!, 'data');
-      const zombie = Number(String(chunk).trim());
+      zombie = Number(String(chunk).trim());
       assert.ok(zombie > 0, `helper reported pid ${String(chunk)}`);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(isPidRunning(zombie), true, 'kill(pid, 0) still sees the zombie');
       assert.equal(isPidAlive(zombie), false, 'the state probe does not');
     } finally {
-      helper.kill('SIGCONT');
-      helper.kill('SIGKILL');
+      // Resume the helper and let it reap its child and exit on its own. A
+      // kill right after the SIGCONT could land before it reaps, and the
+      // zombie would go to PID 1, which may never reap it.
+      if (helper.exitCode === null && helper.signalCode === null) {
+        helper.kill('SIGCONT');
+        const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
+        await once(helper, 'exit');
+        clearTimeout(fallback);
+      }
     }
+    assert.equal(isPidRunning(zombie), false, 'the helper reaped its child before exiting');
   });
 });
