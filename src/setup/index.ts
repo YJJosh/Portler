@@ -47,21 +47,22 @@ export function setupFingerprint(command: string, cwd: string, mode: string, occ
 /**
  * The content of a plain step's `watch` files, folded into its receipt: the
  * step runs again when any of them changes, appears or disappears. Paths are
- * relative to the step's cwd; a missing file is a state of its own.
+ * relative to the step's cwd; a missing file is a state of its own. Each file
+ * contributes one record, its name and the digest of its content (or null when
+ * it is absent), so no content can pass for absence or for another file's entry.
  */
 function watchDigest(step: SetupStep, cwd: string): string | undefined {
   if (!step.watch) return undefined;
-  const hash = createHash('sha256');
-  for (const file of step.watch) {
-    hash.update(file).update('\0');
+  const records = step.watch.map((file) => {
+    let content: string | null;
     try {
-      hash.update(readFileSync(path.resolve(cwd, file)));
+      content = createHash('sha256').update(readFileSync(path.resolve(cwd, file))).digest('hex');
     } catch {
-      hash.update('<missing>');
+      content = null;
     }
-    hash.update('\0');
-  }
-  return hash.digest('hex');
+    return [file, content];
+  });
+  return createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 
 /** A step that keeps a receipt: neither guarded by a path nor marked `always`. */

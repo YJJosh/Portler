@@ -646,6 +646,24 @@ services: {app: {command: echo}}
     assert.equal((await lines()).length, 4, 'and so is its return');
   });
 
+  it('a watched file that appears with any content runs the step, even content that looked like absence', async () => {
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock, other]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'both files absent: the step runs once');
+    await fs.writeFile(path.join(dir, 'lock'), '<missing>');
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install'], 'a file appearing runs the step, whatever it holds');
+    await fs.rm(path.join(dir, 'lock'));
+    await run();
+    assert.equal((await lines()).length, 3, 'and so does its disappearing');
+    await fs.writeFile(path.join(dir, 'lock'), '<missing>\0other\0');
+    await run();
+    assert.equal((await lines()).length, 4, 'content cannot pass for the next file\'s entry either');
+  });
+
   it('setup skips a missing use_env file in development, like --prod does', async () => {
     await config(`use_env: .env
 setup: echo ok >> steps
