@@ -590,6 +590,63 @@ services: {api: {command: echo}}
     }
   });
 
+  it('a watch step runs again when one of its files changes, appears or disappears', async () => {
+    await fs.writeFile(path.join(dir, 'lock'), 'v1');
+    const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    await run();
+    assert.deepEqual(await lines(), ['install'], 'unchanged file: the receipt holds');
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await run();
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install'], 'a changed file runs the step once');
+    await fs.rm(path.join(dir, 'lock'));
+    await run();
+    assert.deepEqual(await lines(), ['install', 'install', 'install'], 'a missing file is a state of its own');
+    await fs.writeFile(path.join(dir, 'lock'), 'v2');
+    await run();
+    assert.equal((await lines()).length, 4, 'and so is its return');
+  });
+
+  it('setup skips a missing use_env file in development, like --prod does', async () => {
+    await config(`use_env: .env
+setup: echo ok >> steps
+services: {app: {command: echo}}
+`);
+    assert.equal(await commandSetup(parseArgs([], 'setup')), 0);
+    assert.deepEqual(await lines(), ['ok']);
+  });
+
+  it('prod.require fails up and setup before anything runs, naming the missing keys', async () => {
+    await config(`prod: {require: [DEPLOY_SECRET]}
+setup: echo ran >> steps
+services:
+  app:
+    command: node -e "setInterval(() => {}, 1000)"
+    port: 3000
+    prod: {require: [APP_TOKEN]}
+`);
+    delete process.env.DEPLOY_SECRET;
+    delete process.env.APP_TOKEN;
+    try {
+      await assert.rejects(commandSetup(parseArgs(['--prod'], 'setup')), /the project requires DEPLOY_SECRET in production/);
+      await assert.rejects(commandUp(parseArgs(['-d', '--prod'], 'up')), /the project requires DEPLOY_SECRET in production/);
+      await assert.rejects(fs.access(path.join(dir, 'steps')));
+      assert.equal(await readPids(dir), null, 'nothing was started');
+      process.env.DEPLOY_SECRET = 's';
+      await assert.rejects(commandSetup(parseArgs(['--prod'], 'setup')), /service app requires APP_TOKEN in production/);
+      process.env.APP_TOKEN = 't';
+      assert.equal(await commandSetup(parseArgs(['--prod'], 'setup')), 0);
+      assert.deepEqual(await lines(), ['ran']);
+    } finally {
+      delete process.env.DEPLOY_SECRET;
+      delete process.env.APP_TOKEN;
+    }
+  });
+
   it('auto-setup waits for dependencies and respects force/skip across up cycles', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import http from 'node:http';

@@ -5,6 +5,12 @@ import type { EnvMap } from '../types/index.ts';
 export interface ShellOptions {
   /** Called with every signal that is forwarded to the command's process group. */
   onSignal?: (signal: NodeJS.Signals) => void;
+  /**
+   * After the shell exits, wait up to this many milliseconds for the rest of
+   * its process group to exit, then kill what is left. Without it the call
+   * returns as soon as the shell does, whatever it left running.
+   */
+  drainMs?: number;
 }
 
 /** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
@@ -24,12 +30,50 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   process.on('SIGINT', interrupt);
   process.on('SIGTERM', terminate);
   try {
-    return await new Promise<number>((resolve, reject) => {
+    const code = await new Promise<number>((resolve, reject) => {
       child.once('error', reject);
-      child.once('exit', (code, signal) => resolve(code ?? (128 + (signal ? constants.signals[signal] : 1))));
+      child.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
+    // Signals keep being forwarded while the rest of the group drains.
+    if (options.drainMs !== undefined && child.pid) await drainGroup(child.pid, options.drainMs);
+    return code;
   } finally {
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', terminate);
+  }
+}
+
+/** True while any process is left in the group (EPERM counts: it is there, just not ours). */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/**
+ * The shell is only the group's leader: a server it exec'd, or a process it
+ * backgrounded, is still in the group after the shell exits, draining
+ * connections on SIGTERM or not. Wait for the group to empty, with a deadline,
+ * so a platform that watches our pid does not cut the app off the moment the
+ * shell dies; what is still there at the deadline is killed.
+ */
+async function drainGroup(pgid: number, deadlineMs: number): Promise<void> {
+  if (!groupAlive(pgid)) return;
+  const deadline = Date.now() + deadlineMs;
+  process.stderr.write(`[portler] waiting up to ${deadlineMs} ms for the rest of the process group to exit\n`);
+  while (groupAlive(pgid)) {
+    if (Date.now() >= deadline) {
+      process.stderr.write('[portler] process group still running at the deadline; killing it\n');
+      try {
+        process.kill(-pgid, 'SIGKILL');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }

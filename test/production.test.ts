@@ -7,7 +7,9 @@ import { parseArgs } from '../src/cli/args.ts';
 import { main } from '../src/cli/index.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyDockerMode } from '../src/config/docker.ts';
-import { applyProduction } from '../src/config/production.ts';
+import { applyProduction, productionServices } from '../src/config/production.ts';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const dirs: string[] = [];
 async function config(text: string) {
@@ -149,7 +151,7 @@ services:
 
   for (const [text, error] of [
     ['setup: 42\nservices: {api: {command: echo}}', /setup must be a string or a list/],
-    ['services: {api: {setup: [echo, 42]}}', /services.api.setup\[1\] must be a command string or a \{run, if_missing, always\} step/],
+    ['services: {api: {setup: [echo, 42]}}', /services.api.setup\[1\] must be a command string or a \{run, if_missing, always, watch\} step/],
     ['setup: [{if_missing: node_modules}]\nservices: {api: {command: echo}}', /setup\[0\].run must be a shell command/],
     ['setup: ""\nservices: {api: {command: echo}}', /setup must be a shell command/],
     ['services: {api: {setup: ["   "]}}', /services.api.setup\[0\] must be a shell command/],
@@ -158,7 +160,7 @@ services:
     ['setup: [{run: x, if_missing: ""}]\nservices: {api: {command: echo}}', /setup\[0\].if_missing must be a path/],
     ['setup: [{run: x, if_missing: y, always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine if_missing with always/],
     ['setup: [{run: x, always: yes}]\nservices: {api: {command: echo}}', /setup\[0\].always must be true or false/],
-    ['setup: [{run: x, cwd: y}]\nservices: {api: {command: echo}}', /unknown key "setup\[0\].cwd"; allowed keys: run, if_missing, always/],
+    ['setup: [{run: x, cwd: y}]\nservices: {api: {command: echo}}', /unknown key "setup\[0\].cwd"; allowed keys: run, if_missing, always, watch/],
     ['services: {api: {prod: {setup: [{run: x, when: y}]}}}', /unknown key "services.api.prod.setup\[0\].when"/],
     ['prod: nope\nservices: {api: {command: echo}}', /prod must be an object/],
     ['prod: {command: echo}\nservices: {api: {command: echo}}', /unknown key "prod.command"/],
@@ -167,11 +169,90 @@ services:
     ['services: {api: {prod: {setup: false}}}', /services.api.prod.setup must be a string or a list/],
     ['prod: {env: 5}\nservices: {api: {command: echo}}', /prod.env must be a mapping/],
     ['setup: null\nservices: {api: {command: echo}}', /setup must be a string or a list/],
+    ['setup: [{run: x, watch: []}]\nservices: {api: {command: echo}}', /setup\[0\].watch must list at least one file/],
+    ['setup: [{run: x, watch: [""]}]\nservices: {api: {command: echo}}', /setup\[0\].watch must not contain an empty path/],
+    ['setup: [{run: x, watch: 4}]\nservices: {api: {command: echo}}', /setup\[0\].watch must be a file path or a list/],
+    ['setup: [{run: x, watch: [f], always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with always/],
+    ['setup: [{run: x, watch: [f], if_missing: p}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with if_missing/],
+    ['prod: {require: [bad-key]}\nservices: {api: {command: echo}}', /prod.require\[0\] must be an environment variable name/],
+    ['prod: {require: 7}\nservices: {api: {command: echo}}', /prod.require must be a variable name or a list/],
+    ['prod: {services: []}\nservices: {api: {command: echo}}', /prod.services must list at least one service/],
+    ['prod: {services: [ghost]}\nservices: {api: {command: echo}}', /prod.services names unknown service "ghost"/],
+    ['services: {api: {prod: {services: [api]}}}', /unknown key "services.api.prod.services"/],
   ] as const) {
     it(`rejects invalid config: ${text.split('\n')[0]}`, async () => {
       await assert.rejects(config(text), error);
     });
   }
+
+  it('normalizes require, services and watch', async () => {
+    const cfg = await config(`prod: {require: [SECRET, SECRET, DATABASE_URL], services: [api]}
+setup: [{run: pnpm install, watch: pnpm-lock.yaml}]
+services:
+  api: {command: echo, prod: {require: TOKEN}}
+  db: {image: postgres:16}
+`);
+    assert.deepEqual(cfg.prod?.require, ['SECRET', 'DATABASE_URL']);
+    assert.deepEqual(cfg.prod?.services, ['api']);
+    assert.deepEqual(cfg.services.api!.prod?.require, ['TOKEN']);
+    assert.deepEqual(cfg.setup, [{ run: 'pnpm install', watch: ['pnpm-lock.yaml'] }]);
+  });
+
+  it('runs only prod.services under --prod and drops dependencies on the rest', async () => {
+    const cfg = await config(`prod: {services: [api, web]}
+services:
+  postgres: {image: postgres:16, port: 5432}
+  api: {command: echo, port: 4000, depends_on: [postgres]}
+  web: {command: echo, port: 3000, depends_on: [api]}
+`);
+    assert.deepEqual(Object.keys(productionServices(cfg, false).services), ['postgres', 'api', 'web']);
+    const prod = productionServices(cfg, true);
+    assert.deepEqual(Object.keys(prod.services), ['api', 'web']);
+    assert.deepEqual(prod.services.api!.dependsOn, []);
+    assert.deepEqual(prod.services.web!.dependsOn.map((dependency) => dependency.service), ['api']);
+    assert.deepEqual(Object.keys(applyProduction(cfg, true).services), ['api', 'web'], 'applyProduction applies the list too');
+    assert.throws(() => productionServices(cfg, true, ['postgres']), /service "postgres" is not in prod.services/);
+    assert.doesNotThrow(() => productionServices(cfg, true, ['api']));
+  });
+
+  it('refuses a proxy route to a service that prod.services leaves out', async () => {
+    const cfg = await config(`prod: {services: [web]}
+proxy: {port: auto, routes: {/api: api, /: web}}
+services:
+  api: {command: echo, port: 4000}
+  web: {command: echo, port: 3000}
+`);
+    assert.throws(() => productionServices(cfg, true), /proxy route \/api targets service "api", which prod.services leaves out/);
+  });
+
+  it('env --prod prints the deployment view with secrets masked, and --reveal shows them', async () => {
+    const cfg = await config(`prod: {require: [API_TOKEN]}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {DATABASE_URL: "postgres://app:hunter2@localhost:5432/app", PLAIN: dev}
+    prod: {env: {PLAIN: ''}}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global'), API_TOKEN: 'abc', PLAIN: 'from-platform' };
+    const run = (...extra: string[]) =>
+      spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--prod', ...extra], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    const masked = run();
+    assert.equal(masked.status, 0, masked.stderr);
+    assert.match(masked.stdout, /^API_TOKEN="?\*\*\*"?$/m);
+    assert.match(masked.stdout, /^DATABASE_URL="?postgres:\/\/app:\*\*\*@localhost:5432\/app"?$/m);
+    assert.match(masked.stdout, /^PLAIN="?from-platform"?$/m, 'the platform wins over the blank prod.env entry');
+    assert.match(run('--reveal').stdout, /^API_TOKEN="?abc"?$/m);
+    delete env.API_TOKEN;
+    const missing = run();
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.match(missing.stderr, /service api requires API_TOKEN in production/);
+    assert.doesNotMatch(missing.stdout, /^API_TOKEN=/m);
+    const dev = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--reveal'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(dev.status, 1);
+    assert.match(dev.stderr, /--reveal applies to "env --prod"/);
+  });
 
   it('validates flag combinations and rejects unsupported k8s flags before loading config', async () => {
     assert.equal(parseArgs(['--no-setup'], 'up').setup, false);

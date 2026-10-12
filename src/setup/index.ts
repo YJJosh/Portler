@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
+import { requiredEnvKeys } from '../env/index.ts';
 import { resolveEnvMap } from '../env/resolve.ts';
 import { runShell } from '../process/shell.ts';
 import { portlerDir } from '../state/index.ts';
@@ -37,8 +39,29 @@ function isSetupState(value: unknown): value is SetupState {
  * removing a duplicate of a command invalidates every receipt of that
  * command, so an old receipt is never handed to a newly inserted entry.
  */
-export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1): string {
-  return createHash('sha256').update(JSON.stringify({ command, cwd, mode, occurrence, total })).digest('hex');
+export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1, watch?: string): string {
+  const identity = watch === undefined ? { command, cwd, mode, occurrence, total } : { command, cwd, mode, occurrence, total, watch };
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+}
+
+/**
+ * The content of a plain step's `watch` files, folded into its receipt: the
+ * step runs again when any of them changes, appears or disappears. Paths are
+ * relative to the step's cwd; a missing file is a state of its own.
+ */
+function watchDigest(step: SetupStep, cwd: string): string | undefined {
+  if (!step.watch) return undefined;
+  const hash = createHash('sha256');
+  for (const file of step.watch) {
+    hash.update(file).update('\0');
+    try {
+      hash.update(readFileSync(path.resolve(cwd, file)));
+    } catch {
+      hash.update('<missing>');
+    }
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 /** A step that keeps a receipt: neither guarded by a path nor marked `always`. */
@@ -62,7 +85,7 @@ function plainFingerprints(steps: SetupStep[], cwd: string, mode: string): (stri
   return steps.map((step) => {
     const occurrence = seen.get(step.run) ?? 0;
     seen.set(step.run, occurrence + 1);
-    return isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode, occurrence, totals.get(step.run)) : undefined;
+    return isPlainSetupStep(step) ? setupFingerprint(step.run, cwd, mode, occurrence, totals.get(step.run), watchDigest(step, cwd)) : undefined;
   });
 }
 
@@ -116,7 +139,7 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
  */
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
   if (config.production) {
-    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env)]);
+    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env), ...requiredEnvKeys(config)]);
     return { ...resolveEnvMap(config.env, assignments, overridden), ...baseEnv, ...process.env } as EnvMap;
   }
   return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
@@ -130,8 +153,8 @@ export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignme
  *   against the step's cwd); runs otherwise. The path is the receipt, so
  *   `force` does not override it.
  * - `always`: runs every time.
- * - plain: runs once per checkout; again when its command or cwd changed, or
- *   with `force`. Each success is written to `.portler/setup.json` right away,
+ * - plain: runs once per checkout; again when its command or cwd changed, when
+ *   one of its `watch` files changed, or with `force`. Each success is written to `.portler/setup.json` right away,
  *   so a later failure does not make the earlier steps run again.
  *
  * The first failure stops the run. Caller holds the lifecycle lock.

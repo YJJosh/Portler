@@ -3,17 +3,17 @@
 Print generated and resolved environment values.
 
 ```bash
-portler env [service] [--prod]
+portler env [service] [--prod] [--reveal]
 ```
 
-`--prod` prints production env overrides as `portler.yml` defines them. Port assignment stays development-style, and the deployment-side precedence of `up --prod` and `start`, where process env and `use_env` win over config, is not applied here.
+`--prod` prints what `up --prod` hands the service: the production overrides applied, the deployment's values with their precedence (process env, then the `use_env` file, then config), and only the keys the service receives. Secret-looking values (`SECRET`, `TOKEN`, `PASSWORD`, `KEY`, and the password in a URL) are masked unless `--reveal` is given, and missing `prod.require` keys are reported on stderr. Port assignment is the same as `up`; `start` uses the platform's `PORT` instead.
 
 ## Behavior
 
 - Without a service: prints the generated [`PORTLER_*` variables](/reference/environment) plus the resolved top-level `env:`.
 - With a service: additionally layers the service's own `env:` and `port_env` values — everything the service would receive on top of your shell environment and `.env` files.
 
-Useful for debugging [references](/guide/services#service-references) and for sourcing values into other tooling.
+Useful for debugging [references](/guide/services#service-references); in development the output can be sourced into other tooling.
 
 ## Example
 

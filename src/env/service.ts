@@ -75,7 +75,10 @@ export function buildServiceEnv(
   // In production a key the deployment supplies (process env or use_env file) is left out
   // of resolution: its config value never applies, and a reference that only resolves in
   // development (a service with no assignment here) must not block the deployment's value.
-  const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]) : undefined;
+  // A required key is the deployment's to supply: its config value is not used (nor
+  // resolved), so the check below names it instead of a dangling reference failing first.
+  const required = config.production ? requiredEnvKeys(config, service) : [];
+  const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv), ...required]) : undefined;
   // A root key the service's own env replaces (prod.env is folded in by then) is never used
   // for this service, in either mode, so it is not resolved either: a reference only another
   // service can resolve must not block the value this service actually gets.
@@ -87,8 +90,13 @@ export function buildServiceEnv(
     : { ...processEnv, ...baseEnv, ...rootEnv, ...serviceEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name };
 
   // Raw config keys, so an overridden key still reaches containers with the deployment's value.
+  // In development the env files' keys are forwarded too. In production a container gets only
+  // what portler.yml names for it: root and service env (prod.env folded in), prod.require,
+  // generated values and port_env. A value that is only in the use_env file or the shell is
+  // not forwarded, so one env file can hold every secret of a deployment without each
+  // container seeing all of them.
   const explicitKeys = new Set<string>([
-    ...Object.keys(baseEnv),
+    ...(config.production ? required : Object.keys(baseEnv)),
     ...Object.keys(config.env),
     ...Object.keys(generatedEnv),
     ...Object.keys(service.env),
@@ -137,5 +145,71 @@ export function buildPrintableEnv(
 
   injectPortEnv(output, service, assignments[service.name]);
 
+  return output;
+}
+
+/** The `prod.require` keys that apply to a service (top-level plus its own), or to the project. */
+export function requiredEnvKeys(config: PortlerConfig, service?: ServiceConfig): string[] {
+  return [...new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])])];
+}
+
+/**
+ * Under --prod every key in `required` must be present and non-empty in `env`.
+ * A required key is the deployment's to supply: its config value, if any, is
+ * not used, so a blank `prod.env` entry and a `require` entry mean the same.
+ */
+export function assertRequiredEnv(owner: string, required: string[], env: EnvMap): void {
+  const missing = required.filter((key) => !Object.hasOwn(env, key) || env[key] === '');
+  if (missing.length === 0) return;
+  const one = missing.length === 1;
+  throw new Error(
+    `${owner} requires ${missing.join(', ')} in production (prod.require), and ${one ? 'it is' : 'they are'} missing or empty. ` +
+      `Supply ${one ? 'it' : 'them'} through the platform environment or a use_env file.`,
+  );
+}
+
+const SECRET_KEY = /(SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|API_KEY|ACCESS_KEY|CREDENTIAL)/i;
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:)[^\s/@]+@/gi;
+
+/** Hide secret-looking values, and the password of URL credentials, for printing. */
+export function maskSecrets(env: EnvMap, reveal = false): EnvMap {
+  if (reveal) return env;
+  const output: EnvMap = {};
+  for (const [key, value] of Object.entries(env)) {
+    output[key] = SECRET_KEY.test(key) && value !== '' ? '***' : value.replace(URL_PASSWORD, '$1***@');
+  }
+  return output;
+}
+
+/**
+ * What `up --prod` hands a service: the keys it forwards, with the deployment's
+ * values. Without a service, the project view: root env and generated values
+ * as top-level setup sees them. Portler's own internal keys are left out.
+ */
+export function buildEffectiveEnv(
+  config: PortlerConfig,
+  service: ServiceConfig | null,
+  baseEnv: EnvMap,
+  generatedEnv: EnvMap,
+  assignments: Assignments,
+): EnvMap {
+  const output: EnvMap = {};
+  if (service) {
+    const { env, explicitKeys } = buildServiceEnv(config, service, baseEnv, generatedEnv, assignments);
+    for (const key of explicitKeys) {
+      if (env[key] !== undefined && !PORTLER_INTERNAL_ENV_KEYS.has(key)) output[key] = env[key];
+    }
+    return output;
+  }
+  const processEnv = processEnvAsMap();
+  const required = config.production ? requiredEnvKeys(config) : [];
+  const overridden = config.production ? new Set([...Object.keys(baseEnv), ...Object.keys(processEnv), ...required]) : undefined;
+  const rootEnv = resolveEnvMap(config.env, assignments, overridden);
+  const merged: EnvMap = config.production
+    ? { ...rootEnv, ...baseEnv, ...processEnv, ...generatedEnv }
+    : { ...processEnv, ...baseEnv, ...rootEnv, ...generatedEnv };
+  for (const key of [...(config.production ? required : Object.keys(baseEnv)), ...Object.keys(config.env), ...Object.keys(generatedEnv)]) {
+    if (merged[key] !== undefined) output[key] = merged[key];
+  }
   return output;
 }

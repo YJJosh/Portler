@@ -3,12 +3,14 @@
 Run one local service in the foreground for a deployment platform.
 
 ```bash
-portler start [service] [--prod]
+portler start [service] [--prod] [--drain-ms <ms>]
 ```
 
 - Uses the service's `command` (or `prod.command` with `--prod`) in its `cwd`.
 - Inherits stdin, stdout and stderr; forwards SIGINT/SIGTERM to the shell and its process group. Returns the child's exit code (or `128 + signal number` if the shell is terminated by a signal).
-- The command must stay in the **foreground**. A command that backgrounds (`node server.js &`) or daemonizes exits immediately, so `start` returns success while the real process is no longer supervised, which looks like a crash loop on most platforms. Like `setup`, the command has no controlling terminal (`/dev/tty`).
+- Returns only when the whole process group has exited. After the shell exits, `start` waits up to `--drain-ms` milliseconds (default 10000) for whatever the shell left running (a server it `exec`'d that is draining on SIGTERM, a process it backgrounded), then kills what is still there and returns the shell's exit code. A platform that watches Portler's pid therefore sees the app finish, not the shell.
+- Keep the server in the **foreground** (`exec node server.js`). A command that backgrounds or daemonizes is not supervised: `start` only waits for the group to empty, then returns. Like `setup`, the command has no controlling terminal (`/dev/tty`).
+- With `--prod`, `prod.require` keys must be present and non-empty in the final environment; `start` fails before running the command otherwise. A service left out by `prod.services` cannot be started.
 - Writes **no state**, starts no dependencies or proxy, performs no setup, and uses no supervisor. Run `portler setup --prod` separately as the build step.
 - If the service is omitted, selects the only local service with a command. Otherwise the error lists candidates. Docker services are rejected.
 

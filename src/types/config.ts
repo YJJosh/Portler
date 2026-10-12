@@ -67,12 +67,18 @@ export interface SetupStep {
   run: string;
   ifMissing?: string;
   always?: boolean;
+  /** Plain steps only: files whose content is part of the receipt, relative to the step's cwd. */
+  watch?: string[];
 }
 
 export interface ProductionConfig {
   setup?: SetupStep[];
   command?: string;
   env: UnknownMap;
+  /** Keys the deployment must supply under --prod; checked before anything runs, forwarded to containers. */
+  require: string[];
+  /** Top-level only: the services that run under --prod. The rest are external to the deployment. */
+  services?: string[];
 }
 
 export interface ServiceConfig {

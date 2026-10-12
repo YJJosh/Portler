@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvMap, resolveEnvValue } from '../src/env/resolve.ts';
-import { buildPrintableEnv, buildServiceEnv } from '../src/env/service.ts';
+import { assertRequiredEnv, buildEffectiveEnv, buildPrintableEnv, buildServiceEnv, maskSecrets, requiredEnvKeys } from '../src/env/service.ts';
 import type { Assignments, PortlerConfig, ServiceConfig } from '../src/types/index.ts';
 
 function makeAssignments(): Assignments {
@@ -240,7 +240,9 @@ describe('buildServiceEnv', () => {
       assert.equal(prod.env.PORTLER_API_PORT, '52001', 'generated values stay Portler\'s');
       assert.equal(prod.env.PORT, '52001', 'port_env stays Portler\'s');
       assert.equal(prod.env.PORTLER_SERVICE_NAME, 'api');
-      assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].sort(), 'containers get the same keys');
+      // Containers get the named keys in both modes; the env files' keys only in development.
+      assert.ok(dev.explicitKeys.has('FROM_FILE'), 'development forwards the env files');
+      assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].filter((key) => key !== 'FROM_FILE').sort(), 'production forwards only named keys');
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
@@ -288,6 +290,59 @@ describe('buildServiceEnv', () => {
     assert.equal(buildServiceEnv(prod, service, {}, generated, assignments).env.URL, 'https://api.example');
     assert.equal(buildPrintableEnv(config, service, generated, assignments).URL, 'https://api.example', 'portler env agrees with up');
     assert.throws(() => buildServiceEnv(config, makeService({}), {}, generated, assignments), /cannot resolve|no assigned port/);
+  });
+
+  it('forwards only named keys to containers in production, including prod.require', () => {
+    const service = makeService({ env: { NAMED: '' }, prod: { env: {}, require: ['TOKEN'] } });
+    const base = { NAMED: 'from-file', TOKEN: 'from-file', FILE_ONLY: 'from-file' };
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const dev = buildServiceEnv(makeConfig({ api: service }), service, base, generated, assignments);
+    assert.ok(dev.explicitKeys.has('FILE_ONLY'), 'development forwards the env files');
+    const prod = buildServiceEnv({ ...makeConfig({ api: service }), production: true }, service, base, generated, assignments);
+    assert.equal(prod.env.NAMED, 'from-file');
+    assert.equal(prod.env.TOKEN, 'from-file');
+    assert.ok(prod.explicitKeys.has('NAMED') && prod.explicitKeys.has('TOKEN'));
+    assert.ok(!prod.explicitKeys.has('FILE_ONLY'), 'a key only the file has is not forwarded in production');
+    assert.equal(prod.env.FILE_ONLY, 'from-file', 'it is still in the local process env');
+  });
+
+  it('takes a required key from the deployment only, and reports the missing ones', () => {
+    // A required key with a config value: the value is not used (nor resolved), the
+    // deployment supplies it, and the check names what is missing.
+    const service = makeService({ env: { DB: 'missing.url' }, prod: { env: {}, require: ['DB', 'DEPLOY_SECRET'] } });
+    const config = { ...makeConfig({ api: service }), production: true };
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    assert.deepEqual(requiredEnvKeys(config, service), ['DB', 'DEPLOY_SECRET']);
+    const without = buildServiceEnv(config, service, {}, generated, assignments);
+    assert.equal(without.env.DB, undefined, 'the config value of a required key is not used');
+    assert.throws(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), without.env), /service api requires DB, DEPLOY_SECRET in production/);
+    const withFile = buildServiceEnv(config, service, { DB: 'postgres://x', DEPLOY_SECRET: '' }, generated, assignments);
+    assert.throws(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), withFile.env), /requires DEPLOY_SECRET in production/);
+    assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { ...withFile.env, DEPLOY_SECRET: 's' }));
+  });
+
+  it('prints the deployment view with secrets masked', () => {
+    const service = makeService({ env: { DATABASE_URL: 'postgres://app:hunter2@db:5432/app', API_TOKEN: 'abc', PLAIN: 'x' } });
+    const config = { ...makeConfig({ api: service }, { ROOT_VALUE: 'r' }), production: true };
+    const assignments = makeAssignments();
+    const generated = buildGeneratedEnv(assignments);
+    const effective = buildEffectiveEnv(config, service, { FILE_ONLY: 'f', PLAIN: 'from-file' }, generated, assignments);
+    assert.equal(effective.PLAIN, 'from-file', 'the deployment value');
+    assert.equal(effective.ROOT_VALUE, 'r');
+    assert.equal(effective.FILE_ONLY, undefined, 'only forwarded keys are shown');
+    assert.equal(effective.PORTLER_SERVICE_NAME, 'api');
+    assert.equal(effective.pnpm_config_verify_deps_before_run, undefined, 'Portler-internal keys are not shown');
+    const masked = maskSecrets(effective);
+    assert.equal(masked.API_TOKEN, '***');
+    assert.equal(masked.DATABASE_URL, 'postgres://app:***@db:5432/app');
+    assert.equal(masked.PLAIN, 'from-file');
+    assert.equal(maskSecrets(effective, true).API_TOKEN, 'abc');
+    const root = buildEffectiveEnv(config, null, { FILE_ONLY: 'f' }, generated, assignments);
+    assert.equal(root.ROOT_VALUE, 'r');
+    assert.equal(root.FILE_ONLY, undefined);
+    assert.ok(root.PORTLER_API_PORT);
   });
 
   it('gives Docker services their declared internal port in port_env', () => {

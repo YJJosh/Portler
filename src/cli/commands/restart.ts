@@ -1,4 +1,5 @@
 import { applyImageOverrides, configForRunMode, loadConfig } from '../../config/index.ts';
+import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
@@ -21,8 +22,8 @@ import { startPhase } from './up.ts';
  * without the source toolchain restarts with `--no-setup`.
  */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
-  const rawConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
   const { mode, requested } = parseRunMode(args.positionals);
+  const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
 
   // `restart k8s` used to be accepted and then quietly do the wrong thing: it
   // applied the k8s config overlay (k8s.env, in-cluster DNS hostnames) but ran

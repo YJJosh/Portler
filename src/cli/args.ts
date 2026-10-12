@@ -5,6 +5,10 @@ export interface ParsedArgs {
   prod?: boolean;
   setup?: boolean;
   detach: boolean;
+  /** `env --prod`: print secret-looking values instead of masking them. */
+  reveal: boolean;
+  /** `start`: how long to wait for the rest of the process group after the shell exits. */
+  drainMs?: number;
   follow: boolean;
   help: boolean;
   global: boolean;
@@ -23,6 +27,8 @@ const KNOWN_FLAGS = [
   '--prod',
   '--setup',
   '--no-setup',
+  '--reveal',
+  '--drain-ms',
   '--help',
   '--detach',
   '--global',
@@ -69,6 +75,7 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
   const positionals: string[] = [];
   const parsed: ParsedArgs = {
     detach: false,
+    reveal: false,
     follow: false,
     help: false,
     global: false,
@@ -110,6 +117,19 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
 
     if (arg === '--global') {
       parsed.global = true;
+      continue;
+    }
+
+    if (arg === '--reveal') {
+      parsed.reveal = true;
+      continue;
+    }
+
+    if (arg === '--drain-ms' || arg.startsWith('--drain-ms=')) {
+      const value = arg === '--drain-ms' ? args[index + 1] : arg.slice('--drain-ms='.length);
+      if (value === undefined || !/^\d+$/.test(value)) throw new Error('--drain-ms requires a number of milliseconds');
+      parsed.drainMs = Number(value);
+      if (arg === '--drain-ms') index += 1;
       continue;
     }
 
