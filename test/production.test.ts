@@ -294,6 +294,36 @@ services:
     assert.equal(await fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'ran\n');
   });
 
+  it('setup --prod does not require of the project a root blank that the service overrides', async () => {
+    const cfg = await config('services: {api: {command: echo, port: 4000}}');
+    const write = (top: string) => fs.writeFile(path.join(cfg.projectDir, 'portler.yml'), `${top}
+services:
+  api:
+    command: echo
+    port: 4000
+    env: {PUBLIC_URL: "https://api.example.com"}
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.PUBLIC_URL;
+    const run = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'setup', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    // api sets PUBLIC_URL itself and there are no top-level steps: nothing needs the deployment's value.
+    await write("prod: {env: {PUBLIC_URL: ''}}");
+    const overridden = run();
+    assert.equal(overridden.status, 0, overridden.stderr);
+    // Top-level steps see the root env, so with them the blank is the project's requirement.
+    await write("prod: {env: {PUBLIC_URL: ''}, setup: ['echo ran >> steps']}");
+    const withSteps = run();
+    assert.equal(withSteps.status, 1, withSteps.stderr);
+    assert.match(withSteps.stderr, /the project requires PUBLIC_URL in production/);
+    await assert.rejects(fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'nothing ran');
+    // An explicit top-level require holds always.
+    await write('prod: {require: [PUBLIC_URL]}');
+    const explicit = run();
+    assert.equal(explicit.status, 1, explicit.stderr);
+    assert.match(explicit.stderr, /the project requires PUBLIC_URL in production/);
+  });
+
   it('does not hand --prod the cached assignment of a service prod.services leaves out', async () => {
     const cfg = await config(`prod: {services: [api]}
 services:

@@ -130,7 +130,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // services are still up, not after they were stopped and could not start again.
     if (args.prod) {
       const runConfig = applyProduction(configForRunMode(rawConfig, mode), true);
-      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }));
+      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), { projectSetup: args.setup !== false });
     }
 
     // With no names, stop everything in pids.json (like `portler down`) so

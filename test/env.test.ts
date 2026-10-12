@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvMap, resolveEnvValue } from '../src/env/resolve.ts';
-import { assertRequiredEnv, buildEffectiveEnv, buildPrintableEnv, buildServiceEnv, maskSecrets, requiredEnvKeys } from '../src/env/service.ts';
+import { assertProductionRequirements, assertRequiredEnv, buildEffectiveEnv, buildPrintableEnv, buildServiceEnv, maskSecrets, requiredEnvKeys } from '../src/env/service.ts';
 import type { Assignments, PortlerConfig, ServiceConfig } from '../src/types/index.ts';
 
 function makeAssignments(): Assignments {
@@ -339,6 +339,22 @@ describe('buildServiceEnv', () => {
     assert.deepEqual(requiredEnvKeys(root), ['PUBLIC_URL']);
     assert.deepEqual(requiredEnvKeys(root, plain), ['PUBLIC_URL']);
     assert.deepEqual(requiredEnvKeys(root, own), []);
+  });
+
+  it('requires a blank top-level prod.env entry of the project only while its top-level setup runs', () => {
+    const own = makeService({ name: 'own', env: { PUBLIC_URL: 'https://own.example' } });
+    const plain = makeService({ name: 'plain' });
+    const blank = { ...makeConfig({ own, plain }), production: true, prod: { env: { PUBLIC_URL: '' }, require: [] } };
+    // own sets the key itself, and a project without top-level setup steps has nothing that reads it.
+    assert.doesNotThrow(() => assertProductionRequirements(blank, ['own'], {}));
+    assert.throws(() => assertProductionRequirements(blank, ['own', 'plain'], {}), /service plain requires PUBLIC_URL/);
+    // Top-level setup steps see the root env, so they need it while they run.
+    const withSetup = { ...blank, setup: [{ run: 'echo' }] };
+    assert.throws(() => assertProductionRequirements(withSetup, ['own'], {}), /the project requires PUBLIC_URL/);
+    assert.doesNotThrow(() => assertProductionRequirements(withSetup, ['own'], {}, { projectSetup: false }));
+    // An explicit top-level prod.require holds always.
+    const explicit = { ...blank, prod: { env: {}, require: ['PUBLIC_URL'] } };
+    assert.throws(() => assertProductionRequirements(explicit, ['own'], {}, { projectSetup: false }), /the project requires PUBLIC_URL/);
   });
 
   it('masks generic key-like names too, not only the usual suspects', () => {

@@ -196,10 +196,22 @@ export function deploymentEnv(baseEnv: EnvMap, platformEnv: EnvMap = processEnvA
   return { ...baseEnv, ...platformEnv };
 }
 
-/** prod.require for the project and for each named service, against what the deployment supplies. */
-export function assertProductionRequirements(config: PortlerConfig, serviceNames: Iterable<string>, baseEnv: EnvMap): void {
+/**
+ * prod.require for the project and for each named service, against what the deployment supplies.
+ * The project's explicit `prod.require` holds always. A root `prod.env` entry left blank belongs to
+ * the env each service and the top-level setup steps see, so it is required by each named service
+ * that does not set the key itself, and by the project only when its top-level setup steps run:
+ * a service that overrides it must not be blocked by a project check it would pass on its own.
+ */
+export function assertProductionRequirements(
+  config: PortlerConfig,
+  serviceNames: Iterable<string>,
+  baseEnv: EnvMap,
+  options: { projectSetup?: boolean } = {},
+): void {
   const supplied = deploymentEnv(baseEnv);
-  assertRequiredEnv('the project', requiredEnvKeys(config), supplied);
+  const projectSetup = options.projectSetup !== false && (config.setup?.length ?? 0) > 0;
+  assertRequiredEnv('the project', projectSetup ? requiredEnvKeys(config) : [...(config.prod?.require ?? [])], supplied);
   for (const name of serviceNames) {
     assertRequiredEnv(`service ${name}`, requiredEnvKeys(config, config.services[name]!), supplied);
   }

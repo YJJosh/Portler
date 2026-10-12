@@ -247,6 +247,28 @@ services:
     assert.equal(ok.status, 0, ok.stderr);
   });
 
+  it('does not let a PORT in the use_env file meet require: [PORT], since only the platform picks the port', async () => {
+    const cfg = await config(`use_env: .env.production
+services:
+  api:
+    command: node -e "require('fs').writeFileSync('port', process.env.PORT)"
+    port: 4000
+    port_env: PORT
+    prod: {require: [PORT]}
+`);
+    await fs.writeFile(path.join(cfg.projectDir, '.env.production'), 'PORT=8123\n');
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+    delete env.PORT;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1, 'the file PORT would be overwritten by the declared port 4000');
+    assert.match(refused.stderr, /service api requires PORT in production \(prod\.require\), and the platform sets no PORT/);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'port')), 'the command did not run');
+    const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, PORT: '4567' }, encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
+  });
+
   it('returns the shell exit code and runs in the requested cwd', async () => {
     const cfg = await config('services: {api: {command: echo}}');
     assert.equal(await runShell('pwd > cwd; exit 17', cfg.projectDir, {}), 17);

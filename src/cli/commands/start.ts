@@ -89,6 +89,30 @@ export async function buildStartEnv(
   return env;
 }
 
+/**
+ * prod.require for `start`. The port_env names are start's own: they always carry the port it
+ * listens on, and only the platform's PORT chooses that port. So a required port_env name is met
+ * when the platform sets PORT, and not by the same name in the use_env file or the shell, which
+ * start would overwrite; every other key is met by what the deployment supplies.
+ */
+export function assertStartRequirements(
+  config: PortlerConfig,
+  service: ServiceConfig,
+  baseEnv: EnvMap,
+  platformEnv: NodeJS.ProcessEnv = process.env,
+): void {
+  const required = requiredEnvKeys(config, service);
+  const portKeys = required.filter((key) => service.portEnv.includes(key));
+  if (portKeys.length > 0 && (platformEnv.PORT === undefined || platformEnv.PORT === '')) {
+    throw new Error(
+      `service ${service.name} requires ${portKeys.join(', ')} in production (prod.require), and the platform sets no PORT. ` +
+        `start fills its port_env names (${service.portEnv.join(', ')}) with the port it listens on, and only the platform's PORT chooses that port; ` +
+        'a use_env file does not.',
+    );
+  }
+  assertRequiredEnv(`service ${service.name}`, required.filter((key) => !service.portEnv.includes(key)), deploymentEnv(baseEnv));
+}
+
 /** How long `start` waits for the rest of the process group after the shell exits. */
 export const DEFAULT_DRAIN_MS = 10_000;
 
@@ -99,7 +123,7 @@ export async function commandStart(args: ParsedArgs): Promise<number> {
   // Checked against what the platform and the use_env file supply, before buildStartEnv picks
   // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
   // not pass on a free port the platform does not route to.
-  if (args.prod) assertRequiredEnv(`service ${service.name}`, requiredEnvKeys(config, service), deploymentEnv(baseEnv));
+  if (args.prod) assertStartRequirements(config, service, baseEnv);
   const env = await buildStartEnv(config, service, baseEnv);
   return runShell(service.command!, resolveServiceCwd(config, service), env, { drainMs: args.drainMs ?? DEFAULT_DRAIN_MS });
 }

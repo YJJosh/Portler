@@ -439,7 +439,7 @@ export async function startPhase(
   try {
     // prod.require: a deployment that forgot a value fails here, before setup runs or
     // anything is spawned, naming the key instead of failing somewhere inside the app.
-    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv);
+    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
 
     // Resolve every selected service's env (and healthcheck references) up
     // front, so config mistakes like `backend.urll` fail before anything is
