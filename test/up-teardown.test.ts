@@ -353,6 +353,31 @@ describe('foreground teardown ownership', () => {
     });
   }
 
+  it('prunes a replacement entry whose process already exited and releases its reservation', { timeout: 10_000 }, async () => {
+    // This run spawned api, then a restart replaced it while the teardown waited
+    // for the lifecycle lock, and the replacement exited before the teardown ran
+    // (a service with no readiness check that crashes at once). The entry has a
+    // different identity, so it is not this run's to signal, but nothing owns a
+    // dead entry: it is pruned, and its port goes back instead of lingering.
+    const stack = await startForeground();
+    const original = (await readPids(projectDir))!;
+    assert.ok(original.services.api!.startToken);
+    await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
+      pids.services.api!.pid = 4_194_303;
+      pids.services.api!.startToken = 'another-run-start-token';
+    }));
+    const apiPort = String(original.services.api!.port);
+    assert.ok((await readRegistry()).ports[apiPort], 'api holds a reservation before the teardown');
+
+    await withLifecycleLockForTeardown(projectDir, stack.teardown);
+
+    const after = await readPids(projectDir);
+    assert.ok(!after?.services.api, 'the dead replacement entry is pruned');
+    assert.ok(!after?.services[PROXY_SERVICE_NAME], 'nothing foreign is live, so the proxy is stopped as usual');
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'every reservation, the dead replacement\'s included, is released');
+    assert.ok(isPidRunning(original.services.api!.pid), 'the entry no longer names this run\'s process, so it is not signalled');
+  });
+
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
     // Startup fails before api is spawned (its env has a dangling reference).
     // A dead entry for api left by an earlier run is not another run's: nothing

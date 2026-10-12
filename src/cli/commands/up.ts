@@ -279,12 +279,15 @@ export async function startPhase(
       const started = startedEntries.get(serviceName);
       if (started && info.pid === started.pid && info.startToken === started.startToken) {
         stopNames.push(serviceName);
-      } else if (!started && !isPidRunning(info.pid)) {
-        // This run selected the service but never spawned it (startup failed
-        // first), and the entry is a stale one from an earlier run: nothing
-        // owns it. stopServices prunes it, and the reservation this run made,
-        // if the service has a port, is released below instead of lingering
-        // until the next prune.
+      } else if (!isPidRunning(info.pid)) {
+        // A dead entry is nobody's, whoever wrote it: this run selected the
+        // service but never spawned it (startup failed first) and the entry is
+        // a stale one from an earlier run, or a restart replaced this run's
+        // service and its replacement has already exited (no readiness check,
+        // crashed at once). stopServices prunes it, and the reservation, if the
+        // service has a port, is released below instead of lingering until the
+        // next prune. A live entry with another identity is the only thing
+        // left alone here.
         stopNames.push(serviceName);
       } else {
         replaced.add(serviceName);
