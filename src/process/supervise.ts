@@ -26,10 +26,10 @@ export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promis
 
 export interface ForegroundWaitOptions {
   /**
-   * Whether the services of other runs that the last teardown kept something
-   * for are still alive. They are not this process's children, so nothing
+   * Whether every service of another run that the last teardown kept something
+   * for is still alive. They are not this process's children, so nothing
    * reports their exit; while attached the supervisor asks this every
-   * `recheckMs` and runs the teardown again once it says no.
+   * `recheckMs` and runs the teardown again as soon as it says no.
    */
   dependentsAlive?: () => Promise<boolean>;
   recheckMs?: number;
@@ -52,8 +52,8 @@ export interface ForegroundWaitOptions {
  * to the ones still running: their entries still name this run, and only a
  * teardown prunes a dead one and gives its port back. The services of other
  * runs it kept them for are not children of this process, so it also polls
- * `dependentsAlive`, and runs the teardown again once they are gone: whatever
- * nothing depends on any more is then stopped. While a teardown is in
+ * `dependentsAlive`, and runs the teardown again as soon as one of them is
+ * gone: whatever nothing depends on any more is then stopped. While a teardown is in
  * progress the signal handlers are off, so a second Ctrl-C still quits at once,
  * as it always has.
  */

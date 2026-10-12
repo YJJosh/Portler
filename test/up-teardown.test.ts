@@ -704,6 +704,62 @@ describe('foreground teardown ownership', () => {
     assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'the reservations this run made are released');
   });
 
+  it('reports the kept services\' reason gone as soon as one of several other-run roots dies', { timeout: 15_000 }, async () => {
+    // Replacement api keeps db, replacement worker keeps cache. api exiting
+    // alone must make dependentsAlive say no, and the pass that follows frees
+    // db while worker still keeps cache.
+    const server = `exec "${process.execPath}" server.cjs`;
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  db:', `    command: ${server}`, '    port: 3001', '    port_env: PORT',
+      '  cache:', `    command: ${server}`, '    port: 3002', '    port_env: PORT',
+      '  api:', `    command: ${server}`, '    port: 3000', '    port_env: PORT', '    depends_on: [db]',
+      '  worker:', `    command: ${server}`, '    port: 3003', '    port_env: PORT', '    depends_on: [cache]',
+      '',
+    ].join('\n'));
+    const config = await loadConfig(projectDir);
+    const stack = await withLifecycleLock(projectDir, () => startPhase(config, 'local', ['db', 'cache', 'api', 'worker'], { detach: false }));
+    for (const child of stack.children.values()) childPids.add(child.pid!);
+    const original = (await readPids(projectDir))!;
+
+    const replacements: Record<string, number> = {};
+    await withLifecycleLock(projectDir, async () => {
+      for (const [name, dep] of [['api', 'db'], ['worker', 'cache']] as const) {
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+        childPids.add(child.pid!);
+        replacements[name] = child.pid!;
+        const token = await readProcessStartToken(child.pid!);
+        await updatePids(projectDir, (pids) => {
+          pids.services[name] = {
+            ...pids.services[name]!,
+            pid: child.pid!,
+            startedAt: new Date().toISOString(),
+            ...(token ? { startToken: token } : {}),
+            dependsOn: [dep],
+          };
+        });
+      }
+    });
+
+    const kept = await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    assert.deepEqual([...kept].sort(), ['cache', 'db'], 'each replacement keeps its own dependency');
+    assert.equal(await stack.dependentsAlive(), true, 'both roots are alive');
+
+    process.kill(-replacements.api!, 'SIGKILL');
+    for (let i = 0; i < 100 && isPidRunning(replacements.api!); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(isPidRunning(replacements.api!), false);
+    assert.equal(await stack.dependentsAlive(), false, 'one root is gone, although worker still lives');
+
+    const keptAfter = await withLifecycleLockForTeardown(projectDir, stack.teardown);
+    assert.deepEqual(keptAfter, ['cache'], 'worker still keeps cache');
+    const after = (await readPids(projectDir))!;
+    assert.equal(after.services.db, undefined, 'db, which nothing needs any more, is stopped and pruned');
+    assert.ok(!isPidRunning(original.services.db!.pid));
+    assert.equal((await readRegistry()).ports[String(original.services.db!.port)], undefined, 'and its reservation released');
+    assert.ok(isPidRunning(original.services.cache!.pid), 'cache keeps running for worker');
+    assert.equal(await stack.dependentsAlive(), true, 'the remaining root, worker, is alive');
+  });
+
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
     // Startup fails before api is spawned (its env has a dangling reference).
     // A dead entry for api left by an earlier run is not another run's: nothing

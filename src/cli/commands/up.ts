@@ -168,9 +168,10 @@ export interface StartedStack {
    */
   teardown: (options?: ForegroundTeardownOptions) => Promise<string[]>;
   /**
-   * Whether any service another run started, the reason the last teardown kept
-   * something, is still alive. Those are not this run's children, so nothing
-   * reports their exit: the supervisor asks this while it stays attached.
+   * Whether every service another run started, the reason the last teardown
+   * kept something, is still alive. Those are not this run's children, so
+   * nothing reports their exit: the supervisor asks this while it stays
+   * attached, and the first one to go means another pass.
    */
   dependentsAlive: () => Promise<boolean>;
   detached: boolean;
@@ -415,13 +416,15 @@ export async function startPhase(
     return kept;
   };
 
-  // A root whose entry was replaced since counts as gone here; the pass this
-  // triggers reads pids.json again and keeps whatever a newer service needs.
+  // False as soon as any root is gone, not only once all are: with api keeping
+  // db and worker keeping cache, api's exit alone must free db. A root whose
+  // entry was replaced since counts as gone too; the pass this triggers reads
+  // pids.json again and keeps whatever the survivors and newer services need.
   const dependentsAlive = async (): Promise<boolean> => {
     for (const info of foreignRoots) {
-      if ((await entryLiveness(config.projectDir, info)).status !== 'dead') return true;
+      if ((await entryLiveness(config.projectDir, info)).status === 'dead') return false;
     }
-    return false;
+    return true;
   };
 
   try {
