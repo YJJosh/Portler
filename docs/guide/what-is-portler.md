@@ -64,7 +64,7 @@ See [Setup & production](/guide/setup-and-production) and [Docker](/guide/docker
 
 ## What Portler is not
 
-- **Not a cluster orchestrator.** Portler runs a project on one machine: a developer machine, a CI runner or a server. It does not spread services across hosts, and it has no rolling or zero-downtime deploys: `restart` stops a service and then starts its replacement. Kubernetes mode targets local clusters only (kind, minikube, Docker Desktop) and refuses remote ones.
+- **Not a cluster orchestrator.** Portler runs a project on one machine: a developer machine, a CI runner or a server. It does not spread services across hosts, and it has no rolling or zero-downtime deploys: `restart` stops a service and then starts its replacement. Kubernetes mode is meant for local clusters (kind, k3d, minikube, Docker Desktop and the like): by default it refuses a context or API endpoint it does not recognize as local, and runs against one only when you allow it by its exact name (`PORTLER_ALLOW_K8S_CONTEXT` for the context, `PORTLER_ALLOW_K8S_ENDPOINT` for the API server URL). It is not built to deploy to a production cluster.
 - **Not a crash supervisor.** `up` does not restart a service that crashes, and nothing comes back by itself after a reboot. In production, leave that to the platform or an init system: `portler start` runs one service in the foreground so the platform can supervise and restart it.
 
 ## Requirements
