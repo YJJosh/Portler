@@ -4,6 +4,7 @@ import { buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/i
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  isPidRunning,
   pidInfoFor,
   readPids,
   runningServices,
@@ -241,6 +242,12 @@ export async function startPhase(
       if (!info) continue;
       const started = startedEntries.get(serviceName);
       if (started && info.pid === started.pid && info.startToken === started.startToken) {
+        stopNames.push(serviceName);
+      } else if (!started && !isPidRunning(info.pid)) {
+        // This run reserved the port but never spawned the service (startup
+        // failed first), and the entry is a stale one from an earlier run:
+        // nothing owns it. stopServices prunes it, and the reservation this
+        // run made is released below instead of lingering until the next prune.
         stopNames.push(serviceName);
       } else {
         replaced.add(serviceName);

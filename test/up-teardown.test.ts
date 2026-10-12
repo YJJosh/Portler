@@ -12,7 +12,7 @@ import { startPhase } from '../src/cli/commands/up.ts';
 import { loadConfig } from '../src/config/index.ts';
 import { PROXY_SERVICE_NAME } from '../src/constants.ts';
 import { readRegistry } from '../src/ports/registry.ts';
-import { isPidRunning, readPids, updatePids } from '../src/process/pids.ts';
+import { isPidRunning, readPids, updatePids, writePids } from '../src/process/pids.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../src/state/lock.ts';
 
 let projectDir: string;
@@ -144,6 +144,27 @@ describe('foreground teardown ownership', () => {
       assert.equal((await readPids(projectDir))?.services[PROXY_SERVICE_NAME], undefined);
     });
   }
+
+  it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
+    // Startup fails before api is spawned (its env has a dangling reference).
+    // A dead entry for api left by an earlier run is not another run's: nothing
+    // owns it, so the teardown prunes it and gives back the port this run reserved.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  api:', '    command: node -e ""', '    port: 3000', '    env:', '      URL: missing.url', ''].join('\n'),
+    );
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { api: { pid: 4_194_303, command: 'old api', cwd: projectDir, port: 3000, startedAt } },
+    });
+    const config = await loadConfig(projectDir);
+    await assert.rejects(withLifecycleLock(projectDir, () => startPhase(config, 'local', ['api'], { detach: false })), /cannot resolve/);
+    assert.ok(!(await readPids(projectDir))?.services.api, 'the stale entry is pruned');
+    assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'the reservation made for this run is released');
+  });
 
   it('still stops matching services and proxy and releases their reservations', { timeout: 10_000 }, async () => {
     const stack = await startForeground();
