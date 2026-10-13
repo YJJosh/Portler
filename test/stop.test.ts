@@ -778,6 +778,48 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('counts a removed container stopped when its leader pid is reused during the wait', { timeout: 15_000 }, async () => {
+    // The shell was already gone when the container was removed, so the service
+    // waits for its group. During that wait the old group empties and the OS hands
+    // the pid to a stranger that leads a live group under the same number. The
+    // token still proves the pid is not ours, so this is a stop, not an orphan.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    let reused = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => reused,
+        pidAlive: () => reused,
+        groupState: () => {
+          // the old group, and from the first look on the stranger's, are alive
+          const state = 'alive';
+          reused = true;
+          return state;
+        },
+        readStartToken: async () => 'Tue Oct 13 09:00:00 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'the stranger is never signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });

@@ -471,25 +471,26 @@ export async function stopServices(
   const settling = targets.filter(
     (target) => containerCleanup.removed.has(target.name) && !probes.pidAlive(target.info.pid),
   );
-  // A leader whose pid now runs a different process (its start token no longer
-  // matches) exited long ago. Its group went with it: the kernel never hands out
-  // a pid that is still in use as a process-group id, so the reuse proves the old
-  // group was empty, and whatever group now carries that number is the
-  // stranger's. Such a service is stopped once its container is removed; its
-  // pid is never waited on or signalled.
-  const recycled = new Set<Target>();
-  for (const target of targets) {
-    if (!containerCleanup.removed.has(target.name) || settling.includes(target)) continue;
-    if ((await verifyPid(probes, target.info)) === 'reused') recycled.add(target);
-  }
   const settleDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < settleDeadline && settling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
     await sleep(POLL_MS);
   }
-  const settled = new Set([
-    ...settling.filter((target) => probes.groupState(target.info.pid) === 'gone'),
-    ...recycled,
-  ]);
+  // A leader whose pid now runs a different process (its start token no longer
+  // matches) has exited, whether that happened long ago or during the wait above.
+  // Its group went with it: the kernel never hands out a pid that is still in use
+  // as a process-group id, so the reuse proves the old group was empty, and
+  // whatever group now carries that number is the stranger's. Such a service is
+  // stopped once its container is removed; its pid is never signalled. This is
+  // checked after the wait so a reuse during it still counts.
+  const settled = new Set<Target>();
+  for (const target of targets) {
+    if (!containerCleanup.removed.has(target.name)) continue;
+    if (settling.includes(target) && probes.groupState(target.info.pid) === 'gone') {
+      settled.add(target);
+    } else if ((await verifyPid(probes, target.info)) === 'reused') {
+      settled.add(target);
+    }
+  }
 
   // A settled service has nothing left to signal or identify: its running
   // container was ours by label and is gone, its leader is not runnable, and its
