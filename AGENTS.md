@@ -59,25 +59,35 @@ user documentation lives in [`docs/`](docs/).
 ## Rules that must hold
 
 These describe how the code protects users' processes and data today. The
-exceptions listed are deliberate: keep them, and call out any new one in the
-PR description.
+paths named below are deliberate, but the list is not complete: if you find a
+signal or removal it does not cover, assume it is deliberate, read its tests
+and history, and raise it in the PR instead of removing it. Call out any new
+path in the PR description.
 
-- Signal a process group only when Portler can prove it is ours: the leader's
-  recorded start token matches now (`maySignal` in
-  `src/process/identity.ts`), or it matched earlier in the same stop while the
-  group stayed alive, so `down` can still stop children after the leader exits
-  (`provenOurs` in `signalDecision`, `src/process/stop.ts`). When in doubt,
-  treat it as not ours and still running. Only `down --force` and
-  `clean --force` (both through the `force` option of `stopServices`) signal
-  an unverifiable process, and never one whose pid was provably reused.
+- Signal a process group only with proof that it is ours. Proof is one of:
+  - Portler spawned it in this same process and still holds the child:
+    signal forwarding and the drain deadline in `runShell`
+    (`src/process/shell.ts`), readiness-command timeouts
+    (`src/readiness/index.ts`), the port-forward child in
+    `src/k8s/forward-supervisor.ts`.
+  - For a recorded service, the leader's start token matches now (`maySignal`
+    in `src/process/identity.ts`), or matched earlier in the same stop while
+    the group stayed alive, so `down` can still stop children after the leader
+    exits (`provenOurs` in `signalDecision`, `src/process/stop.ts`).
+
+  When in doubt, treat it as not ours and still running. Only `down --force`
+  and `clean --force` (both through the `force` option of `stopServices`)
+  signal an unverifiable process, and never one whose pid was provably reused.
 - Only touch existing Docker containers, networks and volumes, or Kubernetes
-  resources, labelled as this project's (`src/process/ownership.ts`), and
-  re-check ownership right before a destructive call. The unlabelled things
-  Portler removes are tied to something it owns or just created: a removed
-  container's own anonymous volumes (`removeOwnedContainer` runs
-  `docker rm -f -v` on a container it verified as ours, so an image `VOLUME`
-  does not leak; `test/ownership.test.ts`), and the `--rm` copy container that
-  `volumes fork` starts (`forkVolume` in `src/volumes/manager.ts`).
+  resources, labelled as this project's (`src/process/ownership.ts`,
+  `namespaceOwnership` in `src/k8s/kubectl.ts`), and re-check ownership right
+  before a destructive call. Removing something owned can remove unlabelled
+  things with it, on purpose: a container's own anonymous volumes
+  (`docker rm -f -v`, so an image `VOLUME` does not leak;
+  `test/ownership.test.ts`), everything inside the project's own namespace on
+  a full `down k8s --volumes` (`deleteK8sResources`), and the short-lived
+  `--rm` copy container that `volumes fork` starts (`forkVolume` in
+  `src/volumes/manager.ts`).
 - `down` never deletes named volumes. Only `portler volumes remove` deletes
   existing ones, and only those this project owns. The one other deletion is
   `volumes fork` rolling back the target it just created when the copy fails,
