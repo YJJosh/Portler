@@ -65,7 +65,10 @@ user documentation lives in [`docs/`](docs/).
   an unverifiable process, and never one whose pid was provably reused.
 - Only touch Docker containers, networks and volumes, or Kubernetes
   resources, labelled as this project's (`src/process/ownership.ts`), and
-  re-check ownership right before a destructive call.
+  re-check ownership right before a destructive call. The one unlabelled
+  thing removed is a removed container's own anonymous volumes:
+  `removeOwnedContainer` runs `docker rm -f -v` on a container it verified as
+  ours, so an image `VOLUME` does not leak (`test/ownership.test.ts`).
 - `down` never deletes named volumes. Only `portler volumes remove` deletes
   existing ones, and only those this project owns. The one other deletion is
   `volumes fork` rolling back the target it just created when the copy fails
