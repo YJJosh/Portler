@@ -1024,6 +1024,51 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('counts a removed container stopped when its pid is reused right after the late check', { timeout: 15_000 }, async () => {
+    // The leader exits just before the round, so its refusal waits out the late
+    // wait. The check after it sees the leader gone and its group gone; a
+    // stranger then takes the pid (without leading a group). That later
+    // liveness must not overturn the gone/gone just sampled.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const ours = 'Mon Oct 12 20:48:05 2026 4444';
+    await writePidsFile({ db: { ...pidInfo(4444, ours), dockerContainer: 'c-db' } });
+
+    let verifies = 0;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // first verify: the reuse check before the round (ours, alive); every
+        // later one finds the pid gone
+        pidRunning: () => {
+          verifies += 1;
+          return verifies === 1;
+        },
+        // the stranger holds the pid by the time anything asks after the check
+        pidAlive: () => true,
+        readStartToken: async () => ours,
+        // the old group lives on until the check after the late wait
+        groupState: () => (verifies >= 3 ? 'gone' : 'alive'),
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });

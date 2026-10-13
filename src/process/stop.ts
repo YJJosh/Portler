@@ -431,6 +431,17 @@ function warnSecondRoundRefusal(target: Target): void {
  * - Docker cleanup failed -> entry KEPT, so the container/network it names is
  *   not forgotten
  */
+// A leader that still answers at its pid (a zombie, or a live process) is not
+// runnable code of this service when the pid is not alive, or when a second
+// identity check finds it gone or handed to someone else. The second check
+// stops a pid reused between the first check and this one from reading as the
+// leader still running.
+async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<boolean> {
+  if (!probes.pidAlive(info.pid)) return true;
+  const again = await verifyPid(probes, info);
+  return again === 'gone' || again === 'reused';
+}
+
 export async function stopServices(
   projectDir: string,
   serviceNames?: string[],
@@ -564,7 +575,8 @@ export async function stopServices(
   // stranger's. A group that is gone with a leader that is not runnable means
   // stopped too. Anything else (a live leader Portler cannot identify, or a
   // group still alive under it): the refusal stands, with the warning the round
-  // held back.
+  // held back. The sampled verdict is what counts: a leader seen gone with its
+  // group seen gone is stopped, whatever a later look at that pid number finds.
   const lateDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < lateDeadline && lateSettling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
     await sleep(POLL_MS);
@@ -572,7 +584,7 @@ export async function stopServices(
   for (const target of lateSettling) {
     const verdict = await verifyPid(probes, target.info);
     const groupGone = probes.groupState(target.info.pid) === 'gone';
-    if (verdict === 'reused' || (groupGone && !probes.pidAlive(target.info.pid))) {
+    if (verdict === 'reused' || (groupGone && (verdict === 'gone' || (await leaderNotRunnable(probes, target.info))))) {
       stopped.push(target.name);
       continue;
     }
