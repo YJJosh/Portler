@@ -138,7 +138,8 @@ export async function inspectResource(kind: ResourceKind, name: string, run: Com
 }
 
 export type RemovalOutcome =
-  | { status: 'removed'; id: string }
+  /** `running` is the state Docker reported just before the removal, when it said. */
+  | { status: 'removed'; id: string; running?: boolean }
   | { status: 'absent' }
   | { status: 'foreign' }
   /** The resource is ours but `docker rm` failed. */
@@ -162,7 +163,9 @@ async function removeOwned(
 
   // By ID: the name may already point at a different resource.
   const result = await run('docker', removeArgs(inspection.id));
-  if (result.code === 0) return { status: 'removed', id: inspection.id };
+  if (result.code === 0) {
+    return { status: 'removed', id: inspection.id, ...(inspection.running !== undefined ? { running: inspection.running } : {}) };
+  }
 
   // Someone removed it between the inspect and the rm — that is a success for us.
   if (isNotFoundError(result.stderr)) return { status: 'absent' };

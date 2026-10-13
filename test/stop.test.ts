@@ -610,16 +610,24 @@ describe('stopServices: the SIGKILL round', () => {
  * the way the real client does when its container is removed.
  */
 describe('stopServices: a container whose docker run shell is gone', () => {
-  async function fakeDocker(dir: string, marker: string): Promise<string> {
+  /**
+   * `rmDelay` keeps `docker rm` from returning for that many seconds after it
+   * drops the marker, so the member can exit before Portler looks at its group.
+   */
+  async function fakeDocker(
+    dir: string,
+    marker: string,
+    { running = true, rmDelay = 0 }: { running?: boolean; rmDelay?: number } = {},
+  ): Promise<string> {
     const bin = path.join(dir, 'fake-bin');
     await fs.mkdir(bin, { recursive: true });
-    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running });
     await fs.writeFile(
       path.join(bin, 'docker'),
       [
         '#!/bin/sh',
         'case "$1" in',
-        `  rm) : > '${marker}'; exit 0 ;;`,
+        `  rm) : > '${marker}'; sleep ${rmDelay}; exit 0 ;;`,
         `  inspect) printf '%s\\n' '${inspected}' ;;`,
         '  *) echo "Error: No such object" >&2; exit 1 ;;',
         'esac',
@@ -663,6 +671,47 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.completed, ['db']);
       assert.equal((await readPids(projectDir))?.services.db, undefined);
       assert.ok(await waitForExit(member), 'the member exited when its container was removed');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('reports it stopped when the group is already gone by the time docker rm returns', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker, { rmDelay: 0.5 });
+    const { leader, member } = await orphanedGroup(marker);
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.ok(!isPidRunning(member), 'the member was gone before Portler first looked at its group');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker, { running: false });
+    const leader = spawn(process.execPath, ['-e', 'process.exit(0)'], { detached: true, stdio: 'ignore' });
+    spawned.push(leader);
+    await once(leader, 'exit');
+    await writePidsFile({ db: { ...pidInfo(leader.pid!, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the stale entry is pruned');
     } finally {
       process.env.PATH = savedPath;
     }

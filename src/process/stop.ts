@@ -276,7 +276,7 @@ async function removeDockerContainers(
   await Promise.all(
     [...byContainer].map(async ([container, services]) => {
       const outcome = await removeOwnedContainer(container, projectDir);
-      if (outcome.status === 'removed') for (const service of services) removed.add(service);
+      if (outcome.status === 'removed' && outcome.running === true) for (const service of services) removed.add(service);
       handleRemoval('container', container, services, outcome, keep, failures);
     }),
   );
@@ -462,16 +462,14 @@ export async function stopServices(
   failures.push(...containerCleanup.failures);
 
   // A service whose supervising shell has already exited while its container ran
-  // on: removing the container is what stops it, and the `docker run` client
-  // left in its process group exits a moment later. Give that group the confirm
-  // window to go before judging it, so the service reads as stopped instead of
-  // as an orphaned group nobody can prove. Nothing is signalled here; a group
-  // that is still alive at the deadline gets today's careful treatment.
+  // on: removing the running container is what stops it, and the `docker run`
+  // client left in its process group exits then, possibly before `docker rm`
+  // has even returned. Give that group the confirm window to go before judging
+  // it, so the service reads as stopped instead of as an orphaned group nobody
+  // can prove. Nothing is signalled here; a group that is still alive at the
+  // deadline gets today's careful treatment.
   const settling = targets.filter(
-    (target) =>
-      containerCleanup.removed.has(target.name) &&
-      !probes.pidRunning(target.info.pid) &&
-      probes.groupState(target.info.pid) === 'alive',
+    (target) => containerCleanup.removed.has(target.name) && !probes.pidRunning(target.info.pid),
   );
   const settleDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < settleDeadline && settling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
@@ -507,8 +505,8 @@ export async function stopServices(
       continue;
     }
 
-    // Its container was removed above and its group is now confirmed gone: that
-    // removal stopped it.
+    // Its running container was removed above and its group is now confirmed
+    // gone: that removal stopped it.
     if (settled.has(target) && result.verdict === 'gone' && result.group === 'gone') {
       stopped.push(target.name);
       continue;
