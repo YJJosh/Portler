@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import type { ChildProcess } from 'node:child_process';
 import { describe, it } from 'node:test';
 import {
   checkEndpointLocality,
@@ -19,7 +20,9 @@ import {
   getNamespacePhase,
   isNamespaceNotFound,
   namespaceOwnership,
+  K8S_FORWARD_COMMAND,
   parseNamespaceRead,
+  portForwardPidInfo,
   readNamespace,
 } from '../src/k8s/kubectl.ts';
 import { containerEnvEntries, k8sServiceNames, MANAGED_BY_LABEL, PROJECT_LABEL, projectLabels } from '../src/k8s/manifests.ts';
@@ -633,5 +636,16 @@ describe('port-forward supervisor spec', () => {
     assert.equal(isForwardSpec({ ...spec, context: '' }), false);
     const { context: _dropped, ...withoutContext } = spec;
     assert.equal(isForwardSpec(withoutContext), false);
+  });
+});
+
+describe('portForwardPidInfo', () => {
+  it('records the entry as a Kubernetes one, so restart can refuse it', async () => {
+    const service = { name: 'api', command: 'node server.js', port: 3000 } as ServiceConfig;
+    const config = makeConfig({ api: service });
+    const assignment = { name: 'api', port: 53000, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: 'http://localhost:53000' };
+    const info = await portForwardPidInfo(config, service, { pid: process.pid } as unknown as ChildProcess, assignment);
+    assert.equal(info.runMode, 'k8s');
+    assert.ok(info.command.startsWith(`${K8S_FORWARD_COMMAND} `), info.command);
   });
 });

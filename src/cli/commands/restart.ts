@@ -2,6 +2,7 @@ import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type Ru
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
+import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { readPids, runningServices, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -39,6 +40,10 @@ export interface RestartPlanInput {
   images: Readonly<Record<string, string>> | undefined;
 }
 
+const KUBERNETES_RESTART_HINT =
+  'Run "portler down k8s" followed by "portler up k8s" instead ' +
+  '(a k8s restart has to re-apply manifests and re-establish port-forwards, which restart does not do).';
+
 function list(names: readonly string[]): string {
   return names.join(', ');
 }
@@ -69,6 +74,21 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
   const restarted = involved.filter((name) => stoppingSet.has(name));
   const leftAlone = involved.filter((name) => !stoppingSet.has(name) && runningNow.has(name));
   const replayed: string[] = [];
+
+  // A service `up k8s` started has no launch restart can replay: its entry is the
+  // port-forward, and relaunching that name as a local process would leave the workload
+  // in the cluster as it was. Refused before anything is stopped, as `restart k8s` is.
+  // Entries written before runMode was recorded are known by the forward's command.
+  const kubernetes = involved.filter((name) => {
+    const info = entry(name);
+    return info.runMode === 'k8s' || info.command.startsWith(`${K8S_FORWARD_COMMAND} `);
+  });
+  if (kubernetes.length > 0) {
+    throw new Error(
+      `${list(kubernetes)} ${verb(kubernetes, 'was', 'were')} started with "portler up k8s", and restart does not support Kubernetes mode. ` +
+        KUBERNETES_RESTART_HINT,
+    );
+  }
 
   // Entries without runMode predate the field. A container of a service whose
   // docker: block only applies under `up docker` must have come from docker
@@ -203,10 +223,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
   // commandUpK8s. Nothing was ever applied to the cluster. Reject it instead of
   // guessing which half the user meant.
   if (mode === 'k8s') {
-    throw new Error(
-      'restart does not support Kubernetes mode. Run "portler down k8s" followed by "portler up k8s" instead ' +
-        '(a k8s restart has to re-apply manifests and re-establish port-forwards, which restart does not do).',
-    );
+    throw new Error(`restart does not support Kubernetes mode. ${KUBERNETES_RESTART_HINT}`);
   }
 
   // Under --prod the services prod.services leaves out are the deployment's, as for

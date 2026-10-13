@@ -20,7 +20,7 @@ portler restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <se
 - With `--prod`, typed or replayed, `prod.require` is checked before anything is stopped, so a deployment value that has gone missing leaves the running services up instead of taking them down and failing to start them again.
 
 ::: warning No Kubernetes mode
-`portler restart k8s` is rejected. Restarting a Kubernetes stack has to re-apply manifests and re-establish port-forwards, which `restart` does not do. Run the two steps instead:
+`portler restart k8s` is rejected, and so is a plain `portler restart` of anything `portler up k8s` started, before anything is stopped. Restarting a Kubernetes stack has to re-apply manifests and re-establish port-forwards, which `restart` does not do. Run the two steps instead:
 
 ```bash
 portler down k8s && portler up k8s

@@ -522,6 +522,9 @@ export function spawnPortForward(
 }
 
 /** PID-file record for a port-forward supervisor so `portler down` can kill it. */
+/** How a port-forward's pids.json entry names its process, so it can be told apart from a local one. */
+export const K8S_FORWARD_COMMAND = 'portler __k8s-forward';
+
 export async function portForwardPidInfo(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -534,11 +537,12 @@ export async function portForwardPidInfo(
 
   return {
     pid: child.pid,
-    command: `portler __k8s-forward (kubectl port-forward service/${assignment.name} ${assignment.port}:${service.port})`,
+    command: `${K8S_FORWARD_COMMAND} (kubectl port-forward service/${assignment.name} ${assignment.port}:${service.port})`,
     cwd: config.projectDir,
     port: assignment.port,
     url: assignment.url,
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
+    runMode: 'k8s',
   };
 }

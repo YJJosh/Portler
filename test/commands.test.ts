@@ -395,6 +395,14 @@ describe('restart', () => {
     const { runMode: _dropped, ...legacyDb } = running.db!;
     assert.equal(plan({ running: { ...running, db: legacyDb } }).mode, 'docker');
 
+    // Entries `up k8s` wrote are refused, whether they record runMode or (older ones) only
+    // name the forward process, whatever the flags say; the stop never runs.
+    const forward = { ...base, command: 'portler __k8s-forward (kubectl port-forward service/x 1:2)' };
+    const k8sStack = { db: { ...forward }, api: { ...forward, runMode: 'k8s' as const } };
+    assert.throws(() => plan({ running: k8sStack }), /db, api were started with "portler up k8s".*portler down k8s/s);
+    assert.throws(() => plan({ running: k8sStack, modeExplicit: true, requestedMode: 'docker', prod: true, setup: true }), /started with "portler up k8s"/);
+    assert.throws(() => plan({ running: { ...running, db: forward } }), /^Error: db was started with "portler up k8s"/);
+
     // Recorded modes that disagree cannot be replayed; the flag decides.
     const mixed = { ...running, api: { ...running.api!, prod: false } };
     assert.throws(() => plan({ running: mixed }), /no one mode to replay/);
