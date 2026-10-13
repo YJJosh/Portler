@@ -601,3 +601,95 @@ describe('stopServices: the SIGKILL round', () => {
     assert.deepEqual(result.failures, []);
   });
 });
+
+/**
+ * A Docker service whose supervising `docker run` shell was killed while its
+ * container ran on: the leader pid is gone, and the `docker run` client is left
+ * in the group until the container goes. A `docker` on PATH stands in for the
+ * daemon; its `rm -f` drops a marker that makes the left-behind member exit,
+ * the way the real client does when its container is removed.
+ */
+describe('stopServices: a container whose docker run shell is gone', () => {
+  async function fakeDocker(dir: string, marker: string): Promise<string> {
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        'case "$1" in',
+        `  rm) : > '${marker}'; exit 0 ;;`,
+        `  inspect) printf '%s\\n' '${inspected}' ;;`,
+        '  *) echo "Error: No such object" >&2; exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return bin;
+  }
+
+  /** A group whose leader has exited, leaving one member that runs until `marker` exists (or forever). */
+  async function orphanedGroup(marker: string | null): Promise<{ leader: number; member: number }> {
+    const memberFile = path.join(projectDir, `member-${Date.now()}`);
+    const body = marker
+      ? `const fs=require('fs');setInterval(()=>{if(fs.existsSync(${JSON.stringify(marker)}))process.exit(0)},25)`
+      : 'setInterval(()=>{},1000)';
+    const leaderScript =
+      `const c=require('child_process').spawn(process.execPath,['-e',${JSON.stringify(body)}],{stdio:'ignore'});` +
+      `c.unref();require('fs').writeFileSync(${JSON.stringify(memberFile)},String(c.pid));process.exit(0)`;
+    const leader = spawn(process.execPath, ['-e', leaderScript], { detached: true, stdio: 'ignore' });
+    spawned.push(leader);
+    await once(leader, 'exit');
+    const member = Number(await fs.readFile(memberFile, 'utf8'));
+    return { leader: leader.pid!, member };
+  }
+
+  it('reports it stopped and prunes the entry once removing the container ends the group', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const { leader, member } = await orphanedGroup(marker);
+    assert.ok(isPidRunning(member), 'the left-behind member runs before down');
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined);
+      assert.ok(await waitForExit(member), 'the member exited when its container was removed');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('still keeps the entry when the group outlives its removed container', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const { leader, member } = await orphanedGroup(null);
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, { confirmMs: 300 });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, ['db']);
+      assert.deepEqual(result.completed, []);
+      assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
+      assert.ok(isPidRunning(member), 'nothing was signalled');
+    } finally {
+      process.env.PATH = savedPath;
+      try {
+        process.kill(member, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+});

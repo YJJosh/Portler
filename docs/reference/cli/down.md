@@ -92,6 +92,7 @@ On **Linux** the token is the process start time in clock ticks from `/proc/<pid
 
 - A Docker container or network is only removed when it carries this project's `portler.project` label — and it is then removed by its immutable **ID**, captured in the same inspect that read the label, never by the name (which can be re-pointed at a different container in between). One that merely holds a colliding name is left alone, with a warning.
 - A container or network Portler could **not** remove (Docker unreachable, permission denied) leaves its PID entry in place rather than erasing the only record of what is left behind, and `down` exits non-zero. Re-run it once Docker is reachable.
+- A Docker service whose `docker run` shell has exited while its container ran on (`portler ps` shows it as `running (container)`) is stopped by removing that container. The `docker run` client left in its process group exits once the container is gone; `down` waits up to the 2 s confirm window for that group to go and then reports the service as stopped. Nothing is signalled while it waits, and a group that is still there afterwards is handled as described in [PID safety](#pid-safety): left alone, with its PID entry kept.
 - A Kubernetes namespace is only deleted when Portler created and labelled it. `down k8s` against a namespace Portler does not own fails instead, and so does a `down k8s` that cannot read the namespace's labels at all. See [Kubernetes mode](/guide/kubernetes#namespace-ownership).
 
 ::: warning `down k8s` keeps your data

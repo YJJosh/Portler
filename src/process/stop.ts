@@ -261,7 +261,7 @@ function warnOrphanGroup(name: string, pid: number): void {
 async function removeDockerContainers(
   projectDir: string,
   targets: Target[],
-): Promise<{ keep: Set<string>; failures: string[] }> {
+): Promise<{ keep: Set<string>; failures: string[]; removed: Set<string> }> {
   const byContainer = new Map<string, string[]>();
   for (const target of targets) {
     const container = target.info.dockerContainer;
@@ -271,15 +271,17 @@ async function removeDockerContainers(
 
   const keep = new Set<string>();
   const failures: string[] = [];
+  const removed = new Set<string>();
 
   await Promise.all(
     [...byContainer].map(async ([container, services]) => {
       const outcome = await removeOwnedContainer(container, projectDir);
+      if (outcome.status === 'removed') for (const service of services) removed.add(service);
       handleRemoval('container', container, services, outcome, keep, failures);
     }),
   );
 
-  return { keep, failures };
+  return { keep, failures, removed };
 }
 
 function handleRemoval(
@@ -459,6 +461,24 @@ export async function stopServices(
   for (const name of containerCleanup.keep) keep.add(name);
   failures.push(...containerCleanup.failures);
 
+  // A service whose supervising shell has already exited while its container ran
+  // on: removing the container is what stops it, and the `docker run` client
+  // left in its process group exits a moment later. Give that group the confirm
+  // window to go before judging it, so the service reads as stopped instead of
+  // as an orphaned group nobody can prove. Nothing is signalled here; a group
+  // that is still alive at the deadline gets today's careful treatment.
+  const settling = targets.filter(
+    (target) =>
+      containerCleanup.removed.has(target.name) &&
+      !probes.pidRunning(target.info.pid) &&
+      probes.groupState(target.info.pid) === 'alive',
+  );
+  const settleDeadline = Date.now() + probes.confirmMs;
+  while (Date.now() < settleDeadline && settling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
+    await sleep(POLL_MS);
+  }
+  const settled = new Set(settling.filter((target) => probes.groupState(target.info.pid) === 'gone'));
+
   const termRound = await signalRound(probes, targets, 'SIGTERM', true);
   const termed: Target[] = [];
 
@@ -484,6 +504,13 @@ export async function stopServices(
       process.stderr.write(`[portler] warning: ${result.message}\n`);
       failures.push(`could not stop service "${target.name}": ${result.message}`);
       keep.add(target.name);
+      continue;
+    }
+
+    // Its container was removed above and its group is now confirmed gone: that
+    // removal stopped it.
+    if (settled.has(target) && result.verdict === 'gone' && result.group === 'gone') {
+      stopped.push(target.name);
       continue;
     }
 
