@@ -29,7 +29,7 @@ portler volumes list|fork|remove          # manage Portler-managed "@name" Docke
 - Start services with `portler up -d`. A foreground `up` blocks your shell and stops the stack when it exits.
 - Never hardcode ports: they differ between checkouts and runs. Read them from `portler ps` or `portler env <service>`, or use the `PORTLER_*` variables.
 - `up` refuses services that are already running. To pick up a change in a running service, use `portler restart <service>`.
-- When something fails, check `portler ps` (`dead (stale)` means the process exited), then `portler logs <service>`. Fix the cause and `restart`.
+- When something fails, check `portler ps` (`dead (stale)` means the process exited), then `portler logs <service>`. Fix the cause and `restart`. `portler logs <service> --follow` follows captured local log files across restarts, including the new run's startup output.
 - Stop only what you started. Before starting anything, note what `portler ps` already shows; when finished, run `portler down <service...>` for the services you started (`portler down k8s <service...>` for ones deployed with `up k8s`). A bare `portler down` stops every service in the checkout, so use it only when nothing was running before you. `portler down <service>` warns when running services depend on it.
 - Do not pass `--force` to `down` or `clean` unless the user asks: `down --force` can signal processes whose identity Portler cannot verify, and `clean --force` stops running services first.
 - `.portler/` holds runtime state and belongs in `.gitignore`.
