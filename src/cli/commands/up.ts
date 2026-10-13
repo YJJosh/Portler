@@ -255,6 +255,33 @@ async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, 
  * `restart` can hold one lock across its stop and its start instead of dropping
  * it in between (where a concurrent `up` could slip in).
  */
+/**
+ * The configuration a start in `mode` runs with: prod.services, the run mode, pinned
+ * images and the production overrides applied, in that order. `raw` is the stack narrowed
+ * to prod.services and `modeConfig` the run mode's view of it, before images are pinned.
+ */
+export function launchConfig(
+  rawConfig: PortlerConfig,
+  mode: RunMode,
+  options: { prod?: boolean; images?: Readonly<Record<string, string>> },
+): { raw: PortlerConfig; modeConfig: PortlerConfig; config: PortlerConfig } {
+  const raw = productionServices(rawConfig, options.prod);
+  const modeConfig = configForRunMode(raw, mode);
+  const config = applyProduction(applyImageOverrides(modeConfig, options.images ?? {}), options.prod);
+  return { raw, modeConfig, config };
+}
+
+/**
+ * What startPhase checks about the services it is about to start, before it allocates a
+ * port or spawns anything. restart makes the same checks before it stops anything, so a
+ * launch that could not start is refused while the services are still up.
+ */
+export function checkLaunch(config: PortlerConfig, mode: RunMode, selectedNames: string[]): void {
+  if (mode === 'docker') validateDockerMode(config, selectedNames);
+  validateCommands(config, selectedNames);
+  validateDockerContainerNames(config);
+}
+
 export async function startPhase(
   rawConfig: PortlerConfig,
   mode: RunMode,
@@ -262,11 +289,9 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   // Under --prod only prod.services run; dependencies on left-out services are dropped.
-  const raw = productionServices(rawConfig, options.prod);
+  const { raw, modeConfig, config } = launchConfig(rawConfig, mode, { prod: options.prod, images: options.images });
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
-  const modeConfig = configForRunMode(raw, mode);
   const images = options.images ?? {};
-  const config = applyProduction(applyImageOverrides(modeConfig, images), options.prod);
   const pidsBefore = await readPids(config.projectDir);
   const runningNames = new Set(runningServices(pidsBefore));
 
@@ -282,9 +307,7 @@ export async function startPhase(
   validateImageOverrideTargets(images, selectedNames, runningNames);
   reportImageOverrides(modeConfig, images);
 
-  if (mode === 'docker') validateDockerMode(config, selectedNames);
-  validateCommands(config, selectedNames);
-  validateDockerContainerNames(config);
+  checkLaunch(config, mode, selectedNames);
 
   // A proxy that is already running keeps its port and old routing targets;
   // only start (and later stop) it when it is not up yet.

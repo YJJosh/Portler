@@ -330,6 +330,27 @@ describe('restart', () => {
     assert.ok(pids?.services.api, 'the rejection came before the stop: the stale api entry is still there');
   });
 
+  it('refuses a replayed Docker mode the config no longer supports, before stopping anything', async () => {
+    // api was started with `up docker`; its docker: block has since been removed, so the
+    // replayed mode cannot start it. That must be found while api is still up.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), ['services:', '  api:', '    command: node -e ""', '    port: 3000', ''].join('\n'), 'utf8');
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        // A stale entry: a restart that got as far as stopping would have pruned it.
+        api: { pid: 4_194_303, command: 'api', cwd: projectDir, port: 52345, startedAt, dockerContainer: 'portler-test-api', runMode: 'docker' },
+      },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service "api" has no Docker config/);
+    assert.ok((await readPids(projectDir))?.services.api, 'the rejection came before the stop: the stale api entry is still there');
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), /service "api" has no Docker config/);
+    assert.ok((await readPids(projectDir))?.services.api, 'so did the nameless restart\'s');
+  });
+
   it('plans the launch from pids.json and lets flags override it', async () => {
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),

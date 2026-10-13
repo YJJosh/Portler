@@ -18,6 +18,7 @@ portler restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <se
 - A restart without names stops every recorded service, including ones removed from the config since they started, and replays their mode for the current config.
 - A replayed `--prod` narrows to `prod.services` like a typed one: a service it leaves out is the deployment's, so a development copy of it that happens to be running is neither stopped, started nor counted when the mode to replay is decided.
 - With `--prod`, typed or replayed, `prod.require` is checked before anything is stopped, so a deployment value that has gone missing leaves the running services up instead of taking them down and failing to start them again.
+- The launch is checked against the current config before anything is stopped too: a replayed Docker mode for a service whose `docker:` block has since been removed, a service with neither a command nor Docker config, or an `--image` the run mode cannot use is refused while the services are still up.
 
 ::: warning No Kubernetes mode
 `portler restart k8s` is rejected, and so is a plain `portler restart` of anything `portler up k8s` started, before anything is stopped. Restarting a Kubernetes stack has to re-apply manifests and re-establish port-forwards, which `restart` does not do. Run the two steps instead:

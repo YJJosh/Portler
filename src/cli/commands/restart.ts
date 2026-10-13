@@ -1,5 +1,5 @@
-import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
-import { applyProduction, productionServices } from '../../config/production.ts';
+import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
@@ -8,7 +8,7 @@ import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
-import { startPhase } from './up.ts';
+import { checkLaunch, launchConfig, startPhase } from './up.ts';
 
 export interface RestartLaunch {
   prod: boolean;
@@ -300,19 +300,18 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       process.stdout.write(`[portler] ${name}: the recorded image pin does not apply in this run mode and is dropped\n`);
     }
 
-    // Check --image before anything is stopped. applyImageOverrides rejects an unknown
+    // Everything startPhase checks before it spawns anything is checked here, before the
+    // stop, on the configuration it will run with; any of it failing after the stop would
+    // leave the requested services down with nothing restarted. That is the run mode the
+    // launch replays (a recorded Docker mode whose docker: config has since been removed),
+    // the commands and container names, --image (applyImageOverrides rejects an unknown
     // service or one that does not run in Docker in this mode, and a target this restart
-    // leaves running would keep its old image. Either failure after the stop would leave
-    // the requested services down with nothing restarted.
-    if (Object.keys(launch.images).length > 0) {
-      applyImageOverrides(configForRunMode(rawConfig, launch.mode), launch.images);
-      validateImageOverrideTargets(launch.images, starting, runningNow);
-    }
-
-    // prod.require too: a deployment value that has gone missing is reported while the
-    // services are still up, not after they were stopped and could not start again.
+    // leaves running would keep its old image), and prod.require (a deployment value that
+    // has gone missing).
+    const { config: runConfig } = launchConfig(rawConfig, launch.mode, { prod: launch.prod, images: launch.images });
+    checkLaunch(runConfig, launch.mode, starting);
+    if (Object.keys(launch.images).length > 0) validateImageOverrideTargets(launch.images, starting, runningNow);
     if (launch.prod) {
-      const runConfig = applyProduction(configForRunMode(rawConfig, launch.mode), true);
       assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), {
         projectSetup: launch.setup !== false,
       });
