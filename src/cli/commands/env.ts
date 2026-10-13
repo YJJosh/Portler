@@ -13,6 +13,7 @@ import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
+import { validateK8sMode } from './up-k8s.ts';
 
 /**
  * Return the current port assignments plus their generated env, allocating
@@ -131,7 +132,10 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     const config = applyProduction(configForRunMode(productionServices(loadedConfig, prod, requested), mode), prod);
     const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
     if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
+    // A typed mode token must describe a launch that could happen: refuse what `up docker`
+    // or `up k8s` would refuse instead of printing an environment no launch could get.
     if (modeExplicit && mode === 'docker' && service) validateDockerMode(config, [service.name]);
+    if (modeExplicit && mode === 'k8s') validateK8sMode(config, service ? [service.name] : []);
 
     const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a

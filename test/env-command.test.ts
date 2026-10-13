@@ -132,6 +132,21 @@ describe('env for a running service', () => {
     assert.match(run('backend', '--reveal').stderr, /--reveal applies to "env --prod"/);
   });
 
+  it('refuses a typed k8s mode for a service that up k8s would refuse', async () => {
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
+    command: node api.js
+    port: 5000
+`, 'utf8');
+    const refused = run('k8s', 'api');
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /service "api" has no container config for Kubernetes/);
+    assert.equal(refused.stdout, '');
+
+    const backend = run('k8s', 'backend');
+    assert.equal(backend.status, 0, backend.stderr);
+    assert.equal(value(backend.stdout, 'MODE'), 'docker');
+  });
+
   it('refuses --prod for a service started with "up k8s", which has no production mode', async () => {
     await record({ runMode: 'k8s' });
     const result = run('backend', '--prod');
