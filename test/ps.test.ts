@@ -128,7 +128,7 @@ describe('portler ps', () => {
     await fs.writeFile(path.join(projectDir, 'portler.yml'), 'services:\n  app:\n    command: node -e ""\n');
     const unconfigured = runPs();
     assert.equal(unconfigured.status, 1);
-    assert.match(unconfigured.stderr, /unknown service "proxy"/);
+    assert.match(unconfigured.stderr, /unknown service "proxy".*Available services: app\./);
   });
 
   it('reports each entry by the same liveness the teardown uses', { timeout: 15_000 }, async () => {
