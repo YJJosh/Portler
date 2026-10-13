@@ -42,7 +42,8 @@ Options:
                           only the in-use check (ownership is always required);
                           for "down": DANGEROUS last resort — signal pids
                           whose identity cannot be verified
-  -f, --follow            Keep streaming new output for "logs"
+  -f, --follow            Keep streaming new output for "logs" (captured files
+                          are followed across service restarts)
       --volumes           For "down k8s": ALSO delete PersistentVolumeClaims.
                           Without it, stored data survives a down/up cycle.
       --volume-set <name> Use the <volume>--<name> variant of managed "@" volumes

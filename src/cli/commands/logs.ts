@@ -47,23 +47,36 @@ async function printLogFile(serviceName: string, filePath: string): Promise<void
 
 /**
  * Tail a captured log file forever: print what exists, then poll for appended
- * bytes. A restarted service truncates its file, so a shrink starts over.
+ * bytes. A restart replaces the file; reset on a new generation, or a shrink.
  */
 async function followLogFile(serviceName: string, filePath: string): Promise<void> {
   const printer = createLinePrinter(serviceName, process.stdout);
   let position = 0;
+  let generation: string | undefined;
 
   for (;;) {
-    const stats = await fs.stat(filePath).catch(() => null);
-
-    if (stats && stats.size < position) position = 0;
-    if (stats && stats.size > position) {
-      const handle = await fs.open(filePath, 'r');
+    // Open before stat so identity, size and bytes refer to the same generation,
+    // even when a restart replaces the path during this poll.
+    const handle = await fs.open(filePath, 'r').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (handle) {
       try {
-        const length = stats.size - position;
-        const { bytesRead, buffer } = await handle.read(Buffer.alloc(length), 0, length, position);
-        printer.write(buffer.subarray(0, bytesRead));
-        position += bytesRead;
+        const stats = await handle.stat();
+        const currentGeneration = `${stats.dev}:${stats.ino}:${stats.birthtimeMs}`;
+        if (currentGeneration !== generation || stats.size < position) {
+          // Do not merge an old run's trailing partial line into the new run.
+          printer.flush();
+          position = 0;
+        }
+        generation = currentGeneration;
+        if (stats.size > position) {
+          const length = stats.size - position;
+          const { bytesRead, buffer } = await handle.read(Buffer.alloc(length), 0, length, position);
+          printer.write(buffer.subarray(0, bytesRead));
+          position += bytesRead;
+        }
       } finally {
         await handle.close();
       }
