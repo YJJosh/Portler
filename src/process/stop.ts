@@ -31,7 +31,7 @@ import { identityVerdict, readProcessStartToken } from './identity.ts';
 import type { IdentityVerdict } from './identity.ts';
 import { removeOwnedContainer, removeOwnedNetwork, warnForeignResource } from './ownership.ts';
 import type { RemovalOutcome } from './ownership.ts';
-import { isPidRunning, readPids, removePidEntries } from './pids.ts';
+import { isPidAlive, isPidRunning, processGroupAlive, processGroupAliveAfterKill, readPids, removePidEntries } from './pids.ts';
 import type { PidServiceInfo } from '../types/index.ts';
 
 const SIGTERM_GRACE_MS = 1_500;
@@ -69,15 +69,14 @@ export interface StopResult {
 /** 'alive' also covers EPERM: the group exists, it is simply not ours to signal. */
 export type GroupState = 'alive' | 'gone';
 
+/** A group holding only zombies is gone: see processGroupAlive. */
 function realProcessGroupState(pid: number): GroupState {
-  if (!Number.isInteger(pid) || pid <= 0) return 'gone';
+  return processGroupAlive(pid) ? 'alive' : 'gone';
+}
 
-  try {
-    process.kill(-pid, 0);
-    return 'alive';
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM' ? 'alive' : 'gone';
-  }
+/** The same question for a group this stop has sent SIGKILL: see processGroupAliveAfterKill. */
+function realProcessGroupStateAfterKill(pid: number): GroupState {
+  return processGroupAliveAfterKill(pid) ? 'alive' : 'gone';
 }
 
 /**
@@ -116,7 +115,11 @@ function realSendSignal(pid: number, signal: NodeJS.Signals): SignalOutcome {
 export interface StopHooks {
   readStartToken?: (pid: number) => Promise<string | null>;
   pidRunning?: (pid: number) => boolean;
+  /** Like pidRunning, but a zombie counts as dead; defaults to pidRunning when that is injected. */
+  pidAlive?: (pid: number) => boolean;
   groupState?: (pid: number) => GroupState;
+  /** groupState for a group this stop has sent SIGKILL; defaults to groupState when that is injected. */
+  groupStateAfterKill?: (pid: number) => GroupState;
   sendSignal?: (pid: number, signal: NodeJS.Signals) => SignalOutcome;
   graceMs?: number;
   confirmMs?: number;
@@ -125,7 +128,9 @@ export interface StopHooks {
 interface Probes {
   readStartToken: (pid: number) => Promise<string | null>;
   pidRunning: (pid: number) => boolean;
+  pidAlive: (pid: number) => boolean;
   groupState: (pid: number) => GroupState;
+  groupStateAfterKill: (pid: number) => GroupState;
   sendSignal: (pid: number, signal: NodeJS.Signals) => SignalOutcome;
   graceMs: number;
   confirmMs: number;
@@ -135,16 +140,27 @@ function resolveHooks(hooks: StopHooks): Probes {
   return {
     readStartToken: hooks.readStartToken ?? ((pid) => readProcessStartToken(pid)),
     pidRunning: hooks.pidRunning ?? isPidRunning,
+    pidAlive: hooks.pidAlive ?? hooks.pidRunning ?? isPidAlive,
     groupState: hooks.groupState ?? realProcessGroupState,
+    groupStateAfterKill: hooks.groupStateAfterKill ?? hooks.groupState ?? realProcessGroupStateAfterKill,
     sendSignal: hooks.sendSignal ?? realSendSignal,
     graceMs: hooks.graceMs ?? SIGTERM_GRACE_MS,
     confirmMs: hooks.confirmMs ?? SIGKILL_CONFIRM_MS,
   };
 }
 
-/** True while the leader or any member of its group is still alive. */
-function isProcessGroupRunning(probes: Probes, pid: number): boolean {
-  return probes.groupState(pid) === 'alive' || probes.pidRunning(pid);
+/**
+ * True while the leader or any member of its group is still alive. A zombie is
+ * not: under a PID 1 that does not reap orphans a stopped service stays one for
+ * good, and waiting for it to vanish would turn every teardown there into a
+ * reported failure. The identity check still uses pidRunning, because a zombie
+ * leader keeps its start token and so still proves the group is ours.
+ * `afterKill` is set once this stop has sent the group SIGKILL: no member can
+ * start another process then, so the group state needs no repeated scans.
+ */
+function isProcessGroupRunning(probes: Probes, pid: number, afterKill: boolean): boolean {
+  const group = afterKill ? probes.groupStateAfterKill(pid) : probes.groupState(pid);
+  return group === 'alive' || probes.pidAlive(pid);
 }
 
 export type SignalAction = 'group' | 'none';
@@ -482,9 +498,10 @@ export async function stopServices(
   // re-probing it afterwards would then read as "still running" and turn a
   // completed teardown into a reported failure.
   const confirmedGone = new Set<Target>();
+  const sentKill = new Set<Target>();
   const observe = (target: Target): boolean => {
     if (confirmedGone.has(target)) return true;
-    if (isProcessGroupRunning(probes, target.info.pid)) return false;
+    if (isProcessGroupRunning(probes, target.info.pid, sentKill.has(target))) return false;
     confirmedGone.add(target);
     return true;
   };
@@ -506,6 +523,7 @@ export async function stopServices(
   // licenses reporting a service as stopped and dropping its bookkeeping.
   const killDeadline = Date.now() + probes.confirmMs;
   const killed = survivors.filter((target) => killRound.get(target)!.status === 'signalled');
+  for (const target of killed) sentKill.add(target);
   while (Date.now() < killDeadline && !killed.every((target) => observe(target))) {
     await sleep(POLL_MS);
   }

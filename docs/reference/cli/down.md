@@ -45,6 +45,14 @@ The identity check runs **twice**: immediately before `SIGTERM`, and again befor
 
 `down` reports a service as `stopped` only when its **process group is confirmed gone**. Sending a signal is not a teardown: the kill can be refused by the kernel (`EPERM`), the second identity check can refuse to send it, or the group can simply survive. Each of those keeps the service out of `stopped`, keeps its PID entry (so it stays visible to `portler ps`), prints what happened, and makes `down` exit non-zero.
 
+### Zombies under a PID 1 that does not reap
+
+A process that has exited but whose parent never collected it (a zombie) still answers `kill(pid, 0)`, and so does a process group that holds nothing else. That is what happens when Portler runs inside a container whose PID 1 does not reap orphans, such as `tail -f /dev/null` or a plain shell: every service `down` stops becomes a zombie and stays one.
+
+On **Linux**, `down` therefore reads the group's members from `/proc` once the signal check says the group is there, and counts the group as gone only when two scans in a row find the same processes and threads, with nothing exiting while a scan reads them, and every one of them is a zombie, all its threads included (a process whose main thread has exited reads as a zombie while its other threads still run). If other processes on a busy host keep exiting while the scans read them, so that no two qualify, `down` waits out the grace period and sends SIGKILL as usual; after its own SIGKILL no member can start another process, so a single scan that finds only zombies is enough. Such a service is reported as stopped, and its PID entry and reservation are released. Anything unclear keeps the answer "still running": a member or thread that is not a zombie, one whose state cannot be read, or a `/proc` mounted with `hidepid`, which hides other users' processes. On macOS launchd always collects zombies, so this never comes up there.
+
+The zombies themselves stay until PID 1 collects them. Run such containers with `docker run --init`, or with tini as PID 1, so it does.
+
 ### `--force` is a last resort
 
 `--force` signals a pid Portler **cannot identify** — and it signals its whole process group. If the OS recycled that pid onto something else, `--force` kills a stranger's process tree. It is not a routine flag and it is not the way to migrate.

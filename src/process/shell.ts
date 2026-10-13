@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import type { EnvMap } from '../types/index.ts';
+import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
 
 export interface ShellOptions {
   /** Called with every signal that is forwarded to the command's process group. */
@@ -43,14 +44,9 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   }
 }
 
-/** True while any process is left in the group (EPERM counts: it is there, just not ours). */
+/** True while the group holds a process that can run; a zombie-only group is gone (see processGroupAlive). */
 function groupAlive(pgid: number): boolean {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
+  return processGroupAlive(pgid);
 }
 
 /**
@@ -76,9 +72,10 @@ async function drainGroup(pgid: number, deadlineMs: number): Promise<void> {
       // killed member stays in the group as a zombie. Confirm the group is gone
       // before returning, and say so when it is not: the exit code stays the
       // shell's, since nothing more can be done to a process that survived SIGKILL.
+      // After SIGKILL no member can start another process, so one scan is exact.
       const confirmUntil = Date.now() + 2000;
-      while (groupAlive(pgid) && Date.now() < confirmUntil) await new Promise((resolve) => setTimeout(resolve, 50));
-      if (groupAlive(pgid)) process.stderr.write(`[portler] process group ${pgid} is still present after SIGKILL (unreaped?); giving up on it\n`);
+      while (processGroupAliveAfterKill(pgid) && Date.now() < confirmUntil) await new Promise((resolve) => setTimeout(resolve, 50));
+      if (processGroupAliveAfterKill(pgid)) process.stderr.write(`[portler] process group ${pgid} is still present after SIGKILL (unreaped?); giving up on it\n`);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));

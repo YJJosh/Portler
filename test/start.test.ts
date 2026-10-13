@@ -11,6 +11,7 @@ import { buildStartEnv, selectStartService } from '../src/cli/commands/start.ts'
 import { main } from '../src/cli/index.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyProduction } from '../src/config/production.ts';
+import { isPidAlive } from '../src/process/pids.ts';
 import { runShell } from '../src/process/shell.ts';
 
 const dirs: string[] = [];
@@ -176,14 +177,12 @@ services:
     const waited = Date.now() - startedAt;
     assert.ok(waited >= 250 && waited < 5000, `waited ${waited} ms for the deadline`);
     const pid = Number((await fs.readFile(path.join(cfg.projectDir, 'bg.pid'), 'utf8')).trim());
+    // isPidAlive, not kill(pid, 0): under a PID 1 that does not reap, the killed
+    // sleep stays a zombie and kill(pid, 0) keeps succeeding.
     let gone = false;
     for (let attempt = 0; attempt < 40 && !gone; attempt += 1) {
-      try {
-        process.kill(pid, 0);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      } catch {
-        gone = true;
-      }
+      if (isPidAlive(pid)) await new Promise((resolve) => setTimeout(resolve, 50));
+      else gone = true;
     }
     assert.ok(gone, 'the leftover was killed at the deadline');
     // A group that empties on its own ends the wait early.

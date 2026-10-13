@@ -17,10 +17,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
-import { isPidRunning, readPids, writePids } from '../src/process/pids.ts';
+import { isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
 import { signalDecision, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
+import { startZombieGroup } from './zombie-group.ts';
 
 let projectDir: string;
 const spawned: ChildProcess[] = [];
@@ -321,7 +322,10 @@ describe('stopServices', () => {
     assert.deepEqual(result.stopped, ['api']);
     assert.deepEqual(result.unverified, []);
     assert.deepEqual(result.failures, []);
-    assert.throws(() => process.kill(-pid, 0), { code: 'ESRCH' }, 'the whole group must be gone');
+    // Under a PID 1 that does not reap, the killed members stay as zombies and
+    // kill(-pid, 0) keeps succeeding, so ask whether anything in the group can
+    // still run, the same question stop answers.
+    assert.equal(processGroupAliveAfterKill(pid), false, 'nothing in the group may still run');
     assert.equal(await readPids(projectDir), null, 'the confirmed teardown must remove the PID file');
   });
 
@@ -383,6 +387,31 @@ describe('stopServices', () => {
  * The OS will not recycle a pid on cue, so the syscalls are injected. Everything
  * below the hooks is the real stopServices control flow.
  */
+describe('stopServices: a PID 1 that does not reap', () => {
+  it('reports a service as stopped once its group holds only zombies, and drops its entry', { skip: process.platform !== 'linux' }, async () => {
+    // In a container whose PID 1 never reaps orphans (tail -f /dev/null, a
+    // shell), a detached service that exits on SIGTERM stays a zombie. Its
+    // group still answers kill(-pgid, 0), so down used to wait, send SIGKILL,
+    // and report a failure every time, keeping the entry and the port.
+    const group = await startZombieGroup(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)']);
+    try {
+      const token = await readProcessStartToken(group.pgid);
+      assert.ok(token, 'the leader has a start token');
+      await writePidsFile({ api: pidInfo(group.pgid, token) });
+
+      const result = await stopServices(projectDir);
+
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.stopped, ['api']);
+      assert.deepEqual(result.remaining, []);
+      assert.equal(await readPids(projectDir), null, 'the entry is dropped');
+      assert.equal(isPidRunning(group.pgid), true, 'the leader is a zombie, so kill(pid, 0) still sees it');
+    } finally {
+      await group.release();
+    }
+  });
+});
+
 describe('stopServices: the SIGKILL round', () => {
   const PID = 424_242;
   const TOKEN = 'start-token-of-our-service';
@@ -519,6 +548,34 @@ describe('stopServices: the SIGKILL round', () => {
     assert.deepEqual(result.unverified, []);
     assert.deepEqual(result.failures, []);
     assert.equal(await readPids(projectDir), null, 'a confirmed teardown prunes the entry');
+  });
+
+  it('confirms a zombie-only group after its own SIGKILL even when the check before it never settles', async () => {
+    // Under a PID 1 that does not reap, on a busy host, other processes exiting
+    // mid-scan can keep the strict check answering "alive" through the grace
+    // period. After this stop's SIGKILL no member can start another process, so
+    // the after-kill check decides, and the entry is dropped instead of kept.
+    const signals: NodeJS.Signals[] = [];
+    const result = await stopServices(
+      projectDir,
+      undefined,
+      {},
+      stubbornHooks({
+        pidRunning: () => true, // a zombie leader still answers kill(pid, 0)
+        pidAlive: () => false, // ...but it is a zombie
+        groupState: () => 'alive', // the check before SIGKILL never settles
+        groupStateAfterKill: () => 'gone',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      }),
+    );
+
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'], 'the after-kill check is only used once SIGKILL went out');
+    assert.deepEqual(result.stopped, ['api']);
+    assert.deepEqual(result.failures, []);
+    assert.equal(await readPids(projectDir), null, 'the entry is dropped');
   });
 
   it('counts a group that vanished on its own (ESRCH) as stopped', async () => {

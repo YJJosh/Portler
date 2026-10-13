@@ -1,5 +1,5 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
@@ -179,6 +179,215 @@ export function isPidAlive(pid: number): boolean {
     return !result.stdout.trim().startsWith('Z');
   }
   return true;
+}
+
+/**
+ * True while the process group still holds a process that can run.
+ * kill(-pgid, 0) also succeeds for a group whose only members are zombies, and
+ * under a PID 1 that does not reap orphans (a container without an init) a
+ * stopped service's group stays like that for good, so the signal check alone
+ * would never see it go. On Linux, once the signal check says the group is
+ * there, its members are read from /proc and the group counts as gone only when
+ * two consecutive scans find the same members, all zombies (see
+ * groupHoldsOnlyZombies). A member counts as a zombie only when every one of its
+ * threads is: a multithreaded process whose main thread has exited reads as a
+ * zombie in /proc/<pid>/stat while its other threads keep running. Anything
+ * unclear keeps the answer "alive": no /proc, a member or thread whose state
+ * cannot be read, or a procfs mounted with hidepid,
+ * which hides other users' processes. On macOS launchd reaps orphans, and
+ * elsewhere the signal check decides. EPERM counts as alive: the group is
+ * there, just not ours to signal.
+ */
+export function processGroupAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  if (process.platform !== 'linux') return true;
+  return linuxGroupHasLiveMember(pgid);
+}
+
+function linuxGroupHasLiveMember(pgid: number): boolean {
+  if (!procShowsEveryProcess()) return true;
+  return !groupHoldsOnlyZombies(() => scanProcGroup(pgid));
+}
+
+/**
+ * Like processGroupAlive, for a group the caller has just sent SIGKILL. The kernel
+ * delivers a group signal to every member, a fork in progress included, so after it no
+ * member can start another process: one scan sees the whole group, and something that
+ * exits while the scan reads it is simply gone. Unlike processGroupAlive this needs no
+ * two matching scans, so other processes starting and exiting on a busy host cannot keep
+ * it from answering. A member SIGKILL has not finished yet still counts as alive.
+ */
+export function processGroupAliveAfterKill(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  if (process.platform !== 'linux') return true;
+  if (!procShowsEveryProcess()) return true;
+  return !groupDeadAfterKill(scanProcGroup(pgid));
+}
+
+/** The decision of processGroupAliveAfterKill for one scan: no member or thread read can run. */
+export function groupDeadAfterKill(scan: GroupScan): boolean {
+  return scan !== 'unknown' && !scan.live;
+}
+
+function procShowsEveryProcess(): boolean {
+  try {
+    return !procHidesProcesses(readFileSync('/proc/self/mounts', 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One pass over /proc: what it saw of the group, or 'unknown' when a member's state
+ * cannot be read. `members` holds every member pid it read and every thread of a zombie
+ * member it read (`pid/tid`). `settled` is false when a process or thread exited
+ * between the listing and its own read: it may have been ours and may have started one
+ * the listing missed, and its id can be reused by the next one, so groupHoldsOnlyZombies
+ * never matches such a scan.
+ */
+export type GroupScan = { members: string[]; live: boolean; settled: boolean } | 'unknown';
+
+/** One pass over a procfs (`procRoot` is only for tests). */
+export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
+  let entries: string[];
+  try {
+    entries = readdirSync(procRoot);
+  } catch {
+    return 'unknown';
+  }
+  const members: string[] = [];
+  let settled = true;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const stat = readProcState(`${procRoot}/${entry}/stat`);
+    // It exited after the listing. It may have been ours and may have forked a
+    // process this listing missed.
+    if (stat === 'gone') {
+      settled = false;
+      continue;
+    }
+    if (stat === 'unknown') return 'unknown';
+    if (stat.pgrp !== pgid) continue;
+    members.push(entry);
+    if (!isZombieState(stat.state)) return { members, live: true, settled };
+    // The /proc/<pid>/stat state is the main thread's. Its other threads may still run.
+    const threads = readThreads(`${procRoot}/${entry}/task`);
+    if (threads === 'gone') {
+      settled = false; // reaped since its stat was read
+      continue;
+    }
+    if (threads === 'unknown') return 'unknown';
+    members.push(...threads.tids.map((tid) => `${entry}/${tid}`));
+    if (!threads.settled) settled = false;
+    if (threads.live) return { members, live: true, settled };
+  }
+  return { members, live: false, settled };
+}
+
+function isZombieState(state: string): boolean {
+  return state === 'Z' || state === 'X';
+}
+
+/** A stat file's state and process group; 'gone' when the process or thread has exited since the listing. */
+function readProcState(path: string): { state: string; pgrp: number } | 'gone' | 'unknown' {
+  let stat: string;
+  try {
+    stat = readFileSync(path, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
+  }
+  // `pid (comm) state ppid pgrp ...`; comm may contain spaces or parentheses.
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  if (fields.length < 3) return 'unknown';
+  return { state: fields[0], pgrp: Number(fields[2]) };
+}
+
+/**
+ * A process's thread ids that were read, whether any of them can run, and whether all
+ * listed threads could be read; 'gone' when the process has been reaped since. A thread
+ * that exited between the listing and its own read may have started one this listing
+ * missed, so it leaves the result unsettled.
+ */
+function readThreads(taskDir: string): { tids: string[]; live: boolean; settled: boolean } | 'gone' | 'unknown' {
+  let entries: string[];
+  try {
+    entries = readdirSync(taskDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
+  }
+  const tids: string[] = [];
+  let settled = true;
+  for (const tid of entries) {
+    if (!/^\d+$/.test(tid)) continue;
+    const state = readProcState(`${taskDir}/${tid}/stat`);
+    if (state === 'gone') {
+      settled = false;
+      continue;
+    }
+    if (state === 'unknown') return 'unknown';
+    tids.push(tid);
+    if (!isZombieState(state.state)) return { tids, live: true, settled };
+  }
+  return { tids, live: false, settled };
+}
+
+/**
+ * Decides from repeated scans whether a group holds only zombies. One scan is not
+ * enough: a live process or thread can start another after the listing and exit
+ * before its own state is read, so the new one is missed. The answer is yes only when
+ * two consecutive scans are both settled (nothing exited between a listing and its
+ * read), record the same processes and threads, and none of them can run. Every
+ * process and thread of the second scan was then read as a zombie by the first one,
+ * before the second listing, so none of them could start one the second listing
+ * missed. Ids are not compared across a mid-read exit, since a new process or thread
+ * can reuse the id. A live member, an unreadable one, or scans that keep changing or
+ * stay unsettled for `attempts` scans keep the answer no. On a busy host other
+ * processes exiting mid-read can keep every scan unsettled; the answer then stays no
+ * until the caller has sent the group SIGKILL, after which processGroupAliveAfterKill
+ * answers from one scan.
+ */
+export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
+  let previous = scan();
+  for (let i = 1; i < attempts; i++) {
+    if (previous === 'unknown' || previous.live) return false;
+    const current = scan();
+    if (current === 'unknown' || current.live) return false;
+    if (previous.settled && current.settled && sameMembers(previous.members, current.members)) return true;
+    previous = current;
+  }
+  return false;
+}
+
+function sameMembers(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  return b.every((member) => seen.has(member));
+}
+
+/** True when the procfs at /proc is mounted with a hidepid option that hides processes. */
+export function procHidesProcesses(mounts: string): boolean {
+  for (const line of mounts.split('\n')) {
+    const [, mountPoint, type, options] = line.split(' ');
+    if (mountPoint !== '/proc' || type !== 'proc' || !options) continue;
+    for (const option of options.split(',')) {
+      if (!option.startsWith('hidepid=')) continue;
+      const value = option.slice('hidepid='.length);
+      if (value !== '0' && value !== 'off') return true;
+    }
+  }
+  return false;
 }
 
 export function runningServices(pids: PidsFile | null, serviceNames?: string[]): string[] {
