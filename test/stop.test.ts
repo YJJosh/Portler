@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
-import { isPidRunning, readPids, writePids } from '../src/process/pids.ts';
+import { isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
 import { signalDecision, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
@@ -322,7 +322,10 @@ describe('stopServices', () => {
     assert.deepEqual(result.stopped, ['api']);
     assert.deepEqual(result.unverified, []);
     assert.deepEqual(result.failures, []);
-    assert.throws(() => process.kill(-pid, 0), { code: 'ESRCH' }, 'the whole group must be gone');
+    // Under a PID 1 that does not reap, the killed members stay as zombies and
+    // kill(-pid, 0) keeps succeeding, so ask whether anything in the group can
+    // still run, the same question stop answers.
+    assert.equal(processGroupAliveAfterKill(pid), false, 'nothing in the group may still run');
     assert.equal(await readPids(projectDir), null, 'the confirmed teardown must remove the PID file');
   });
 
