@@ -27,6 +27,9 @@ import { sleep } from './sleep.ts';
 
 const OWNER_FILE = 'owner';
 const POLL_MS = 100;
+// Slack past a dead owner's stale time, for the lock's mtime and Date.now()
+// coming from different clocks.
+const DEAD_OWNER_MARGIN_MS = 1_000;
 
 /**
  * Liveness check for a lock's recorded owner. Deliberately local rather than
@@ -129,6 +132,11 @@ export function isTakeoverAllowed(owner: LockOwner | null, ageMs: number, staleM
   return !isProcessAlive(owner.pid);
 }
 
+/** An owner on this host whose process no longer exists. */
+function ownerProvablyDead(owner: LockOwner | null, thisHost: string): boolean {
+  return owner !== null && owner.host === thisHost && !isProcessAlive(owner.pid);
+}
+
 /**
  * Take over a stale lock. The rename makes the removal exclusive: if another
  * process renamed it first we get ENOENT and simply retry the mkdir, rather
@@ -212,7 +220,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
 
       // Someone else owns the existing directory; continue into the wait path.
-      if (Date.now() - startedAt > options.waitMs) throw timeoutError(lockDir, options, lastOwner, host);
+      let deadline = startedAt + options.waitMs;
 
       try {
         const stat = await fs.stat(lockDir);
@@ -222,12 +230,23 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
           await takeOverStaleLock(lockDir);
           continue;
         }
+
+        // A holder on this host that is provably dead (a command killed while
+        // inside the critical section) cannot release, and its lock becomes
+        // ours to take once it is staleMs old. Waiting for that is bounded and
+        // ends with the lock; giving up at waitMs instead makes every command
+        // started shortly after the crash fail outright.
+        if (ownerProvablyDead(lastOwner, host)) {
+          deadline = Math.max(deadline, stat.mtimeMs + options.staleMs + DEAD_OWNER_MARGIN_MS);
+        }
       } catch (statError) {
         // ENOENT: the holder released the lock between our failed mkdir and the
         // stat — retry immediately. Anything else (e.g. permissions) falls
         // through to the sleep so it cannot busy-spin.
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
       }
+
+      if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host);
 
       await sleep(POLL_MS);
       continue;

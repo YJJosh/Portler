@@ -161,6 +161,47 @@ describe('withDirLock', () => {
     assert.equal(await fs.access(lockDir).then(() => true, () => false), false);
     await withDirLock(lockDir, OPTIONS, async () => undefined);
   });
+
+  it('waits out a lock whose owner on this host died, instead of giving up before it can be taken', async () => {
+    // A command killed inside its critical section leaves the lock behind. It
+    // can be taken over once it is staleMs old; a waiter that gives up at
+    // waitMs first fails although the lock was about to become free.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const lockDir = path.join(dir, 'crashed.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+
+    const options = { staleMs: 600, waitMs: 200, description: 'test' };
+    const started = Date.now();
+    let ran = false;
+    await withDirLock(lockDir, options, async () => {
+      ran = true;
+    });
+
+    assert.equal(ran, true);
+    assert.ok(Date.now() - started >= options.staleMs - 50, 'the lock is only taken once it is stale');
+  });
+
+  it('still gives up at waitMs on a lock whose owner is alive', async () => {
+    const lockDir = path.join(dir, 'busy.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token: 'busy' }),
+    );
+
+    const started = Date.now();
+    await assert.rejects(
+      withDirLock(lockDir, { staleMs: 600, waitMs: 200, description: 'test' }, async () => undefined),
+      LockTimeoutError,
+    );
+    assert.ok(Date.now() - started < 600, 'a live owner is not waited for past waitMs');
+    await fs.rm(lockDir, { recursive: true, force: true });
+  });
 });
 
 describe('updatePids under the project lock', () => {
