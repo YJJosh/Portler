@@ -19,13 +19,14 @@ Prints one row per running service with:
 - **container** — the Docker container name (Docker services)
 - **image** — the `--image` pin the service runs from (shown when any service has one)
 
-The status comes from the recorded process and, for a Docker service, its container:
+The status comes from the recorded process, its surviving process group, and, for a Docker service, its container:
 
 | Status | Meaning |
 |---|---|
 | `running` | The recorded process is alive and is the one Portler started (its start time matches). |
 | `running (container)` | A Docker service whose supervising `docker run` process is gone, but whose container runs on under this project's label. |
-| `dead (stale)` | The process has exited, is a zombie, or its pid now belongs to an unrelated process. |
+| `running (group)` | The leader has exited but its group still has live members (or cannot be confirmed gone). Ownership is unverified; `ps` warns, and `up` keeps the entry instead of starting another copy. This is not permission to signal the group. |
+| `dead (stale)` | The process and its group have exited (including zombie-only groups on Linux), or its pid now belongs to an unrelated process, with no live owned container remaining. |
 | `unknown` | The process is gone and its container could not be inspected (Docker daemon down, permission error); `ps` prints the reason as a warning. |
 
 ## Example

@@ -62,6 +62,9 @@ provably belongs to someone else. Inspect the pid first with
 With a "proxy:" block in portler.yml, "ps proxy" and "down proxy" select just
 the reverse proxy.
 
+"up" also refuses surviving process groups whose leader has exited: their PID
+entries are kept, and "ps" reports "running (group)" with unverified ownership.
+
 "clean" refuses running services, including containers left by dead supervisors
 and containers whose liveness cannot be checked; only --force stops them first.
 

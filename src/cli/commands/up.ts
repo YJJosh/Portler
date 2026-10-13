@@ -237,6 +237,7 @@ type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status:
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
   const liveness = await serviceLiveness(projectDir, info);
   if (liveness.status === 'running' && liveness.via === 'pid') return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  if (liveness.status === 'running' && liveness.via === 'group') return { status: 'alive', reason: liveness.message };
   if (liveness.status === 'running') {
     return { status: 'alive', reason: `its container "${info.dockerContainer}" is still running under another run` };
   }
@@ -334,7 +335,7 @@ export async function startPhase(
   // that container. One that cannot be inspected is taken as running too.
   const runningNames = new Set(
     await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
-      process.stderr.write(`[portler] warning: could not inspect ${serviceName}'s container (${message}); treating it as running\n`);
+      process.stderr.write(`[portler] warning: ${serviceName}: ${message}; treating it as running\n`);
     }),
   );
 
