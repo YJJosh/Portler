@@ -1090,6 +1090,48 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('gives a removed container whose leader was already gone one confirm window, not two', { timeout: 15_000 }, async () => {
+    // The shell had exited before down started and its group never goes. The
+    // settle wait spends the confirm window on it; the later hold-back must not
+    // add a second one, so the warning comes after about one window in all.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    const probeTimes: number[] = [];
+    const warnings: string[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    const confirmMs = 500;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs,
+        pidRunning: () => false, // the leader exited before down started
+        pidAlive: () => false,
+        groupState: () => {
+          probeTimes.push(Date.now());
+          return 'alive'; // and its group never goes
+        },
+        sendSignal: () => ({ status: 'sent' }),
+      });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, ['db']);
+      assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
+      assert.equal(warnings.filter((line) => line.includes('warning')).length, 1, 'one warning');
+      const span = probeTimes[probeTimes.length - 1]! - probeTimes[0]!;
+      assert.ok(span < confirmMs * 1.6, `the group was watched for ${span} ms, about one ${confirmMs} ms window`);
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('still keeps the entry when the group outlives its removed container', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);

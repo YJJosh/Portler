@@ -577,8 +577,15 @@ export async function stopServices(
   // group still alive under it): the refusal stands, with the warning the round
   // held back. The sampled verdict is what counts: a leader seen gone with its
   // group seen gone is stopped, whatever a later look at that pid number finds.
-  const lateDeadline = Date.now() + probes.confirmMs;
-  while (Date.now() < lateDeadline && lateSettling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
+  // A service that already sat through the settle wait keeps that wait's
+  // deadline instead of getting a second window, so no service waits longer
+  // than one confirm window in all.
+  const lateStart = Date.now();
+  const lateDeadlineFor = (target: Target): number =>
+    settling.includes(target) ? settleDeadline : lateStart + probes.confirmMs;
+  while (
+    lateSettling.some((target) => Date.now() < lateDeadlineFor(target) && probes.groupState(target.info.pid) === 'alive')
+  ) {
     await sleep(POLL_MS);
   }
   for (const target of lateSettling) {
