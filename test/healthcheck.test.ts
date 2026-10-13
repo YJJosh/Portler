@@ -308,9 +308,10 @@ describe('waitForServiceReady', () => {
     }
   });
 
-  it("reads a detached log's refusals in chunks, whatever its size", () => {
-    // A long build's output can be large, so the log is scanned 64 KiB at a
-    // time; a line or a character split across two reads still counts.
+  it("reads a detached log's refusals from its last MiB, in chunks", () => {
+    // The launch shell builds first and checks names afterwards, so a refusal
+    // follows any build output. Only the last MiB is read, 64 KiB at a time; a
+    // line or a character split across two reads still counts.
     const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-scan-'));
     try {
       const logFile = path.join(dir, 'api.log');
@@ -324,17 +325,32 @@ describe('waitForServiceReady', () => {
       writeFileSync(logFile, `${filler}[portler] error: abé network "portler-shop" is someone else's\r\nbuild output\n`);
       assert.deepEqual(portlerErrorsInLog(logFile), [`abé network "portler-shop" is someone else's`]);
 
-      // Several megabytes of output around four refusals: the first three are
-      // reported, in order.
+      // Several megabytes of build output, then four refusals: the last three
+      // are reported, in order.
       const noise = `${'step 1/9 : RUN pnpm install --frozen-lockfile '.repeat(20)}\n`.repeat(4_000);
       writeFileSync(
         logFile,
-        `${noise}[portler] error: one\n${noise}[portler] error: two\n[portler] error:   \n[portler] error: three\n${noise}[portler] error: four\n`,
+        `${noise}${noise}[portler] error: one\n[portler] error: two\n[portler] error:   \n[portler] error: three\nbuild output\n[portler] error: four\n`,
       );
-      assert.deepEqual(portlerErrorsInLog(logFile), ['one', 'two', 'three']);
+      assert.deepEqual(portlerErrorsInLog(logFile), ['two', 'three', 'four']);
 
-      // A refusal that runs on for a megabyte is cut, and says so.
-      writeFileSync(logFile, `[portler] error: ${'x'.repeat(1024 * 1024)}\n[portler] error: next\n`);
+      // A refusal before the last MiB is not read.
+      writeFileSync(logFile, `[portler] error: early\n${noise}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), []);
+
+      // The last MiB below starts at the "[" of a line that began earlier, so
+      // the rest of that line is not taken for a refusal; when the byte before
+      // the window is a newline, the line is whole and counts.
+      const tail = 1024 * 1024;
+      const window = `[portler] error: fake\n${'b'.repeat(tail - 45)}\n[portler] error: real\n`;
+      assert.equal(Buffer.byteLength(window), tail);
+      writeFileSync(logFile, `zzz${window}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), ['real']);
+      writeFileSync(logFile, `zzz\n${window}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), ['fake', 'real']);
+
+      // A refusal that runs on for hundreds of kilobytes is cut, and says so.
+      writeFileSync(logFile, `[portler] error: ${'x'.repeat(300 * 1024)}\n[portler] error: next\n`);
       const [long, next] = portlerErrorsInLog(logFile);
       assert.equal(long, `${'x'.repeat(500)}…`);
       assert.equal(next, 'next');
@@ -346,6 +362,13 @@ describe('waitForServiceReady', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('reads no more of a detached log than it held when the scan started', { skip: process.platform === 'win32' }, () => {
+    // A process the launch shell left behind can keep appending to the log
+    // while it is scanned. /dev/zero stands in for a file that never ends:
+    // its size reads as 0 and a read never reaches end-of-file.
+    assert.deepEqual(portlerErrorsInLog('/dev/zero'), []);
   });
 
   it('does not let the Docker hold run past the attempt deadline', async () => {

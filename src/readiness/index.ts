@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { closeSync, openSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import net from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
@@ -183,16 +183,20 @@ const PORTLER_ERROR_PREFIX = '[portler] error: ';
 const MAX_LOG_REASONS = 3;
 const MAX_LOG_REASON_LENGTH = 500;
 const LOG_READ_CHUNK = 64 * 1024;
+const LOG_TAIL_BYTES = 1024 * 1024;
 
 /**
- * Portler's own refusals from a detached service's log: the launch shell
- * writes them (a foreign container, network or volume under the name it needs)
- * and exits before the service starts. The log is truncated on every start,
- * so these lines belong to this run. A foreground run already shows them above.
+ * Portler's own refusals from a detached service's log. The launch shell
+ * builds the image first and then checks the network, volumes and container
+ * name, exiting at the first one that is not this project's, so a refusal is
+ * the last thing it writes, after any build output. The log is truncated on
+ * every start, so these lines belong to this run. A foreground run already
+ * shows them above.
  *
- * The log can be a long build's output, so it is read in fixed-size chunks
- * and at most the start of one line is held at a time; the scan stops at the
- * third refusal.
+ * Only the last MiB the log held when the scan started is read, 64 KiB at a
+ * time: a long build costs nothing beyond that, and a process left behind
+ * that keeps appending cannot keep the scan going. At most the start of one
+ * line and the last three refusals are held.
  */
 export function portlerErrorsInLog(logFile: string): string[] {
   let fd: number;
@@ -218,29 +222,44 @@ export function portlerErrorsInLog(logFile: string): string[] {
     if (text.startsWith(PORTLER_ERROR_PREFIX)) {
       const reason = text.slice(PORTLER_ERROR_PREFIX.length).trim();
       if (reason !== '') reasons.push(cut ? `${reason}…` : reason);
+      if (reasons.length > MAX_LOG_REASONS) reasons.shift();
     }
     line = '';
     cut = false;
   };
   try {
+    const end = fstatSync(fd).size;
+    // A window that starts inside a line drops that line: read from one byte
+    // earlier and discard through the first newline, which is that byte when
+    // the window starts on a line of its own.
+    let position = end > LOG_TAIL_BYTES ? end - LOG_TAIL_BYTES - 1 : 0;
+    let skipping = position > 0;
     const decoder = new StringDecoder('utf8');
     const buffer = Buffer.alloc(LOG_READ_CHUNK);
-    for (;;) {
-      const read = readSync(fd, buffer, 0, buffer.length, null);
-      const text = read === 0 ? decoder.end() : decoder.write(buffer.subarray(0, read));
+    while (position < end) {
+      const read = readSync(fd, buffer, 0, Math.min(buffer.length, end - position), position);
+      if (read === 0) break;
+      position += read;
+      const text = decoder.write(buffer.subarray(0, read));
       let from = 0;
+      if (skipping) {
+        const newline = text.indexOf('\n');
+        if (newline === -1) continue;
+        skipping = false;
+        from = newline + 1;
+      }
       for (let newline = text.indexOf('\n', from); newline !== -1; newline = text.indexOf('\n', from)) {
         append(text.slice(from, newline));
         endLine();
-        if (reasons.length === MAX_LOG_REASONS) return reasons;
         from = newline + 1;
       }
       append(text.slice(from));
-      if (read === 0) {
-        endLine();
-        return reasons.slice(0, MAX_LOG_REASONS);
-      }
     }
+    if (!skipping) {
+      append(decoder.end());
+      endLine();
+    }
+    return reasons;
   } catch {
     return reasons;
   } finally {
