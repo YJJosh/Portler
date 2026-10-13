@@ -185,7 +185,9 @@ export async function runSetupStep(
   env: EnvMap,
   mode: string,
   force = false,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   const steps = service ? service.setup : config.setup;
   const name = service ? `service:${service.name}` : 'project';
   const key = `${mode}:${name}`;
@@ -241,13 +243,15 @@ export async function runSetupStep(
       if (done.delete(identity)) await persist();
     }
 
+    signal?.throwIfAborted();
     process.stdout.write(`[portler] setup ${name}: ${step.run}\n`);
     ran += 1;
     let interrupted = undefined as NodeJS.Signals | undefined;
-    const code = await runShell(step.run, cwd, env, { onSignal: (signal) => { interrupted = signal; } });
+    const code = await runShell(step.run, cwd, env, { signal, onSignal: (signal) => { interrupted = signal; } });
     // A cancelled step is not a finished step, whatever its exit code: a command that
     // handles SIGTERM and exits 0 must not be receipted, and neither the next step nor
     // the services behind it may run.
+    signal?.throwIfAborted();
     if (interrupted !== undefined) {
       throw new Error(`setup ${name}: interrupted by ${interrupted} while running "${step.run}"; the step is not recorded as done`);
     }

@@ -15,7 +15,7 @@ portler up k8s [service...] [--detach] [--image <service>=<image>]
 - Assigns a free port to every service that declares one (see [Ports](/guide/ports)) and prints the `SERVICE / PORT / URL` table.
 - Starts services in [dependency order](/guide/dependencies), waiting for each dependency's healthcheck.
 - With service names, starts only those services **plus their dependencies**.
-- In the foreground (default), `Ctrl+C` stops the stack. If another run depends on some of it (`portler restart api` from a second terminal keeps the db this run started), the foreground run stops the rest, names what it kept, and keeps showing that output until it stops; a `Ctrl+C` at that point stops it too. With `-d/--detach`, services keep running in the background — use [`portler ps`](/reference/cli/ps), [`portler logs`](/reference/cli/logs), and [`portler down`](/reference/cli/down).
+- In the foreground (default), `Ctrl+C` stops the stack. For local and Docker starts, `Ctrl+C` or `SIGTERM` during startup (including setup and readiness checks) rolls back only this invocation’s services and releases their ports, exiting with code 130 or 143 respectively. If another run depends on some of it (`portler restart api` from a second terminal keeps the db this run started), the foreground run stops the rest, names what it kept, and keeps showing that output until it stops; a `Ctrl+C` at that point stops it too. With `-d/--detach`, services keep running in the background — use [`portler ps`](/reference/cli/ps), [`portler logs`](/reference/cli/logs), and [`portler down`](/reference/cli/down).
 - When a [`proxy:`](/guide/proxy) block exists, the proxy starts with the stack and the project URL is printed.
 
 ## Run modes

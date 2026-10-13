@@ -53,6 +53,9 @@ Options:
                           digest reference CI pushed)
   -h, --help              Show help
 
+Foreground "up" (local/Docker): Ctrl-C or SIGTERM during startup cancels setup
+and readiness, stops only this run's services and releases their ports (exit 130/143).
+
 "down" only signals a process group whose leader's recorded start token still
 matches, so a recycled pid is never killed. "--force" also signals groups whose
 identity cannot be proven (legacy entries, unreadable tokens) — never one that
