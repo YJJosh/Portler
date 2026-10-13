@@ -509,8 +509,40 @@ export async function stopServices(
     }));
 
   const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  // A dependent that a level could not stop is still running, so what it
+  // depends on (directly or through other selected services) stays up too:
+  // stopping it would leave the dependent without it, and a restart would then
+  // abort on that failure with the dependency already down.
+  const heldBy = new Map<string, Set<string>>();
+  const holdDependencies = (dependent: string): void => {
+    const stack = [dependent];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      for (const dep of pids.services[current]?.dependsOn ?? []) {
+        if (dep === current || !selected.includes(dep)) continue;
+        const holders = heldBy.get(dep) ?? new Set<string>();
+        if (holders.has(current)) continue;
+        holders.add(current);
+        heldBy.set(dep, holders);
+        stack.push(dep);
+      }
+    }
+  };
   for (const level of levels) {
-    const result = await stopLevel(projectDir, level, options, hooks, false);
+    const held = level.filter((name) => heldBy.has(name));
+    for (const name of held) {
+      const holders = [...heldBy.get(name)!];
+      total.remaining.push(name);
+      total.failures.push(
+        `did not stop service "${name}": ${holders.map((holder) => `"${holder}"`).join(', ')} ${holders.length === 1 ? 'depends' : 'depend'} on it and could not be stopped`,
+      );
+      // A held service stays up, so what it depends on stays up as well.
+      holdDependencies(name);
+    }
+    const free = level.filter((name) => !heldBy.has(name));
+    if (free.length === 0) continue;
+    const result = await stopLevel(projectDir, free, options, hooks, false);
+    for (const name of result.remaining) holdDependencies(name);
     total.stopped.push(...result.stopped);
     total.unverified.push(...result.unverified);
     total.failures.push(...result.failures);

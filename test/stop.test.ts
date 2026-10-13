@@ -324,6 +324,47 @@ describe('stopServices', () => {
     assert.equal(await readPids(projectDir), null);
   });
 
+
+  it('leaves what a dependent needs running when that dependent could not be stopped', async () => {
+    // cache <- db <- api, and web on its own. api has no start token, so its
+    // identity cannot be proven and it is kept; db and cache must then stay up
+    // with it instead of being stopped under a still-running api.
+    const entry = (pid: number, token: string | undefined, dependsOn: string[]): PidServiceInfo => ({
+      ...pidInfo(pid, token),
+      dependsOn,
+    });
+    await writePidsFile({
+      cache: entry(9104, 'cache-token', []),
+      db: entry(9103, 'db-token', ['cache']),
+      api: entry(9101, undefined, ['db']),
+      web: entry(9102, 'web-token', []),
+    });
+    const tokens: Record<number, string> = { 9102: 'web-token', 9103: 'db-token', 9104: 'cache-token' };
+    const signalled = new Set<number>();
+    const signals: string[] = [];
+    const result = await stopServices(projectDir, undefined, {}, {
+      graceMs: 20,
+      confirmMs: 50,
+      pidRunning: (pid) => !signalled.has(pid),
+      pidAlive: (pid) => !signalled.has(pid),
+      readStartToken: async (pid) => (signalled.has(pid) ? null : tokens[pid] ?? null),
+      groupState: (pid) => (signalled.has(pid) ? 'gone' : 'alive'),
+      sendSignal: (pid, signal) => {
+        signals.push(`${pid}:${signal}`);
+        signalled.add(pid);
+        return { status: 'sent' };
+      },
+    });
+
+    assert.deepEqual(signals, ['9102:SIGTERM'], 'only web may be signalled; db and cache stay up under api');
+    assert.deepEqual(result.stopped, ['web']);
+    assert.deepEqual(result.unverified, ['api']);
+    assert.deepEqual([...result.remaining].sort(), ['api', 'cache', 'db']);
+    assert.ok(result.failures.some((f) => f.includes('did not stop service "db"') && f.includes('"api" depends on it')));
+    assert.ok(result.failures.some((f) => f.includes('did not stop service "cache"') && f.includes('"db" depends on it')));
+    const pids = await readPids(projectDir);
+    assert.deepEqual(Object.keys(pids?.services ?? {}).sort(), ['api', 'cache', 'db']);
+  });
   it('leaves other services running when stopping one by name', async () => {
     const keep = await startSleeper();
     const drop = await startSleeper();
