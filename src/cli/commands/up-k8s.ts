@@ -23,7 +23,7 @@ import {
   writeManifestFiles,
 } from '../../k8s/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
-import { readPids, runningServices, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
+import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { isTcpReady, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
@@ -145,14 +145,15 @@ async function startK8sPhase(
   cluster: ClusterInfo,
   selectedNames: string[],
 ): Promise<K8sStack> {
-  const runningNames = new Set(runningServices(await readPids(config.projectDir)));
+  const pids = await readPids(config.projectDir);
+  const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
   ensureNoOverlap(runningNames, selectedNames);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
   const startProxy = config.proxy !== undefined && !runningNames.has(PROXY_SERVICE_NAME);
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames);
+  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services });
   const generatedEnv = buildGeneratedEnv(assignments);
 
   await writeState(config.projectDir, assignments);

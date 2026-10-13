@@ -18,6 +18,8 @@ portler env docker|k8s [service] [--prod] [--reveal]
 
 Useful for debugging [references](/guide/services#service-references); in development the output can be sourced into other tooling.
 
+Port assignments for running services are preserved when missing or stale state is refreshed, including Docker containers whose supervisor has exited or whose liveness cannot be checked. When neither `state.json` nor the global port registry still has a running service's port, it is read from `.portler/pids.json`.
+
 ## Example
 
 ```bash

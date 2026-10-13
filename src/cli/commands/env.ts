@@ -7,7 +7,7 @@ import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGenerated
 import { deployedK8sServices, detectCluster, k8sManifestDir, k8sServiceNames, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
-import { readPids, runningServices, serviceLiveness } from '../../process/index.ts';
+import { liveServiceNames, readPids, serviceLiveness } from '../../process/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../../types/index.ts';
@@ -62,10 +62,11 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 
   // Never re-reserve currently-running services: allocateAssignments would
   // re-probe their busy ports and move them away from where they listen.
-  const running = new Set(runningServices(await readPids(config.projectDir)));
+  const pids = await readPids(config.projectDir);
+  const running = new Set(await liveServiceNames(config.projectDir, pids));
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 
-  const assignments = await allocateAssignments(config, state, reserveServices, running);
+  const assignments = await allocateAssignments(config, state, reserveServices, running, { recorded: pids?.services });
   await writeState(config.projectDir, assignments);
   return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
 }

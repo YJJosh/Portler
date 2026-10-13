@@ -3,6 +3,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -259,3 +260,80 @@ describe('container-aware lifecycle guards', () => {
     }
   }
 });
+
+for (const container of ['c-running', 'c-unreachable']) {
+  it(`env preserves the busy port of ${container} without a supervisor`, async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-env-live-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as net.AddressInfo).port;
+    await fs.writeFile(path.join(dir, 'portler.yml'), 'services: {worker: {image: alpine:3.20, container_name: '+container+', port: 80}, extra: {command: "sleep 60", port: 81}}\n');
+    await writePids(dir, {
+      version: 1, project: dir, startedAt: new Date().toISOString(),
+      services: { worker: { pid: await exitedPid(), command: 'docker run', cwd: dir, startedAt: new Date().toISOString(), dockerContainer: container } },
+    });
+    await fs.writeFile(path.join(dir, '.portler', 'state.json'), JSON.stringify({
+      version: 1, project: dir, updatedAt: new Date().toISOString(), services: {
+        worker: { name: 'worker', port, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: `http://localhost:${port}`, containerName: container },
+      },
+    }));
+    const docker = await fakeDocker(dir, dir);
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env'], {
+      cwd: dir, encoding: 'utf8',
+      env: { ...process.env, PATH: `${docker.bin}${path.delimiter}${process.env.PATH ?? ''}`, PORTLER_GLOBAL_DIR: path.join(dir, 'global') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`PORTLER_WORKER_PORT=${port}\\b`));
+  });
+
+  it(`env finds the port of ${container} in pids.json when state.json and the registry are gone`, async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-env-pidport-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as net.AddressInfo).port;
+    await fs.writeFile(path.join(dir, 'portler.yml'), 'services: {worker: {image: alpine:3.20, container_name: '+container+', port: 80}}\n');
+    await writePids(dir, {
+      version: 1, project: dir, startedAt: new Date().toISOString(),
+      services: { worker: { pid: await exitedPid(), command: 'docker run', cwd: dir, startedAt: new Date().toISOString(), dockerContainer: container, port } },
+    });
+    const docker = await fakeDocker(dir, dir);
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env'], {
+      cwd: dir, encoding: 'utf8',
+      env: { ...process.env, PATH: `${docker.bin}${path.delimiter}${process.env.PATH ?? ''}`, PORTLER_GLOBAL_DIR: path.join(dir, 'global') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`PORTLER_WORKER_PORT=${port}\\b`));
+  });
+
+  it(`up k8s refuses overlap with ${container} without a supervisor`, async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-k8s-live-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    await fs.writeFile(path.join(dir, 'portler.yml'), 'services: {worker: {image: alpine:3.20, port: 80}}\n');
+    await writePids(dir, {
+      version: 1, project: dir, startedAt: new Date().toISOString(),
+      services: { worker: { pid: await exitedPid(), command: 'docker run', cwd: dir, startedAt: new Date().toISOString(), dockerContainer: container } },
+    });
+    const before = await fs.readFile(path.join(dir, '.portler', 'pids.json'), 'utf8');
+    const docker = await fakeDocker(dir, dir);
+    await fs.writeFile(path.join(docker.bin, 'kubectl'), [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *current-context*) echo docker-desktop ;;',
+      '  *config*view*) echo https://127.0.0.1:6443 ;;',
+      '  *get*namespace*) echo "Error from server (NotFound): namespace not found" >&2; exit 1 ;;',
+      '  *) echo "unexpected kubectl mutation" >&2; exit 1 ;;',
+      'esac', '',
+    ].join('\n'), { mode: 0o755 });
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'up', 'k8s', '-d'], {
+      cwd: dir, encoding: 'utf8',
+      env: { ...process.env, PATH: `${docker.bin}${path.delimiter}${process.env.PATH ?? ''}`, PORTLER_GLOBAL_DIR: path.join(dir, 'global') },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /already running: worker/);
+    assert.equal(await fs.readFile(path.join(dir, '.portler', 'pids.json'), 'utf8'), before);
+  });
+}

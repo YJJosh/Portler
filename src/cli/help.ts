@@ -73,6 +73,8 @@ entries are kept, and "ps" reports "running (group)" with unverified ownership.
 "clean" refuses running services, including containers left by dead supervisors
 and containers whose liveness cannot be checked; only --force stops them first.
 
+"up k8s" also checks container liveness for overlaps; "env" preserves their ports.
+
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 
 Documentation: https://yjjosh.github.io/Portler
