@@ -13,6 +13,7 @@ import {
   removeOwnedNetwork,
   SERVICE_LABEL,
 } from '../src/process/ownership.ts';
+import { managedVolumeMount } from '../src/config/volumes.ts';
 import type { CommandResult, CommandRunner } from '../src/util/exec.ts';
 
 const PROJECT = '/home/dev/myapp';
@@ -328,6 +329,17 @@ describe('mountedVolumeSet', () => {
     assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, docker.run), { status: 'set', set: 'branch' });
     // Only the volume at the @ path is inspected.
     assert.deepEqual(docker.calls[1], ['docker', 'volume', 'inspect', '--format', '{{json .Labels}}', 'portler-myapp-x-data--branch']);
+  });
+
+  it('matches an @ entry by the name Portler created its volume and label under', async () => {
+    // `@Data Store` is created as `data-store`; the raw name would match nothing and abstain.
+    const expected = [managedVolumeMount('@Data Store:/data/')!];
+    assert.deepEqual(expected, [{ name: 'data-store', destination: '/data' }]);
+    const docker = fakeDocker([
+      container(OURS, [{ Type: 'volume', Name: 'portler-myapp-x-data-store--branch', Destination: '/data' }]),
+      volumes({ [PROJECT_LABEL]: PROJECT, 'portler.volume': 'data-store', 'portler.volume-set': 'branch' }),
+    ]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, expected, docker.run), { status: 'set', set: 'branch' });
   });
 
   it('ignores an explicitly named Portler volume next to the @ volume', async () => {

@@ -3,10 +3,10 @@ import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
-import { liveServiceNames, mountedVolumeSet, readPids, stopServices } from '../../process/index.ts';
+import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
+import type { PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
@@ -284,6 +284,54 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
  * recorded in pids.json; `--prod`, `docker`, `--image` and `--setup`/
  * `--no-setup` override that for the services it starts again. See planRestart.
  */
+type ManagedMount = { name: string; destination: string };
+
+function managedMounts(volumes: readonly string[] | undefined): ManagedMount[] {
+  return (volumes ?? []).flatMap((volume) => {
+    const mount = managedVolumeMount(volume);
+    return mount === undefined ? [] : [mount];
+  });
+}
+
+/**
+ * The `@` mounts a container recorded without a volume set may carry, one list per
+ * run mode it may have been started in. Plain `up` runs a top-level image: from
+ * `docker`, `up docker` runs the `docker:` override when there is one, so the two
+ * can mount different volumes at the same path and must not be merged. The recorded
+ * mode decides; an entry older than runMode gets every mode the service could have
+ * run a container in. Lists without an `@` mount are left out.
+ */
+export function legacyMountCandidates(service: ServiceConfig | undefined, info: PidServiceInfo): ManagedMount[][] {
+  if (service === undefined) return [];
+  const local = managedMounts(service.docker?.volumes);
+  const docker = managedMounts((service.dockerModeOverride ?? service.docker)?.volumes);
+  let lists: ManagedMount[][];
+  if (info.runMode === 'local') lists = [local];
+  else if (info.runMode === 'docker') lists = [docker];
+  else if (info.runMode !== undefined) lists = [];
+  else if (service.docker === undefined) lists = [docker];
+  else lists = service.dockerModeOverride === undefined ? [local] : [local, docker];
+  const seen = new Set<string>();
+  return lists.filter((list) => {
+    const key = JSON.stringify(list);
+    if (list.length === 0 || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * One answer from the per-mode inspections of a container: its set, null when it
+ * cannot be told (an inspection failed, or the modes point at different sets), or
+ * undefined when no mode finds a managed volume and the entry has no say.
+ */
+export function combineMountedSets(found: readonly MountedVolumeSet[]): string | null | undefined {
+  if (found.some((result) => result.status === 'unknown')) return null;
+  const sets = new Set(found.flatMap((result) => (result.status === 'set' ? [result.set] : [])));
+  if (sets.size === 0) return undefined;
+  return sets.size === 1 ? [...sets][0]! : null;
+}
+
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -321,20 +369,16 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // base volumes. Only asked when no set is given and the service mounts a managed volume.
     const mountedVolumeSets: Record<string, string | null> = {};
     if (loadedConfig.volumeSet === undefined) {
-      const managedMounts = (serviceName: string) => {
-        const service = loadedConfig.services[serviceName];
-        return [...(service?.docker?.volumes ?? []), ...(service?.dockerModeOverride?.volumes ?? [])].flatMap((volume) => {
-          const mount = managedVolumeMount(volume);
-          return mount === undefined ? [] : [mount];
-        });
-      };
       await Promise.all(
         Object.entries(running).map(async ([serviceName, info]) => {
-          const expected = managedMounts(serviceName);
-          if (info.volumeSet !== undefined || info.dockerContainer === undefined || expected.length === 0) return;
-          const found = await mountedVolumeSet(info.dockerContainer, loadedConfig.projectDir, expected);
-          if (found.status === 'set') mountedVolumeSets[serviceName] = found.set;
-          else if (found.status === 'unknown') mountedVolumeSets[serviceName] = null;
+          if (info.volumeSet !== undefined || info.dockerContainer === undefined) return;
+          const candidates = legacyMountCandidates(loadedConfig.services[serviceName], info);
+          if (candidates.length === 0) return;
+          const found = await Promise.all(
+            candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected)),
+          );
+          const set = combineMountedSets(found);
+          if (set !== undefined) mountedVolumeSets[serviceName] = set;
         }),
       );
     }
