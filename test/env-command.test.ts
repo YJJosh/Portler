@@ -142,7 +142,7 @@ describe('env for a running service', () => {
 
 describe('env for a Kubernetes service without a port', () => {
   // `up k8s` records a service only through its port-forward, so one without a port has
-  // no pids.json entry: env asks the cluster, but only when `up k8s` rendered its manifest.
+  // no pids.json entry: env asks the cluster, but only when this checkout rendered manifests.
   const K8S_CONFIG = `services:
   worker:
     command: node worker.js
@@ -165,9 +165,24 @@ describe('env for a Kubernetes service without a port', () => {
     env.PATH = `${bin}${path.delimiter}${env.PATH ?? ''}`;
   }
 
-  async function renderedManifest(): Promise<void> {
-    await fs.mkdir(path.join(projectDir, '.portler', 'k8s'), { recursive: true });
-    await fs.writeFile(path.join(projectDir, '.portler', 'k8s', 'worker.yml'), 'kind: Deployment\n', 'utf8');
+  /** What `up k8s` leaves in .portler/k8s/: the namespace file plus one file per service it rendered. */
+  async function renderedManifest(services: string[] = ['worker']): Promise<void> {
+    const dir = path.join(projectDir, '.portler', 'k8s');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, '00-namespace.yml'), 'kind: Namespace\n', 'utf8');
+    for (const name of services) await fs.writeFile(path.join(dir, `${name}.yml`), 'kind: Deployment\n', 'utf8');
+  }
+
+  /** A worker entry whose pid has exited: a launch that has since stopped. */
+  async function stoppedRecord(info: Partial<PidServiceInfo>): Promise<void> {
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { worker: { pid: Number(child.stdout), command: 'x', cwd: projectDir, startedAt, ...info } },
+    });
   }
 
   const cluster = ['  "config current-context") echo docker-desktop ;;', '  "config view"*) echo https://127.0.0.1:6443 ;;'];
@@ -194,7 +209,51 @@ describe('env for a Kubernetes service without a port', () => {
     assert.equal(result.stderr, '');
   });
 
-  it('never asks kubectl when up k8s rendered no manifest for it here', async () => {
+  it('never asks kubectl when this checkout rendered no Kubernetes manifests', async () => {
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'local');
+    await assert.rejects(fs.access(calls));
+  });
+
+  it('still asks the cluster after a later up k8s rendered only another service', async () => {
+    // Every render replaces .portler/k8s/, so `up k8s other` drops worker.yml while worker runs on.
+    await renderedManifest(['other']);
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'docker');
+  });
+
+  it('asks the cluster when the only entry is a local launch that has stopped', async () => {
+    await stoppedRecord({ runMode: 'local' });
+    await renderedManifest();
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'docker');
+    assert.match(result.stderr, /worker was started with "portler up k8s"/);
+  });
+
+  it('keeps a stopped entry\'s launch when the cluster has no Deployment for it', async () => {
+    await stoppedRecord({ runMode: 'local', prod: true });
+    await renderedManifest();
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo 'No resources found' ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /worker was started with "portler up --prod"/);
+  });
+
+  it('never asks the cluster about a service whose entry still runs', async () => {
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { worker: { pid: process.pid, command: 'x', cwd: projectDir, startedAt, runMode: 'local' } },
+    });
+    await renderedManifest();
     await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
     const result = run('worker');
     assert.equal(result.status, 0, result.stderr);
