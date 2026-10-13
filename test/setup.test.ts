@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { parseArgs } from '../src/cli/args.ts';
-import { commandUp } from '../src/cli/commands/up.ts';
+import { commandUp, StartSetChangedError, startPhase } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
@@ -745,6 +745,99 @@ services:
     } finally {
       await commandDown(parseArgs([], 'down')).catch(() => {});
     }
+  });
+
+  it('a dependency that exits while restart stops its root comes back with its own recorded launch', async () => {
+    // db records its pid; api, on SIGTERM, kills db and lingers a moment, so db is gone by the
+    // time the stop returns: a dependency that exits on its own between the plan and the start.
+    await fs.writeFile(path.join(dir, 'db.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.writeFileSync('db.pid', String(process.pid));
+fs.appendFileSync('steps', 'db\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await fs.writeFile(path.join(dir, 'api.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', 'api\\n');
+process.on('SIGTERM', () => {
+  try { process.kill(Number(fs.readFileSync('db.pid', 'utf8')), 'SIGKILL'); } catch {}
+  setTimeout(() => process.exit(0), 300);
+});
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`setup: node -e "require('fs').appendFileSync('setups', 'x')"
+services:
+  db:
+    command: node db.mjs
+    port: 4000
+    port_env: PORT
+  api:
+    command: node api.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const setups = async () => fs.readFile(path.join(dir, 'setups'), 'utf8').catch(() => '');
+    try {
+      await commandUp(parseArgs(['-d'], 'up'));
+      await commandRestart(parseArgs(['db', '--no-setup'], 'restart'));
+      assert.equal((await readPids(dir))?.services.db?.setup, false, 'db now records --no-setup');
+      assert.deepEqual(await lines(), ['db', 'api', 'db']);
+      assert.equal(await setups(), 'x');
+
+      // api ran its setup and db skipped it. db dies during api's stop and would come back
+      // too, so its record takes part in the setup choice: the two disagree, and restart says
+      // so instead of starting db with api's setup steps.
+      await assert.rejects(
+        commandRestart(parseArgs(['api'], 'restart')),
+        /db exited on its own while restart was stopping api, and starting again is refused: db was started with --no-setup and api with its setup steps.*Nothing was started, so api is stopped/s,
+      );
+      assert.deepEqual(await lines(), ['db', 'api', 'db'], 'nothing was started');
+      assert.equal(await setups(), 'x', 'no setup ran');
+
+      // With both recorded --no-setup, db comes back with api, both without setup.
+      await commandRestart(parseArgs(['--no-setup'], 'restart'));
+      assert.deepEqual(await lines(), ['db', 'api', 'db', 'db', 'api']);
+      const dbBefore = (await readPids(dir))?.services.db?.pid;
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['db', 'api', 'db', 'db', 'api', 'db', 'api']);
+      const after = await readPids(dir);
+      assert.notEqual(after?.services.db?.pid, dbBefore, 'db was started again');
+      assert.equal(after?.services.db?.setup, false);
+      assert.equal(after?.services.api?.setup, false);
+      assert.equal(await setups(), 'x', 'still no setup ran');
+    } finally {
+      await commandDown(parseArgs([], 'down')).catch(() => {});
+    }
+  });
+
+  it('startPhase refuses to start anything its caller did not plan for', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', 'started\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    // The caller planned api alone, but db is not running, so starting api would start db too.
+    await assert.rejects(
+      startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+      (error: unknown) => error instanceof StartSetChangedError && /planned api, found db, api/.test(error.message),
+    );
+    assert.equal((await readPids(dir))?.services.db, undefined, 'nothing was started');
+    await assert.rejects(fs.access(path.join(dir, 'steps')), 'no service ran');
   });
 
   it('a restart without names replays the mode of recorded services that left the config', async () => {

@@ -142,6 +142,15 @@ export class IncompleteTeardownError extends Error {
   }
 }
 
+/** startPhase found other services to start than its caller planned for; nothing was started. */
+export class StartSetChangedError extends Error {
+  constructor(planned: readonly string[], found: readonly string[]) {
+    const names = (list: readonly string[]): string => (list.length > 0 ? list.join(', ') : 'none');
+    super(`the services to start changed after they were planned (planned ${names(planned)}, found ${names(found)})`);
+    this.name = 'StartSetChangedError';
+  }
+}
+
 export interface StartOptions {
   prod?: boolean;
   setup?: boolean;
@@ -151,6 +160,12 @@ export interface StartOptions {
   skipRunning?: boolean;
   /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
   images?: Readonly<Record<string, string>>;
+  /**
+   * restart: the services its plan covers. When what is not running differs by the time
+   * startPhase reads pids.json (a dependency exited after the plan was made), it throws
+   * StartSetChangedError before anything is started, so the caller can plan again.
+   */
+  expectStart?: readonly string[];
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -286,6 +301,12 @@ export async function startPhase(
   } else {
     ensureNoOverlap(runningNames, orderedNames);
     selectedNames = orderedNames;
+  }
+  if (options.expectStart !== undefined) {
+    const planned = new Set(options.expectStart);
+    if (selectedNames.length !== planned.size || selectedNames.some((name) => !planned.has(name))) {
+      throw new StartSetChangedError(options.expectStart, selectedNames);
+    }
   }
   // Only now is it known which services this run starts; a pinned image for any other
   // service would be accepted and never used.

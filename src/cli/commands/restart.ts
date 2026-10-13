@@ -8,7 +8,7 @@ import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
-import { checkLaunch, launchConfig, startPhase } from './up.ts';
+import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
 export interface RestartLaunch {
   prod: boolean;
@@ -254,16 +254,23 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
       return { requestedRootNames, stopping, involved };
     };
-    const planFor = (config: PortlerConfig, prod: boolean | undefined) => {
+    // liveNow is what is running when the plan is made: before the stop, and again after it,
+    // since a dependency can exit on its own in between (below). The records stay the ones
+    // read before the stop, which still hold the stopped services' launches.
+    const startingFor = (config: PortlerConfig, liveNow: ReadonlySet<string>) => {
       const { requestedRootNames, stopping, involved } = scope(config);
       const stoppingSet = new Set(stopping);
       const starting = expandAndOrderServices(config, requestedRootNames).filter(
-        (serviceName) => !runningNow.has(serviceName) || stoppingSet.has(serviceName),
+        (serviceName) => !liveNow.has(serviceName) || stoppingSet.has(serviceName),
       );
+      return { requestedRootNames, stopping, involved, starting };
+    };
+    const planFor = (config: PortlerConfig, prod: boolean | undefined, liveNow: ReadonlySet<string> = runningNow) => {
+      const { requestedRootNames, stopping, involved, starting } = startingFor(config, liveNow);
       const launch = planRestart({
         rawConfig: config,
         running,
-        runningNow,
+        runningNow: liveNow,
         stopping,
         involved,
         starting,
@@ -292,7 +299,8 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         rawConfig = productionServices(loadedConfig, true, requested);
       }
     }
-    let { requestedRootNames, starting, launch } = planFor(rawConfig, args.prod);
+    let planProd = args.prod;
+    let { requestedRootNames, starting, launch } = planFor(rawConfig, planProd);
     // The look above passes over a requested service prod.services has since dropped, and a
     // stack whose narrowed records are all gone; the records can still replay --prod. That
     // launch runs on the narrowed stack, so it is planned on it: narrowing refuses a dropped
@@ -301,7 +309,8 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     if (launch.prod && args.prod !== true && rawConfig === explicitConfig) {
       rawConfig = productionServices(loadedConfig, true, requested);
       const replayedProd = launch.replayed.includes('--prod');
-      ({ requestedRootNames, starting, launch } = planFor(rawConfig, true));
+      planProd = true;
+      ({ requestedRootNames, starting, launch } = planFor(rawConfig, planProd));
       if (replayedProd) launch.replayed.unshift('--prod');
     }
     if (launch.replayed.length > 0) {
@@ -319,14 +328,17 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // service or one that does not run in Docker in this mode, and a target this restart
     // leaves running would keep its old image), and prod.require (a deployment value that
     // has gone missing).
-    const { config: runConfig } = launchConfig(rawConfig, launch.mode, { prod: launch.prod, images: launch.images });
-    checkLaunch(runConfig, launch.mode, starting);
-    if (Object.keys(launch.images).length > 0) validateImageOverrideTargets(launch.images, starting, runningNow);
-    if (launch.prod) {
-      assertProductionRequirements(runConfig, starting, await loadBaseEnv(runConfig, { allowMissing: true }), {
-        projectSetup: launch.setup !== false,
-      });
-    }
+    const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
+      const { config: runConfig } = launchConfig(rawConfig, plan.mode, { prod: plan.prod, images: plan.images });
+      checkLaunch(runConfig, plan.mode, names);
+      if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
+      if (plan.prod) {
+        assertProductionRequirements(runConfig, names, await loadBaseEnv(runConfig, { allowMissing: true }), {
+          projectSetup: plan.setup !== false,
+        });
+      }
+    };
+    await preflight(launch, starting, runningNow);
 
     // With no names, stop everything in pids.json (like `portler down`) so
     // services removed from the config do not linger; otherwise stop only the
@@ -351,14 +363,59 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    await startPhase(rawConfig, launch.mode, requestedRootNames, {
-      detach: true,
-      skipRunning: true,
-      prod: launch.prod,
-      ...(launch.setup !== undefined ? { setup: launch.setup } : {}),
-      images: launch.images,
-    });
-
-    return 0;
+    // The lock keeps other Portler commands out, not a dependency exiting on its own, and
+    // startPhase starts whatever is not running: a dependency that died after the plan was
+    // made would come back with this launch instead of its own recorded one, unchecked. So
+    // the plan is made again from what is running now, the dependency's record taking part
+    // like any other, and checked again; and startPhase refuses to start anything that plan
+    // does not cover, in which case it is made once more.
+    const stoppedText = result.stopped.length > 0 ? list(result.stopped) : 'the requested services';
+    const stoppedVerb = result.stopped.length === 1 ? 'is' : 'are';
+    for (let attempt = 1; ; attempt += 1) {
+      const liveNow = new Set(runningServices(await readPids(rawConfig.projectDir)));
+      const startingNow = startingFor(rawConfig, liveNow).starting;
+      const planned = new Set(starting);
+      const exited = startingNow.filter((name) => !planned.has(name));
+      if (exited.length > 0 || startingNow.length !== starting.length) {
+        const what =
+          exited.length > 0
+            ? `${list(exited)} exited on ${verb(exited, 'its', 'their')} own while restart was stopping ${stoppedText}`
+            : `the services to start changed while restart was stopping ${stoppedText}`;
+        let next: ReturnType<typeof planFor>;
+        try {
+          next = planFor(rawConfig, planProd, liveNow);
+          await preflight(next.launch, next.starting, liveNow);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new Error(`${what}, and starting again is refused: ${reason} Nothing was started, so ${stoppedText} ${stoppedVerb} stopped.`);
+        }
+        if (exited.length > 0) process.stdout.write(`[portler] ${what}; starting ${verb(exited, 'it', 'them')} again too\n`);
+        const added = next.launch.replayed.filter((item) => !launch.replayed.includes(item));
+        if (added.length > 0) process.stdout.write(`[portler] restart keeps the recorded launch: ${added.join(', ')}\n`);
+        for (const name of next.launch.droppedPins.filter((pinned) => !launch.droppedPins.includes(pinned))) {
+          process.stdout.write(`[portler] ${name}: the recorded image pin does not apply in this run mode and is dropped\n`);
+        }
+        ({ starting, launch } = next);
+      }
+      try {
+        await startPhase(rawConfig, launch.mode, requestedRootNames, {
+          detach: true,
+          skipRunning: true,
+          prod: launch.prod,
+          ...(launch.setup !== undefined ? { setup: launch.setup } : {}),
+          images: launch.images,
+          expectStart: starting,
+        });
+        return 0;
+      } catch (error) {
+        if (!(error instanceof StartSetChangedError)) throw error;
+        if (attempt >= 3) {
+          throw new Error(
+            `services kept exiting while restart was starting them (${error.message}); nothing was started, so ${stoppedText} ` +
+              `${stoppedVerb} stopped. Run "portler restart" again.`,
+          );
+        }
+      }
+    }
   });
 }
