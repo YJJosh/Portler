@@ -780,6 +780,8 @@ export async function startServices(
     process.on('SIGTERM', terminate);
   }
   try {
+    // The signal also ends a wait for a lock another command holds, so Ctrl-C
+    // exits before entering the critical section instead of after it.
     const stack = await withLifecycleLock(rawConfig.projectDir, async () => {
       const stack = await startPhase(rawConfig, mode, requestedRootNames, {
         ...options,
@@ -792,7 +794,7 @@ export async function startServices(
         cancellation.signal.throwIfAborted();
       }
       return stack;
-    });
+    }, { signal: cancellation?.signal });
 
     if (stack.detached) return 0;
     if (cancellation?.signal.aborted) {

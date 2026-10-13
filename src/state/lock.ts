@@ -60,10 +60,19 @@ export async function withProjectLock<T>(projectDir: string, fn: () => Promise<T
  * command in the project for the lifetime of the run. The TEARDOWN at the end of
  * that wait does run under the lock again — see withLifecycleLockForTeardown.
  */
-export async function withLifecycleLock<T>(projectDir: string, fn: () => Promise<T>): Promise<T> {
+export async function withLifecycleLock<T>(
+  projectDir: string,
+  fn: () => Promise<T>,
+  options: { signal?: AbortSignal } = {},
+): Promise<T> {
   return withDirLock(
     lifecycleLockDir(projectDir),
-    { staleMs: LIFECYCLE_STALE_MS, waitMs: LIFECYCLE_WAIT_MS, description: 'project lifecycle (up/down/restart)' },
+    {
+      staleMs: LIFECYCLE_STALE_MS,
+      waitMs: LIFECYCLE_WAIT_MS,
+      description: 'project lifecycle (up/down/restart)',
+      signal: options.signal,
+    },
     fn,
   );
 }

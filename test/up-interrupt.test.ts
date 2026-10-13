@@ -123,3 +123,51 @@ ${scenario === 'service-setup' ? step : ''}
     });
   }
 }
+
+it('foreground up stops waiting for a held lifecycle lock on SIGINT', { timeout: 20_000 }, async () => {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-interrupt-lock-')));
+  const env = { ...process.env, PORTLER_GLOBAL_DIR: path.join(dir, 'global') };
+  let output = '';
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    await fs.writeFile(path.join(dir, 'portler.yml'), `
+services:
+  api:
+    command: exec "${process.execPath}" -e 'setInterval(() => {}, 1000)'
+    healthcheck: {type: none}
+`);
+    // Another live command (this test process) holds the lifecycle lock.
+    const lockDir = path.join(dir, '.portler', 'lifecycle.lock');
+    await fs.mkdir(lockDir, { recursive: true });
+    const owner = { pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token: 'held-by-test' };
+    await fs.writeFile(path.join(lockDir, 'owner'), JSON.stringify(owner));
+
+    child = spawn(process.execPath, [cli, 'up', 'api'], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout!.on('data', (chunk) => { output += chunk; });
+    child.stderr!.on('data', (chunk) => { output += chunk; });
+    const exited = once(child, 'exit');
+    // Long enough for the CLI to install its handlers and start waiting.
+    await sleep(2_000);
+    assert.equal(child.exitCode, null, output);
+    const sentAt = Date.now();
+    child.kill('SIGINT');
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`still waiting for the lock: ${output}`)), 5_000); }),
+    ]).finally(() => clearTimeout(timer));
+    assert.deepEqual(result, [130, null], output);
+    assert.ok(Date.now() - sentAt < 3_000, 'exits promptly');
+    assert.deepEqual(Object.keys((await readPids(dir))?.services ?? {}), [], 'nothing was started');
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(lockDir, 'owner'), 'utf8')), owner, 'the holder keeps its lock');
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    for (const info of Object.values((await readPids(dir))?.services ?? {})) {
+      try { process.kill(-info.pid, 'SIGKILL'); } catch { /* Already stopped. */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
