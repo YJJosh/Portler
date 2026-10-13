@@ -33,7 +33,7 @@ Notes:
 ~/.portler/ports.lock        lock file serializing port allocation
 ```
 
-The registry records which project/service reserved which port and bind host, so concurrent `portler up` runs in different projects never hand out the same port. Stale entries (port free again on the recorded host, reservation old enough) are pruned automatically; `portler clean --global` forces a prune, and `portler clean --ports` releases the current project's reservations. If the registry itself is malformed, ordinary commands fail closed rather than discard unknown reservations; `portler clean --global --force` is the explicit reset path.
+The registry records which project/service reserved which port and bind host, so concurrent `portler up` runs in different projects never hand out the same port. Stale entries (port free again on the recorded host, reservation more than five minutes old) are pruned automatically; `portler clean --global` forces a prune, and `portler clean --ports` releases the current project's reservations. If the registry itself is malformed, ordinary commands fail closed rather than discard unknown reservations; `portler clean --global --force` is the explicit reset path.
 
 ## Setup receipts
 

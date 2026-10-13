@@ -23,7 +23,7 @@ services:
     volumes:
       - '@postgres-data:/var/lib/postgresql/data'
     healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -U app -d app
+      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
 
   backend:
     command: npm run dev

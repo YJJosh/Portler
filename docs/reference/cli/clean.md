@@ -17,7 +17,7 @@ Clean **refuses to run while services are running**; pass `--force` to stop them
 | Flag | Description |
 | --- | --- |
 | `--ports` | Only release this project's port reservations, keeping `.portler/` |
-| `--global` | Prune stale entries left behind by crashed or deleted projects from the global registry (entries whose port is free again) |
+| `--global` | Prune stale entries left behind by crashed or deleted projects from the global registry (entries whose port is free again and that are more than five minutes old) |
 | `--force` | Stop running services first. With `--global`, explicitly reset an unreadable/corrupt global registry (pending not-yet-bound reservations may be lost). |
 
 ## Examples

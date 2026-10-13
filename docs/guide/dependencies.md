@@ -42,8 +42,10 @@ A service with a `port` defaults to a **TCP** check: Portler repeatedly tries to
 
 ```yaml
 healthcheck:
-  command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -U app -d app
+  command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
 ```
+
+Keep `-h 127.0.0.1` in a Postgres check. On a fresh volume the official image first runs a temporary server that listens only on its Unix socket, creates the database, and shuts it down before starting the real one. A plain `pg_isready` checks that socket, so it can report ready during that window and let a dependent start against a server that is about to stop; over TCP only the real server answers.
 
 Supported types:
 

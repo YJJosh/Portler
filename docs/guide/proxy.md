@@ -28,7 +28,7 @@ Requests to `http://localhost:52000/api/...` go to `backend`; everything else go
 ## Port
 
 - `port: auto` (or omitting `port`) lets Portler pick a free port.
-- A fixed number like `port: 8080` is *preferred* when free — like a service's declared port, it is not a hard requirement.
+- A fixed number like `port: 8080` is tried first and used when free; if it is taken, the proxy gets another free port. (A service's own `port:` is only tried first with [`prefer_declared_port: true`](/guide/ports#preferring-the-declared-port).)
 
 ## Headers and WebSockets
 
