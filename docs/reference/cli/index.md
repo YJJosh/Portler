@@ -2,21 +2,21 @@
 
 ```text
 portler setup [docker] [service...] [--prod]
-portler start [service] [--prod]
-portler up [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>]
-portler up docker [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>]
-portler up k8s [service...] [--detach]
-portler down [docker|k8s] [service...]
+portler start [service] [--prod] [--drain-ms <ms>]
+portler up [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>] [--image <service>=<image>]
+portler up docker [service...] [--detach] [--prod] [--setup|--no-setup] [--volume-set <name>] [--image <service>=<image>]
+portler up k8s [service...] [--detach] [--image <service>=<image>]
+portler down [docker|k8s] [service...] [--volumes] [--force]
 portler k8s render [service...]
-portler restart [docker] [service...] [--prod] [--setup|--no-setup]
+portler restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <service>=<image>] [--volume-set <name>]
 portler ps [service...]
-portler logs [service...] [--follow]
+portler logs [service...] [-f|--follow]
 portler ports
-portler env [service] [--prod]
+portler env [service] [--prod] [--reveal]
 portler clean [--ports] [--global] [--force]
-portler volumes [list]
-portler volumes fork <volume> <new-set>
-portler volumes remove <volume> [--force]
+portler volumes [list] [--prod]
+portler volumes fork <volume> <new-set> [--prod]
+portler volumes remove <volume> [--force] [--prod]
 portler init
 ```
 
@@ -24,21 +24,25 @@ portler init
 
 | Flag | Description |
 | --- | --- |
-| `-f, --file <path>` | Use a specific portler.yml file |
+| `-f, --file <path>` | Use a specific portler.yml file (for `logs`, `-f` means `--follow`; use `--file` there) |
 | `-h, --help` | Show help |
 
 ## Command options
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--prod` | `setup`, `start`, `up`, `restart`, `env` | Use production overrides (not Kubernetes; `restart` refuses to change a running service's mode) |
+| `--prod` | `setup`, `start`, `up`, `restart`, `env`, `volumes` | Use production overrides (not Kubernetes; `restart` refuses to change a running service's mode) |
 | `--setup` / `--no-setup` | `up`, `restart` | Force / skip setup (not Kubernetes) |
 | `-d, --detach` | `up` | Start services in the background |
-| `--follow` | `logs` | Keep streaming new output |
+| `-f, --follow` | `logs` | Keep streaming new output |
+| `--reveal` | `env` | With `--prod`, print secret-looking values instead of `***` |
+| `--drain-ms <ms>` | `start` | After the shell exits, wait up to `<ms>` for the rest of its process group (default 10000) |
+| `--image <service>=<image>` | `up`, `restart` | Run that Docker service from this image instead of building it (repeatable) |
+| `--volumes` | `down k8s` | Also delete the project's PersistentVolumeClaims |
 | `--ports` | `clean` | Only release this project's ports |
 | `--global` | `clean` | Prune stale entries from the global registry |
 | `--force` | `clean`, `volumes remove`, `down` | Stop running services first (or, with `clean --global`, reset a corrupt registry) / remove a volume in use / **dangerous last resort:** signal a pid `down` cannot identify ([PID safety](/reference/cli/down#pid-safety)) |
-| `--volume-set <name>` | `up` | Use the `<volume>--<name>` variants of managed `@` volumes (env fallback: `PORTLER_VOLUME_SET`) |
+| `--volume-set <name>` | `up`, `restart`, `volumes` | Use the `<volume>--<name>` variants of managed `@` volumes (env fallback: `PORTLER_VOLUME_SET`) |
 
 ## Run modes
 
