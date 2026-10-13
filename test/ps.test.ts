@@ -39,13 +39,20 @@ async function zombie(): Promise<number> {
     "process.stdout.write(child.pid + '\\n', () => process.kill(process.pid, 'SIGSTOP'));",
   ].join('\n');
   const helper = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let pid = 0;
   cleanup.push(async () => {
+    // Resume the helper and let it reap its child and exit on its own. A kill
+    // right after the SIGCONT could land before it reaps, and the zombie would
+    // go to PID 1, which may never reap it.
     if (helper.exitCode !== null || helper.signalCode !== null) return;
     helper.kill('SIGCONT');
-    helper.kill('SIGKILL');
+    const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
+    await once(helper, 'exit');
+    clearTimeout(fallback);
+    if (pid > 0) assert.equal(isPidRunning(pid), false, 'the helper reaped its child before exiting');
   });
   const [chunk] = await once(helper.stdout!, 'data');
-  const pid = Number(String(chunk).trim());
+  pid = Number(String(chunk).trim());
   for (let i = 0; i < 100 && isPidAlive(pid); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(isPidRunning(pid) && !isPidAlive(pid), true, 'the helper child is a zombie');
   return pid;
