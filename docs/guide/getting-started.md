@@ -128,3 +128,4 @@ See [Generated files](/reference/generated-files) for what lives there.
 - [Ports](/guide/ports) — how assignment works and how to steer it.
 - [Docker services](/guide/docker) — images, builds, container ports, and Docker mode.
 - [Proxy](/guide/proxy) — put the whole stack behind one URL.
+- [Agent skill](/guide/agent-skill) — teach your coding agent to use Portler.

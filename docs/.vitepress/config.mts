@@ -10,6 +10,8 @@ export default defineConfig({
   description: 'Process runner with automatic port assignment and env resolution, from local development to production.',
   base: '/Portler/',
   cleanUrls: true,
+  // Files in public/ (the agent skill) are served as-is, not rendered as pages.
+  srcExclude: ['public/**'],
   lastUpdated: true,
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/Portler/logo.svg' }]],
 
@@ -33,6 +35,7 @@ export default defineConfig({
           items: [
             { text: 'What is Portler?', link: '/guide/what-is-portler' },
             { text: 'Getting started', link: '/guide/getting-started' },
+            { text: 'Agent skill', link: '/guide/agent-skill' },
           ],
         },
         {
