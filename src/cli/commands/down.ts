@@ -17,7 +17,7 @@ import { legacyMountCandidates, restartAccepts, type RestartRequest } from './re
  * block exists (the proxy is not a service, yet `portler down proxy` should
  * stop it).
  */
-function selectDownTargets(config: PortlerConfig, requested: string[]): string[] {
+export function selectDownTargets(config: PortlerConfig, requested: string[]): string[] {
   const names: string[] = [];
 
   for (const name of requested) {

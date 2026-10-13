@@ -1,17 +1,17 @@
 import { loadConfig } from '../../config/index.ts';
+import { selectDownTargets } from './down.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { readPids, serviceLiveness } from '../../process/index.ts';
 import type { ServiceLiveness } from '../../process/index.ts';
 import type { PidServiceInfo } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { printTable } from '../table.ts';
-import { selectServiceNames } from '../services.ts';
 
 export async function commandPs(args: ParsedArgs): Promise<number> {
   const config = await loadConfig(process.cwd(), args.file);
   // Only filter when names were requested: pids.json may hold entries for
   // services that were since renamed or removed from portler.yml.
-  const selected = args.positionals.length > 0 ? new Set(selectServiceNames(config, args.positionals)) : null;
+  const selected = args.positionals.length > 0 ? new Set(selectDownTargets(config, args.positionals)) : null;
   const pids = await readPids(config.projectDir);
   const entries = Object.entries(pids?.services ?? {}).filter(([serviceName]) => !selected || selected.has(serviceName));
 

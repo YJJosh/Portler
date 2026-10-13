@@ -89,6 +89,48 @@ async function fakeDocker(dir: string, projectDir: string): Promise<{ bin: strin
 }
 
 describe('portler ps', () => {
+  it('selects the synthetic proxy only when a proxy block is configured', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-ps-proxy-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const projectDir = path.join(dir, 'project');
+    await fs.mkdir(projectDir);
+    const env = { ...process.env, PORTLER_GLOBAL_DIR: path.join(dir, 'global') };
+    const runPs = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'ps', 'proxy'], {
+      cwd: projectDir,
+      env,
+      encoding: 'utf8',
+    });
+
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), [
+      'services:',
+      '  app:',
+      '    command: node -e ""',
+      '    port: 3000',
+      'proxy:',
+      '  routes:',
+      '    "/": app',
+      '',
+    ].join('\n'));
+    const token = await readProcessStartToken(process.pid);
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt: new Date().toISOString(),
+      services: {
+        proxy: { pid: process.pid, command: 'proxy', cwd: projectDir, startedAt: new Date().toISOString(), ...(token ? { startToken: token } : {}) },
+      },
+    });
+
+    const configured = runPs();
+    assert.equal(configured.status, 0, configured.stderr);
+    assert.match(configured.stdout, /^proxy\s/m);
+
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), 'services:\n  app:\n    command: node -e ""\n');
+    const unconfigured = runPs();
+    assert.equal(unconfigured.status, 1);
+    assert.match(unconfigured.stderr, /unknown service "proxy"/);
+  });
+
   it('reports each entry by the same liveness the teardown uses', { timeout: 15_000 }, async () => {
     const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-ps-')));
     cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
