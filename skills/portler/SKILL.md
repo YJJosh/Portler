@@ -19,7 +19,7 @@ portler env [service]                     # resolved env for a service
 portler ports                             # current allocations
 portler restart [service...]              # restart in the background with the same ports and launch flags
 portler down [docker|k8s] [service...]    # stop services and release ports
-portler setup [service...]                # run setup steps without starting anything
+portler setup [docker] [service...]       # run setup steps without starting anything (use the mode you run in)
 portler clean [--ports|--global]          # remove .portler/ state and release ports
 portler volumes list|fork|remove          # manage Portler-managed "@name" Docker volumes
 ```
@@ -49,7 +49,7 @@ When an app uses a database, **prefer a separate volume set per checkout/task or
 - Keep separate, reproducible **scenario templates** for difficult app behavior: legacy schemas, partial migrations, unusual/invalid records, large datasets, or permission edge cases. Prepare these on forks, record the seed/setup steps and compatible app/schema version, then fork the scenario again for each test so the original reproduction stays intact. Use synthetic or approved sanitized data.
 - Before forking, cleanly stop the database and all writers using the source, including those in other checkouts; coordinate before interrupting someone else's services. `volumes fork` copies files, not a database-aware snapshot, so a live copy can be inconsistent. If stopping is not possible, use the database's supported backup/restore mechanism instead.
 
-Example for a managed volume declared as `@postgres-data:...` (replace names and use the project's usual local/Docker run mode). For production volumes, add `--prod` to every `volumes` and `up` command below: without it they work on the development volumes, so a production fork is never made and `up --prod` starts that volume empty. `down` takes no `--prod`; it stops what was recorded.
+Example for a managed volume declared as `@postgres-data:...` (replace names and use the project's usual local/Docker run mode). For production volumes, add `--prod` to every `volumes` and `up` command below: without it they work on the development volumes, so a production fork is never made and `up --prod` starts that volume empty. `down` takes no `--prod`; it stops what was recorded. A bare `up` refuses while any service of the checkout is running, so after it succeeds the bare `down` below stops only the stack it started; if you start selected services instead, name them in `down` too.
 
 ```bash
 portler volumes list
@@ -77,7 +77,7 @@ This does not isolate bind mounts, unmanaged Docker volumes, Kubernetes PVCs, or
 
 ## Documentation
 
-Read the docs for the version that is installed; Portler changes between releases. `portler --version` prints it (e.g. `0.2.1`).
+Read the docs for the version that is installed; Portler changes between releases, and the `portler.yml` format can still change in breaking ways, so don't rely on what you remember about it. `portler --version` prints the installed version (e.g. `0.2.1`).
 
 - **Markdown, pinned to that release:** `https://raw.githubusercontent.com/YJJosh/Portler/v<version>/docs/<page>.md`, e.g. `.../v0.2.1/docs/reference/configuration.md`. The `v<version>` tag is the commit the release was built from, so these pages describe exactly the CLI you have. To read many pages, `git clone --depth 1 --branch v<version> https://github.com/YJJosh/Portler` and open `docs/`.
 - **Website, latest release only:** https://yjjosh.github.io/Portler/. A page such as `guide/proxy` is `docs/guide/proxy.md`; `reference/cli/` is `docs/reference/cli/index.md`.

@@ -2,6 +2,10 @@
 
 Portler looks for `portler.yml` (or `portler.yaml`) in the current directory; `-f/--file <path>` selects another file. The file must contain a top-level `services:` mapping with at least one service.
 
+::: warning Still changing
+The `portler.yml` format is being improved and can change in breaking ways in upcoming releases. Check the [release notes](https://github.com/YJJosh/Portler/releases) when you upgrade.
+:::
+
 ::: info YAML subset
 Portler uses its own hand-rolled YAML parser covering a practical subset: mappings, block and inline lists, scalars, quoting, and comments. Anchors, multi-document files, and other exotic features are not supported.
 :::

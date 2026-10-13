@@ -4,6 +4,8 @@ Portler runs multi-service projects with automatic port assignment and environme
 
 [Documentation](https://yjjosh.github.io/Portler/) · [Getting started](https://yjjosh.github.io/Portler/guide/getting-started) · [CLI reference](https://yjjosh.github.io/Portler/reference/cli/) · [Configuration reference](https://yjjosh.github.io/Portler/reference/configuration)
 
+> **Note:** Portler is still evolving. The `portler.yml` format is being improved and can change in breaking ways in upcoming releases, so check the [release notes](https://github.com/YJJosh/Portler/releases) when you upgrade.
+
 ## Install
 
 Portler requires Node.js 22.6 or newer.
