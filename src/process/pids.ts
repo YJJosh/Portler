@@ -189,8 +189,11 @@ export function isPidAlive(pid: number): boolean {
  * would never see it go. On Linux, once the signal check says the group is
  * there, its members are read from /proc and the group counts as gone only when
  * two consecutive scans find the same members, all zombies (see
- * groupHoldsOnlyZombies). Anything unclear keeps the answer "alive": no
- * /proc, a member whose state cannot be read, or a procfs mounted with hidepid,
+ * groupHoldsOnlyZombies). A member counts as a zombie only when every one of its
+ * threads is: a multithreaded process whose main thread has exited reads as a
+ * zombie in /proc/<pid>/stat while its other threads keep running. Anything
+ * unclear keeps the answer "alive": no /proc, a member or thread whose state
+ * cannot be read, or a procfs mounted with hidepid,
  * which hides other users' processes. On macOS launchd reaps orphans, and
  * elsewhere the signal check decides. EPERM counts as alive: the group is
  * there, just not ours to signal.
@@ -220,31 +223,68 @@ function linuxGroupHasLiveMember(pgid: number): boolean {
 /** One pass over /proc: the group's members, or 'unknown' when a member's state cannot be read. */
 export type GroupScan = { members: number[]; live: boolean } | 'unknown';
 
-function scanProcGroup(pgid: number): GroupScan {
+/** One pass over a procfs (`procRoot` is only for tests). */
+export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
   let entries: string[];
   try {
-    entries = readdirSync('/proc');
+    entries = readdirSync(procRoot);
   } catch {
     return 'unknown';
   }
   const members: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
-    let stat: string;
-    try {
-      stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
-    } catch (error) {
-      // Exited since the listing; any other failure leaves the member unknown.
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') continue;
-      return 'unknown';
-    }
-    // `pid (comm) state ppid pgrp ...`; comm may contain spaces or parentheses.
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    if (Number(fields[2]) !== pgid) continue;
-    if (fields[0] !== 'Z' && fields[0] !== 'X') return { members: [...members, Number(entry)], live: true };
+    const stat = readProcState(`${procRoot}/${entry}/stat`);
+    if (stat === 'gone') continue;
+    if (stat === 'unknown') return 'unknown';
+    if (stat.pgrp !== pgid) continue;
+    if (!isZombieState(stat.state)) return { members: [...members, Number(entry)], live: true };
+    // The /proc/<pid>/stat state is the main thread's. Its other threads may still run.
+    const threads = threadsAllZombies(`${procRoot}/${entry}/task`);
+    if (threads === 'gone') continue;
+    if (threads === 'unknown') return 'unknown';
+    if (!threads) return { members: [...members, Number(entry)], live: true };
     members.push(Number(entry));
   }
   return { members, live: false };
+}
+
+function isZombieState(state: string): boolean {
+  return state === 'Z' || state === 'X';
+}
+
+/** A stat file's state and process group; 'gone' when the process or thread has exited since the listing. */
+function readProcState(path: string): { state: string; pgrp: number } | 'gone' | 'unknown' {
+  let stat: string;
+  try {
+    stat = readFileSync(path, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
+  }
+  // `pid (comm) state ppid pgrp ...`; comm may contain spaces or parentheses.
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  if (fields.length < 3) return 'unknown';
+  return { state: fields[0], pgrp: Number(fields[2]) };
+}
+
+/** True when every thread of a process is a zombie; 'gone' when the process has been reaped meanwhile. */
+function threadsAllZombies(taskDir: string): boolean | 'gone' | 'unknown' {
+  let tids: string[];
+  try {
+    tids = readdirSync(taskDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
+  }
+  for (const tid of tids) {
+    if (!/^\d+$/.test(tid)) continue;
+    const state = readProcState(`${taskDir}/${tid}/stat`);
+    if (state === 'gone') continue;
+    if (state === 'unknown') return 'unknown';
+    if (!isZombieState(state.state)) return false;
+  }
+  return true;
 }
 
 /**

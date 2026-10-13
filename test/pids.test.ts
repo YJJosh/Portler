@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
-import { groupHoldsOnlyZombies, isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses, type GroupScan } from '../src/process/pids.ts';
+import { groupHoldsOnlyZombies, isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses, scanProcGroup, type GroupScan } from '../src/process/pids.ts';
 import { startZombieGroup, waitFor } from './zombie-group.ts';
 
 describe('isPidAlive', () => {
@@ -109,6 +112,43 @@ describe('processGroupAlive', () => {
 
     // No members twice: the group went away between the signal check and the scans.
     assert.equal(groupHoldsOnlyZombies(scripted(zombies(), zombies()).scan), true);
+  });
+
+  it('reads a member whose main thread exited as live while another of its threads runs', () => {
+    // /proc/<pid>/stat carries the main thread's state. A process that ended its main
+    // thread (pthread_exit) reads `Z` there while a worker thread keeps running, and
+    // only /proc/<pid>/task shows that.
+    const root = mkdtempSync(path.join(tmpdir(), 'portler-proc-'));
+    const stat = (pid: number, state: string, pgrp: number) => `${pid} (svc (x)) ${state} 1 ${pgrp} ${pgrp} 0 -1 0\n`;
+    const proc = (pid: number, state: string, pgrp: number, threads: Record<number, string>) => {
+      mkdirSync(path.join(root, String(pid), 'task'), { recursive: true });
+      writeFileSync(path.join(root, String(pid), 'stat'), stat(pid, state, pgrp));
+      for (const [tid, threadState] of Object.entries(threads)) {
+        mkdirSync(path.join(root, String(pid), 'task', tid), { recursive: true });
+        writeFileSync(path.join(root, String(pid), 'task', tid, 'stat'), stat(Number(tid), threadState, pgrp));
+      }
+    };
+    try {
+      mkdirSync(path.join(root, 'self'));
+      proc(900, 'S', 77, { 900: 'S' }); // another group, never a member
+      proc(100, 'Z', 100, { 100: 'Z', 101: 'S' });
+      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: true });
+
+      // Once the worker has exited too, the member is a zombie through and through.
+      writeFileSync(path.join(root, '100', 'task', '101', 'stat'), stat(101, 'Z', 100));
+      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: false });
+      // A thread that went away between listing and reading does not count.
+      rmSync(path.join(root, '100', 'task', '101'), { recursive: true });
+      mkdirSync(path.join(root, '100', 'task', '101'));
+      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: false });
+
+      // A task list that cannot be read leaves the answer unknown, never "gone".
+      rmSync(path.join(root, '100', 'task'), { recursive: true });
+      writeFileSync(path.join(root, '100', 'task'), '');
+      assert.equal(scanProcGroup(100, root), 'unknown');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('counts a group holding only a zombie as gone', { skip: process.platform !== 'linux' }, async () => {
