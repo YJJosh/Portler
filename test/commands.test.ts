@@ -365,10 +365,17 @@ describe('restart', () => {
     assert.deepEqual({ prod: replay.prod, mode: replay.mode, setup: replay.setup, images: replay.images }, { prod: true, mode: 'docker', setup: false, images: {} });
     assert.deepEqual(replay.replayed, ['--prod', 'docker', '--no-setup']);
 
-    // restart everything: db's recorded pin comes back too.
-    const all = plan({ stopping: ['db', 'api'], starting: ['db', 'api'] });
+    // restart everything: db ran its setup steps and api did not, so there is no one setup choice to replay.
+    assert.throws(() => plan({ stopping: ['db', 'api'], starting: ['db', 'api'] }), /db with its setup steps.*no one setup choice/s);
+    // A dead dependency that comes back counts too: db recorded with setup steps, api with --no-setup.
+    assert.throws(() => plan({ runningNow: new Set(['api']), starting: ['db', 'api'] }), /no one setup choice/);
+    // Both started with --no-setup: replayed, and db's recorded pin comes back too.
+    const bothSkipped = { ...running, db: { ...running.db!, setup: false } };
+    const all = plan({ running: bothSkipped, stopping: ['db', 'api'], starting: ['db', 'api'] });
     assert.deepEqual(all.images, { db: 'example/db@sha256:aaa' });
     assert.deepEqual(all.replayed, ['--prod', 'docker', '--image db=example/db@sha256:aaa', '--no-setup']);
+    // A flag decides when the records disagree.
+    assert.equal(plan({ stopping: ['db', 'api'], starting: ['db', 'api'], setup: false }).setup, false);
 
     // A new --image replaces the recorded pin, and --setup overrides --no-setup.
     const over = plan({ stopping: ['db', 'api'], starting: ['db', 'api'], setup: true, images: { db: 'example/db@sha256:bbb' } });
@@ -379,7 +386,7 @@ describe('restart', () => {
     // An explicit plain mode with db left running as a container: refused.
     assert.throws(() => plan({ modeExplicit: true }), /db is running in Docker mode/);
     // An explicit plain mode restarting everything: allowed; db is not a container there, so its pin is dropped.
-    const flip = plan({ stopping: ['db', 'api'], starting: ['db', 'api'], modeExplicit: true });
+    const flip = plan({ stopping: ['db', 'api'], starting: ['db', 'api'], modeExplicit: true, setup: true });
     assert.equal(flip.mode, 'local');
     assert.deepEqual(flip.images, {});
     assert.deepEqual(flip.droppedPins, ['db']);
@@ -391,7 +398,7 @@ describe('restart', () => {
     // Recorded modes that disagree cannot be replayed; the flag decides.
     const mixed = { ...running, api: { ...running.api!, prod: false } };
     assert.throws(() => plan({ running: mixed }), /no one mode to replay/);
-    assert.equal(plan({ running: mixed, prod: true, stopping: ['db', 'api'], starting: ['db', 'api'] }).prod, true);
+    assert.equal(plan({ running: mixed, prod: true, stopping: ['db', 'api'], starting: ['db', 'api'], setup: true }).prod, true);
 
     // An explicit --prod with a development dependency left running: refused.
     const dev: Record<string, PidServiceInfo> = {

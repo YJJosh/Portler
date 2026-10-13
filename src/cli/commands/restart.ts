@@ -158,10 +158,25 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
   }
   Object.assign(images, input.images ?? {});
 
+  // Setup is one choice for the whole start (startPhase takes one value), so
+  // every recorded service this restart starts again has to agree on it,
+  // including a dead dependency that comes back; otherwise one service's
+  // --no-setup would skip another's setup steps, or the reverse.
   let setup = input.setup;
-  if (setup === undefined && restarted.some((name) => entry(name).setup === false)) {
-    setup = false;
-    replayed.push('--no-setup');
+  if (setup === undefined) {
+    const recorded = starting.filter((name) => Object.hasOwn(running, name));
+    const skipped = recorded.filter((name) => entry(name).setup === false);
+    const withSetup = recorded.filter((name) => entry(name).setup !== false);
+    if (skipped.length > 0 && withSetup.length > 0) {
+      throw new Error(
+        `${list(skipped)} ${verb(skipped, 'was', 'were')} started with --no-setup and ${list(withSetup)} with ${verb(withSetup, 'its', 'their')} setup steps, ` +
+          'so there is no one setup choice to replay. Pass --setup or --no-setup to choose for every service this restart starts.',
+      );
+    }
+    if (skipped.length > 0) {
+      setup = false;
+      replayed.push('--no-setup');
+    }
   }
 
   return { prod, mode, images, setup, replayed, droppedPins };
