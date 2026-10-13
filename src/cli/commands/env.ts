@@ -12,7 +12,7 @@ import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { expandAndOrderServices, parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, servicesWithPorts, validateDockerMode } from '../services.ts';
 import { validateK8sMode } from './up-k8s.ts';
 
 /**
@@ -59,20 +59,23 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
  * assignments are rebuilt from the config, and without the pins `PORTLER_<SERVICE>_IMAGE`
  * and `${service.image}` would name the image in portler.yml instead of the one the
  * container runs. A pin from a launch in another run mode, or of a service that is no
- * longer a container in this view, describes nothing shown here and is left out.
+ * longer a container in this view, describes nothing shown here and is left out. A
+ * stopped entry's pin is kept only for `lastLaunch`, the service whose last launch this
+ * view shows: its image is part of what that launch got.
  */
 async function runningImagePins(
   loadedConfig: PortlerConfig,
   modeConfig: PortlerConfig,
   mode: RunMode,
   recordedServices: Readonly<Record<string, PidServiceInfo>>,
+  lastLaunch?: string,
 ): Promise<Record<string, string>> {
   const localConfig = configForRunMode(loadedConfig, 'local');
   const pins: Record<string, string> = {};
   for (const [name, info] of Object.entries(recordedServices)) {
     if (info.image === undefined || modeConfig.services[name]?.docker === undefined) continue;
     if (!loadedConfig.services[name] || recordedRunMode(localConfig, name, info) !== mode) continue;
-    if ((await serviceLiveness(loadedConfig.projectDir, info)).status === 'dead') continue;
+    if (name !== lastLaunch && (await serviceLiveness(loadedConfig.projectDir, info)).status === 'dead') continue;
     pins[name] = info.image;
   }
   return pins;
@@ -158,16 +161,21 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     }
 
     const modeConfig = configForRunMode(productionServices(loadedConfig, prod, requested), mode);
-    const pins = await runningImagePins(loadedConfig, modeConfig, mode, recordedServices);
+    // A stopped entry still shown as the last launch keeps its pin with it.
+    const lastLaunch = recorded !== undefined && !recordRuns ? serviceName : undefined;
+    const pins = await runningImagePins(loadedConfig, modeConfig, mode, recordedServices, lastLaunch);
     const config = applyProduction(applyImageOverrides(modeConfig, pins), prod);
     const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
     if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
     // A typed mode token must describe a launch that could happen: refuse what `up docker`
     // or `up k8s` would refuse instead of printing an environment no launch could get. Like
-    // `up`, check the service together with everything it depends on.
-    const launched = service ? expandAndOrderServices(config, [service.name]) : [];
-    if (modeExplicit && mode === 'docker') validateDockerMode(config, launched);
-    if (modeExplicit && mode === 'k8s') validateK8sMode(config, launched);
+    // `up`, check the service together with everything it depends on, and every service
+    // when none is named.
+    if (modeExplicit && mode !== 'local') {
+      const launched = expandAndOrderServices(config, selectServiceNames(config, service ? [service.name] : []));
+      if (mode === 'docker') validateDockerMode(config, launched);
+      else validateK8sMode(config, launched);
+    }
 
     const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a

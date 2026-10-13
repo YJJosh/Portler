@@ -102,6 +102,33 @@ describe('env for a running service', () => {
     assert.match(result.stderr, /backend was started with "portler up k8s"; this shows the environment it got/);
   });
 
+  it('keeps the --image pin of a stopped launch it shows as the last one', async () => {
+    // The containers have exited: a fake docker reports them gone, so this does not
+    // depend on a real daemon. backend's entry is the launch env shows, so its pin stays;
+    // postgres's stopped entry is not shown, so its image comes from portler.yml.
+    const bin = path.join(projectDir, 'bin');
+    await fs.mkdir(bin);
+    await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\necho "Error: No such object: $3" >&2\nexit 1\n', { mode: 0o755 });
+    env = { ...env, PATH: `${bin}${path.delimiter}${env.PATH ?? ''}` };
+    const dead = Number(spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout);
+    const startedAt = new Date().toISOString();
+    const entry = { pid: dead, command: 'x', cwd: projectDir, startedAt, runMode: 'docker' as const };
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        backend: { ...entry, dockerContainer: 'c-backend', image: 'example/backend@sha256:stopped-pin' },
+        postgres: { ...entry, dockerContainer: 'c-postgres', image: 'postgres@sha256:other-pin' },
+      },
+    });
+    const result = run('backend');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend@sha256:stopped-pin');
+    assert.equal(value(result.stdout, 'PORTLER_POSTGRES_IMAGE'), 'postgres:16-alpine');
+    assert.match(result.stderr, /backend was started with "portler up docker"; this shows the environment it got/);
+  });
+
   it('infers Docker mode for an entry written before runMode was recorded', async () => {
     await record({ dockerContainer: 'c-backend' });
     const result = run('backend');
@@ -182,6 +209,23 @@ describe('env for a running service', () => {
     assert.equal(k8s.stdout, '');
     // Without a typed mode, the development view of backend is still available.
     assert.equal(run('backend').status, 0);
+  });
+
+  it('checks every service for a typed mode with no service named, as up does', async () => {
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
+    command: node api.js
+    port: 5000
+`, 'utf8');
+    const docker = run('docker');
+    assert.equal(docker.status, 1);
+    assert.match(docker.stderr, /service "api" has no Docker config/);
+    assert.equal(docker.stdout, '');
+    const k8s = run('k8s');
+    assert.equal(k8s.status, 1);
+    assert.match(k8s.stderr, /service "api" has no container config for Kubernetes/);
+    assert.equal(k8s.stdout, '');
+    // The development view of the whole project is still available.
+    assert.equal(run().status, 0);
   });
 
   it('refuses --prod for a service started with "up k8s", which has no production mode', async () => {
