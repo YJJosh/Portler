@@ -35,7 +35,7 @@ export {
   waitForRollout,
   waitForStablePods,
 } from './kubectl.ts';
-export type { DeleteK8sOptions, NamespaceOwnership, NamespaceRead } from './kubectl.ts';
+export type { DeleteK8sOptions, K8sDeleteResult, NamespaceOwnership, NamespaceRead } from './kubectl.ts';
 export { k8sServiceNames } from './manifests.ts';
 export { k8sManifestDir, NAMESPACE_MANIFEST_FILE, renderManifests, writeManifestFiles } from './render.ts';
 export type { RenderedManifests } from './render.ts';

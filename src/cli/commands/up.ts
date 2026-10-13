@@ -26,6 +26,7 @@ import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/loc
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
 import type { Assignments, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
+import { restartAccepts, type RestartRequest } from './restart.ts';
 import { commandUpK8s } from './up-k8s.ts';
 import { printPortTable } from '../table.ts';
 import {
@@ -172,10 +173,11 @@ export interface StartOptions {
    */
   expectStart?: readonly string[];
   /**
-   * up: builds the `restart` a refusal over already-running services suggests, from the
-   * services it should start, so the suggestion carries this invocation's options.
+   * up: the `restart` a refusal over already-running services suggests for the services it
+   * should start, carrying this invocation's options; none when that restart would not do
+   * what was asked. It is judged on the pids.json and running set the refusal comes from.
    */
-  restartHint?: (serviceNames: string[]) => string;
+  restartHint?: (serviceNames: string[], pidsBefore: PidsFile | null, runningNames: ReadonlySet<string>) => Promise<string | undefined>;
 }
 
 /**
@@ -199,20 +201,6 @@ export function restartSuggestion(
   for (const [service, image] of Object.entries(args.images ?? {})) parts.push('--image', shellQuote(`${service}=${image}`));
   if (args.volumeSet !== undefined) parts.push('--volume-set', shellQuote(args.volumeSet));
   return parts.join(' ');
-}
-
-/**
- * Whether the restart a refused `up` suggests can do what was asked. Restart replays how the
- * running services were started and refuses to mix modes or `--prod`, so it only fits when every
- * running service the refusal names was recorded with this mode and this `--prod`. An entry that
- * records no mode (an older Portler) cannot show that, so it gets no suggestion either.
- */
-export function restartHintFits(
-  overlapping: ReadonlyArray<PidServiceInfo | undefined>,
-  mode: RunMode,
-  prod: boolean,
-): boolean {
-  return overlapping.every((info) => info?.runMode === mode && (info.prod === true) === prod);
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -358,17 +346,12 @@ export async function startPhase(
     // keeps the running dependencies, so it is the first thing the refusal suggests. It names
     // only the requested services that are not running (naming a running one would restart
     // it), unless every one of them runs, and it runs them in the background.
-    // When what runs was started in another mode or with another --prod, restart would refuse,
-    // so only the down that clears the way is offered.
+    // When that restart would refuse, or would start them otherwise than asked (in the mode or
+    // with the --prod what runs was started with), only the down that clears the way is offered.
     const notRunning = requestedRootNames.filter((serviceName) => !runningNames.has(serviceName));
     const restartNames = notRunning.length > 0 ? notRunning : requestedRootNames;
-    const overlapping = orderedNames.filter((serviceName) => runningNames.has(serviceName));
-    const fits = restartHintFits(overlapping.map((serviceName) => pidsBefore?.services[serviceName]), mode, options.prod === true);
-    const restart = !fits
-      ? undefined
-      : options.restartHint
-        ? options.restartHint(restartNames)
-        : ['portler restart', ...restartNames].join(' ');
+    const overlap = orderedNames.some((serviceName) => runningNames.has(serviceName));
+    const restart = overlap && options.restartHint ? await options.restartHint(restartNames, pidsBefore, runningNames) : undefined;
     ensureNoOverlap(runningNames, orderedNames, restart, restart && !options.detach ? 'restart starts them in the background' : undefined);
     selectedNames = orderedNames;
   }
@@ -780,13 +763,28 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
     return commandUpK8s(args, requested);
   }
 
-  const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
+  const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
+  const rawConfig = productionServices(loadedConfig, args.prod, requested);
   const requestedRootNames = selectServiceNames(rawConfig, requested);
   return startServices(rawConfig, mode, requestedRootNames, {
     detach: args.detach,
     prod: args.prod,
     setup: args.setup,
     images: args.images,
-    restartHint: (serviceNames) => restartSuggestion(args, mode, serviceNames),
+    // Offered only if restart, run as suggested, would plan and pass its checks without
+    // replaying anything this command did not say: a pin on a service it leaves running, a
+    // stale entry recorded with another --prod or mode, would make it refuse or differ.
+    restartHint: async (serviceNames, pidsBefore, runningNames) => {
+      const request: RestartRequest = {
+        mode,
+        requested: serviceNames,
+        modeExplicit: mode === 'docker',
+        prod: args.prod,
+        setup: args.setup,
+        images: args.images,
+      };
+      const accepted = await restartAccepts(loadedConfig, request, pidsBefore, runningNames);
+      return accepted ? restartSuggestion(args, mode, serviceNames) : undefined;
+    },
   });
 }

@@ -1,6 +1,6 @@
 import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { deleteK8sResources, detectCluster } from '../../k8s/index.ts';
+import { deleteK8sResources, detectCluster, type K8sDeleteResult } from '../../k8s/index.ts';
 import { releasePorts } from '../../ports/index.ts';
 import type { RunMode } from '../../config/index.ts';
 import { shellQuote } from '../../process/docker.ts';
@@ -267,7 +267,7 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     // a database's data outlives an ordinary down/up cycle. If this fails, keep
     // every reservation: releasing ports while the requested teardown is only
     // half complete is the false all-clear the registry is meant to prevent.
-    let deletedFromCluster = false;
+    let deletedFromCluster: K8sDeleteResult = { deleted: false, services: [] };
     if (mode === 'k8s') {
       const cluster = await detectCluster();
       deletedFromCluster = await deleteK8sResources(cluster, config, {
@@ -282,18 +282,19 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     const incomplete = result.unverified.length > 0 || result.failures.length > 0;
     if (result.stopped.length > 0) {
       process.stdout.write(`[portler] stopped: ${result.stopped.join(', ')}\n`);
-    } else if (!incomplete && !deletedFromCluster) {
+    } else if (!incomplete && !deletedFromCluster.deleted) {
       process.stdout.write('[portler] no running services found\n');
     }
     // A Kubernetes service without a port has no port-forward for stopServices to stop, but
-    // deleting it from the cluster takes it away from its dependents all the same.
+    // deleting its Deployment takes it away from its dependents all the same (one that was not
+    // deployed is taken from no one).
     // So does removing a Docker service's running container, even when its entry is kept
     // because a leftover `docker run` client still holds the group.
     const takenAway = [
       ...new Set([
         ...result.stopped,
         ...result.containersRemoved,
-        ...(deletedFromCluster && selectedNames ? selectedNames.filter((name) => name !== PROXY_SERVICE_NAME) : []),
+        ...deletedFromCluster.services.filter((name) => name !== PROXY_SERVICE_NAME),
       ]),
     ];
     if (selectedNames && takenAway.length > 0) await warnAboutDependents(config, takenAway, before, mode, args.file, new Set(result.remaining));

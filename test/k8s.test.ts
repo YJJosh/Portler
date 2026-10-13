@@ -355,9 +355,24 @@ describe('deleteK8sResources', () => {
   it('does nothing for an absent namespace', async () => {
     const kubectl = fakeKubectl([NS_NOT_FOUND]);
 
-    await deleteK8sResources(CLUSTER, config, {}, kubectl.run);
+    assert.deepEqual(await deleteK8sResources(CLUSTER, config, {}, kubectl.run), { deleted: false, services: [] });
 
     assert.equal(kubectl.calls.length, 1, 'no delete is issued');
+  });
+
+  it('reports the services whose Deployment kubectl deleted, and nothing when none was there', async () => {
+    // --ignore-not-found makes the delete succeed either way; `-o name` lists what it removed.
+    const deleted = fakeKubectl([
+      namespaceJson(projectLabels(config)),
+      { code: 0, stdout: 'deployment.apps/api\nservice/api\nservice/db\n', stderr: '' },
+    ]);
+    const result = await deleteK8sResources(CLUSTER, config, { serviceNames: ['api', 'db', 'cache'] }, deleted.run);
+    assert.deepEqual(result, { deleted: true, services: ['api'] });
+    assert.deepEqual(deleted.calls[1]!.slice(-2), ['-o', 'name']);
+
+    // Real kubectl (checked against k3s v1.31) prints this on stdout when nothing matches.
+    const nothing = fakeKubectl([namespaceJson(projectLabels(config)), { code: 0, stdout: 'No resources found\n', stderr: '' }]);
+    assert.deepEqual(await deleteK8sResources(CLUSTER, config, { serviceNames: ['db'] }, nothing.run), { deleted: false, services: [] });
   });
 
   it('refuses to delete inside a foreign namespace', async () => {

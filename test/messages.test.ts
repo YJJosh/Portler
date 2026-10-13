@@ -6,10 +6,10 @@ import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { recordedVolumeSet, recoveryCommand, upSuggestion } from '../src/cli/commands/down.ts';
-import { restartHintFits, restartSuggestion } from '../src/cli/commands/up.ts';
+import { restartSuggestion } from '../src/cli/commands/up.ts';
 import { ensureNoOverlap } from '../src/cli/services.ts';
 import { assertRequiredEnv } from '../src/env/index.ts';
-import { readProcessStartToken, writePids } from '../src/process/index.ts';
+import { readPids, readProcessStartToken, writePids } from '../src/process/index.ts';
 import type { PidServiceInfo, ServiceConfig } from '../src/types/index.ts';
 import { projectHash } from '../src/util/hash.ts';
 
@@ -94,17 +94,127 @@ describe('up for a service that is partly running', () => {
     );
   });
 
-  it('offers restart only when what runs was started with this mode and --prod', () => {
-    const dev = entry({ runMode: 'local' });
-    assert.equal(restartHintFits([dev], 'local', false), true);
-    assert.equal(restartHintFits([dev, entry({ runMode: 'local', prod: false })], 'local', false), true);
-    assert.equal(restartHintFits([dev], 'local', true), false);
-    assert.equal(restartHintFits([entry({ runMode: 'local', prod: true })], 'local', false), false);
-    assert.equal(restartHintFits([dev], 'docker', false), false);
-    assert.equal(restartHintFits([entry({ runMode: 'docker', prod: true })], 'docker', true), true);
-    // An entry from an older Portler records no mode, so it cannot show that restart would fit.
-    assert.equal(restartHintFits([entry({})], 'local', false), false);
-    assert.equal(restartHintFits([undefined], 'local', false), false);
+  it('suggests only down when a running prerequisite was started in another mode', async () => {
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    command: node server.js',
+        '    port: 4230',
+        '    port_env: PORT',
+        '    docker:',
+        '      image: postgres:16-alpine',
+        '  api:',
+        '    command: node server.js',
+        '    port: 4231',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+        '    docker:',
+        '      image: example/api:latest',
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
+
+    // restart docker would refuse to mix modes, and a plain restart would start api locally.
+    const refused = portler(projectDir, 'up', 'docker', '-d', 'api');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
+    assert.doesNotMatch(refused.stderr, /portler restart/);
+  });
+
+  it('suggests only down when a pinned image is for a service restart would leave running', { timeout: 20_000 }, async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as docker');
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    docker:',
+        '      image: postgres:16-alpine',
+        '  api:',
+        '    docker:',
+        '      image: example/api:latest',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+    );
+    const bin = path.join(path.dirname(projectDir), 'bin');
+    await fs.mkdir(bin);
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'case "$1" in', `  inspect) printf '%s\\n' '${inspected}' ;;`, '  *) echo "Error: No such object" >&2; exit 1 ;;', 'esac', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const env = { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` };
+    // db's container runs on after its `docker run` shell has exited: running, as ps reports it.
+    const shell = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((resolve) => shell.once('exit', resolve));
+    const now = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt: now,
+      services: { db: { pid: shell.pid!, command: 'docker run', cwd: projectDir, startedAt: now, runMode: 'docker', dockerContainer: 'c-db' } },
+    });
+
+    const refused = portlerWith(projectDir, env, 'up', 'docker', '-d', 'api', '--image', 'db=postgres:17-alpine');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
+    assert.doesNotMatch(refused.stderr, /portler restart/);
+    // The restart the message used to offer refuses the pin: it would leave db on its old image.
+    const restart = portlerWith(projectDir, env, 'restart', 'docker', 'api', '--image', 'db=postgres:17-alpine');
+    assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
+    assert.match(restart.stderr, /db/);
+
+    // Without the pin, restart would do what was asked, and is offered.
+    const plain = portlerWith(projectDir, env, 'up', 'docker', '-d', 'api');
+    assert.equal(plain.status, 1, plain.stdout + plain.stderr);
+    assert.match(plain.stderr, /use "portler restart docker api"; to start over, use "portler down db" first\./);
+  });
+
+  it("suggests only down when the requested service's stale entry was started with --prod", async () => {
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    command: node server.js',
+        '    port: 4220',
+        '    port_env: PORT',
+        '  api:',
+        '    command: node server.js',
+        '    port: 4221',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
+    // api's entry outlived it: recorded under --prod, its process long gone.
+    const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((resolve) => gone.once('exit', resolve));
+    const pids = (await readPids(projectDir))!;
+    pids.services.api = {
+      pid: gone.pid!,
+      command: 'node server.js',
+      cwd: projectDir,
+      startedAt: new Date().toISOString(),
+      runMode: 'local',
+      prod: true,
+      dependsOn: ['db'],
+    };
+    await writePids(projectDir, pids);
+
+    const refused = portler(projectDir, 'up', '-d', 'api');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
+    assert.doesNotMatch(refused.stderr, /portler restart/);
+    // The restart the message used to offer goes by api's entry, not by this command.
+    const restart = portler(projectDir, 'restart', 'api');
+    assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
+    assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s.*running/m);
   });
 
   it('suggests only down when a running prerequisite was started without --prod', async () => {
@@ -411,8 +521,9 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.equal(back.status, 0, back.stdout + back.stderr);
   });
 
-  it('warns when down k8s deletes a service that has no port-forward', async (t) => {
-    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as kubectl');
+  // api is deployed and port-forwarded (a stand-in process); db has no port, so no forward.
+  // `deleted` is what the fake kubectl reports deleting.
+  async function k8sProject(t: { after: (fn: () => void) => void }, deleted: string[]) {
     const projectDir = await project(
       [
         'services:',
@@ -438,6 +549,10 @@ describe('down warns from what is running, not from an edited portler.yml', () =
         '  "config current-context") echo docker-desktop ;;',
         '  "config view"*) echo https://127.0.0.1:6443 ;;',
         `  *"get namespace"*) printf '%s\\n' '${labels}' ;;`,
+        // Real kubectl prints "No resources found" on stdout when nothing matches.
+        deleted.length > 0
+          ? `  *" delete "*) printf '%s\\n' ${deleted.map((name) => `'${name}'`).join(' ')} ;;`
+          : `  *" delete "*) echo 'No resources found' ;;`,
         'esac',
         'exit 0',
         '',
@@ -445,7 +560,6 @@ describe('down warns from what is running, not from an edited portler.yml', () =
       { mode: 0o755 },
     );
 
-    // api's port-forward is running (a stand-in process); db has no port, so no forward.
     const forward = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
     t.after(() => {
       try {
@@ -469,12 +583,30 @@ describe('down warns from what is running, not from an edited portler.yml', () =
         },
       },
     });
+    return { projectDir, env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` } };
+  }
 
-    const down = portlerWith(projectDir, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` }, 'down', 'k8s', 'db');
+  it('warns when down k8s deletes a service that has no port-forward', async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as kubectl');
+    const { projectDir, env } = await k8sProject(t, ['deployment.apps/db']);
+
+    const down = portlerWith(projectDir, env, 'down', 'k8s', 'db');
     assert.equal(down.status, 0, down.stdout + down.stderr);
     assert.match(down.stdout, /deleted Kubernetes resources for: db/);
     assert.doesNotMatch(down.stdout, /no running services found/);
     assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or start db again the way it was started\./);
     assert.doesNotMatch(down.stderr, /portler up|portler restart/);
+  });
+
+  it('takes nothing away when down k8s finds nothing deployed for the service', async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as kubectl');
+    const { projectDir, env } = await k8sProject(t, []);
+
+    // kubectl delete --ignore-not-found succeeds either way; only its output says nothing was there.
+    const down = portlerWith(projectDir, env, 'down', 'k8s', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    assert.match(down.stdout, /no Kubernetes resources found for: db/);
+    assert.match(down.stdout, /no running services found/);
+    assert.doesNotMatch(down.stderr, /depending on what was stopped/);
   });
 });
