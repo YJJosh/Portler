@@ -6,6 +6,7 @@ export type { ServiceLiveness } from './liveness.ts';
 export {
   dockerLabelArgs,
   inspectResource,
+  mountedVolumeSet,
   ownedContainerLiveness,
   ownershipVerdict,
   PROJECT_LABEL,
@@ -13,7 +14,7 @@ export {
   removeOwnedNetwork,
   SERVICE_LABEL,
 } from './ownership.ts';
-export type { ContainerLiveness, Inspection, OwnershipVerdict, RemovalOutcome } from './ownership.ts';
+export type { ContainerLiveness, Inspection, MountedVolumeSet, OwnershipVerdict, RemovalOutcome } from './ownership.ts';
 export { isPidAlive, isPidRunning, pidInfoFor, readPids, readPidsOrNull, runningServices, updatePids, writePids } from './pids.ts';
 export type { LaunchPlan } from './pids.ts';
 export { spawnService } from './spawn.ts';

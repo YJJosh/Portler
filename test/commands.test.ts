@@ -501,7 +501,7 @@ describe('restart', () => {
     const base = { pid: process.pid, command: 'x', cwd: projectDir, startedAt, runMode: 'docker' as const };
     const running: Record<string, PidServiceInfo> = {
       db: { ...base, dockerContainer: 'c-db', volumeSet: 'branch' },
-      cache: { ...base, dockerContainer: 'c-cache' },
+      cache: { ...base, dockerContainer: 'c-cache', volumeSet: '' },
       api: { ...base, dockerContainer: 'c-api' },
     };
     const plan = (names: string[], over: Partial<Parameters<typeof planRestart>[0]> = {}) =>
@@ -538,12 +538,23 @@ describe('restart', () => {
     const chosen = plan(['db', 'cache'], { rawConfig: given, volumeSetGiven: true });
     assert.equal(chosen.volumeSet, 'other');
     assert.ok(!chosen.replayed.some((item) => item.startsWith('--volume-set')));
-    // An entry without runMode predates the record and has no say either way.
-    const { runMode: _dropped, volumeSet: _set, ...legacyDb } = running.db!;
-    void _dropped;
+    // An entry written before the set was recorded has no field: what its container
+    // mounts decides, and one that cannot be read is refused, not taken for the base volumes.
+    const { volumeSet: _set, ...legacyDb } = running.db!;
     void _set;
-    const legacy = plan(['db'], { running: { ...running, db: legacyDb }, requestedMode: 'docker', modeExplicit: true });
-    assert.equal(legacy.volumeSet, undefined);
+    const legacyRunning = { ...running, db: legacyDb };
+    const fromMounts = plan(['db'], { running: legacyRunning, mountedVolumeSets: { db: 'branch' } });
+    assert.equal(fromMounts.volumeSet, 'branch');
+    assert.ok(fromMounts.replayed.includes('--volume-set branch'), fromMounts.replayed.join(', '));
+    assert.equal(plan(['db'], { running: legacyRunning, mountedVolumeSets: { db: '' } }).volumeSet, undefined);
+    assert.throws(
+      () => plan(['db'], { running: legacyRunning, mountedVolumeSets: { db: null } }),
+      /db was started by an older Portler.*--volume-set <name>.*portler down db/s,
+    );
+    // Its container mounts no managed volume: no say either way.
+    assert.equal(plan(['db'], { running: legacyRunning }).volumeSet, undefined);
+    // A given set still chooses, unread mounts or not.
+    assert.equal(plan(['db'], { running: legacyRunning, mountedVolumeSets: { db: null }, rawConfig: given, volumeSetGiven: true }).volumeSet, 'other');
   });
 
   it('records the volume set for a container that mounts a managed volume', async () => {
@@ -557,10 +568,11 @@ describe('restart', () => {
       const withSet = configForRunMode(await loadConfig(projectDir, undefined, { volumeSet: 'branch' }), 'docker');
       const db = await pidInfoFor(withSet, withSet.services.db!, child, undefined, { runMode: 'docker' });
       assert.equal(db.volumeSet, 'branch');
-      // api mounts no managed volume, and without a set nothing is recorded.
+      // api mounts no managed volume: nothing is recorded.
       assert.equal((await pidInfoFor(withSet, withSet.services.api!, child, undefined, { runMode: 'docker' })).volumeSet, undefined);
+      // The base volumes are recorded too, as '': a missing field means an older Portler wrote the entry.
       const baseConfig = configForRunMode(await loadConfig(projectDir), 'docker');
-      assert.equal((await pidInfoFor(baseConfig, baseConfig.services.db!, child, undefined, { runMode: 'docker' })).volumeSet, undefined);
+      assert.equal((await pidInfoFor(baseConfig, baseConfig.services.db!, child, undefined, { runMode: 'docker' })).volumeSet, '');
     } finally {
       child.kill('SIGKILL');
     }

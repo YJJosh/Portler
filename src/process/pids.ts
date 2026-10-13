@@ -440,8 +440,11 @@ export async function pidInfoFor(
     ...(launch ? { runMode: launch.runMode } : {}),
     ...(launch?.image !== undefined ? { image: launch.image } : {}),
     ...(launch?.setup === false ? { setup: false } : {}),
-    ...(config.volumeSet !== undefined && service.docker?.volumes.some((volume) => managedVolumeName(volume) !== undefined)
-      ? { volumeSet: config.volumeSet }
+    // Recorded whenever the container mounts a managed volume, '' for the base
+    // volumes: an entry without the field was written by an older Portler, which
+    // is a different fact from "the base volumes".
+    ...(service.docker?.volumes.some((volume) => managedVolumeName(volume) !== undefined)
+      ? { volumeSet: config.volumeSet ?? '' }
       : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     // Always recorded, empty included: an entry without the field was written
