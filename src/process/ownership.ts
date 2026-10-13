@@ -246,7 +246,7 @@ export async function mountedVolumeSet(
   // Only the service's `@name` entries follow the volume set, so only the volumes mounted at
   // their paths count; any other volume, Portler-labelled or not, says nothing about the set.
   const expectedAt = new Map(expected.map((mount) => [mount.destination, mount.name]));
-  let volumes: Array<{ volume: string; managedName: string }>;
+  let volumes: Array<{ volume: string; managedName: string; destination: string }>;
   try {
     const parsed = JSON.parse(container.stdout.trim()) as { labels?: unknown; mounts?: unknown };
     const labels = parsed.labels === null || parsed.labels === undefined ? {} : parseInspectLabels(JSON.stringify(parsed.labels));
@@ -255,7 +255,7 @@ export async function mountedVolumeSet(
     volumes = mounts.flatMap((mount) => {
       if (mount.Type !== 'volume' || typeof mount.Name !== 'string' || mount.Name === '' || typeof mount.Destination !== 'string') return [];
       const managedName = expectedAt.get(mount.Destination);
-      return managedName === undefined ? [] : [{ volume: mount.Name, managedName }];
+      return managedName === undefined ? [] : [{ volume: mount.Name, managedName, destination: mount.Destination }];
     });
   } catch {
     return { status: 'unknown', reason: 'could not parse docker inspect output' };
@@ -269,18 +269,26 @@ export async function mountedVolumeSet(
   const lines = inspected.stdout.split('\n').filter((line) => line.trim() !== '');
   if (lines.length !== volumes.length) return { status: 'unknown', reason: 'docker volume inspect returned an unexpected answer' };
   const sets = new Set<string>();
+  let stranger: (typeof volumes)[number] | undefined;
   try {
     lines.forEach((line, index) => {
+      const entry = volumes[index]!;
       const labels = parseInspectLabels(line);
-      // The volume at a managed path must be that managed volume, and this project's: anything
+      // The volume at a managed path must be that managed volume, and this project's. Anything
       // else there (a config change, a hand-made volume, another project's volume of the same
-      // name) does not vote.
-      if (labels['portler.volume'] !== volumes[index]!.managedName) return;
-      if (!volumeOwners.includes(labels[PROJECT_LABEL] ?? '')) return;
+      // name) means the container's data came from somewhere Portler cannot name, so the answer
+      // is unknown rather than "base": guessing base could restart the service on other data.
+      if (labels['portler.volume'] !== entry.managedName || !volumeOwners.includes(labels[PROJECT_LABEL] ?? '')) {
+        stranger ??= entry;
+        return;
+      }
       sets.add(labels['portler.volume-set'] ?? '');
     });
   } catch {
     return { status: 'unknown', reason: 'could not parse docker volume inspect output' };
+  }
+  if (stranger) {
+    return { status: 'unknown', reason: `the volume at ${stranger.destination} (${stranger.volume}) is not this project's @${stranger.managedName} volume` };
   }
   if (sets.size === 0) return { status: 'none' };
   if (sets.size > 1) return { status: 'unknown', reason: 'it mounts volumes from different sets' };

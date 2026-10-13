@@ -342,13 +342,16 @@ describe('mountedVolumeSet', () => {
     assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, expected, [PROJECT], docker.run), { status: 'set', set: 'branch' });
   });
 
-  it("lets only this project's volumes vote", async () => {
+  it("lets only this project's volumes vote, and refuses to guess when another is at the @ path", async () => {
     const at: Mount = { Type: 'volume', Name: 'portler-other-data--branch', Destination: '/data' };
-    // Another project's volume with the same short name, at the @ path: no vote.
+    // Another project's volume with the same short name, at the @ path: the container's data is
+    // not one of this project's sets, so neither its set nor "base" is a safe answer.
     const foreign = fakeDocker([container(OURS, [at]), volumes({ [PROJECT_LABEL]: '/elsewhere', 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
-    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], foreign.run), { status: 'none' });
+    const foreignResult = await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], foreign.run);
+    assert.equal(foreignResult.status, 'unknown');
+    assert.match(foreignResult.status === 'unknown' ? foreignResult.reason : '', /the volume at \/data \(portler-other-data--branch\) is not this project's @data volume/);
     const unowned = fakeDocker([container(OURS, [at]), volumes({ 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
-    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], unowned.run), { status: 'none' });
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], unowned.run)).status, 'unknown');
     // A named production stack labels its volumes with the name, which the caller passes.
     const named = fakeDocker([container(OURS, [at]), volumes({ [PROJECT_LABEL]: 'shop', 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
     assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT, 'shop'], named.run), { status: 'set', set: 'branch' });
@@ -366,7 +369,7 @@ describe('mountedVolumeSet', () => {
     assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], docker.run), { status: 'set', set: 'branch' });
   });
 
-  it("reports the base volumes as '' and abstains when nothing at an @ path is that @ volume", async () => {
+  it("reports the base volumes as '', abstains when nothing is mounted at an @ path, and refuses a different volume there", async () => {
     const at = (name: string): Mount => ({ Type: 'volume', Name: name, Destination: '/data' });
     assert.deepEqual(
       await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('base')]), volumes(DATA)]).run),
@@ -376,19 +379,24 @@ describe('mountedVolumeSet', () => {
       await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [{ Type: 'bind', Destination: '/data' }])]).run),
       { status: 'none' },
     );
-    // A managed volume elsewhere, or a different volume at the @ path (a config change, a
-    // hand-made volume), does not vote.
+    // A volume only at some other path says nothing about the set.
     assert.deepEqual(
       await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [{ Type: 'volume', Name: 'v', Destination: '/other' }])]).run),
       { status: 'none' },
     );
-    assert.deepEqual(
-      await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('v')]), volumes({ ...LOGS, 'portler.volume-set': 'x' })]).run),
-      { status: 'none' },
+    // A different volume at the @ path (a config change, a hand-made volume, another managed
+    // volume) holds data Portler cannot name: unknown, so restart asks for --volume-set.
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('v')]), volumes({ ...LOGS, 'portler.volume-set': 'x' })]).run)).status,
+      'unknown',
     );
-    assert.deepEqual(
-      await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('scratch')]), volumes({ other: 'x' })]).run),
-      { status: 'none' },
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('scratch')]), volumes({ other: 'x' })]).run)).status,
+      'unknown',
+    );
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('scratch')]), volumes(null)]).run)).status,
+      'unknown',
     );
   });
 
