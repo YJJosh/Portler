@@ -513,9 +513,6 @@ export async function startPhase(
     // inspected is not reported as dead: this run could not confirm it either way.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = async (): Promise<void> => {
-      const spawnedDied = [...children]
-        .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
-        .map(([name]) => name);
       const retainedLiveness = await Promise.all(
         retained.map(async (name) => {
           const info = pidsBefore?.services[name];
@@ -523,6 +520,11 @@ export async function startPhase(
         }),
       );
       const retainedDied = retained.filter((_, index) => retainedLiveness[index]);
+      // Read the children after the probes above: a docker inspect can take a while,
+      // and a child that exited during it must not slip past the last check of the run.
+      const spawnedDied = [...children]
+        .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
+        .map(([name]) => name);
       const died = [...spawnedDied, ...retainedDied];
       if (died.length === 0) return;
       // A retained service was started by an earlier run; its log file is the

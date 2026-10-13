@@ -930,6 +930,61 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('startPhase notices a started service that exits while a kept container is still being inspected', async () => {
+    // api answers the readiness connection, then exits 200 ms later: while the
+    // fake docker below is still answering about db.
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+const server = http.createServer((req, res) => res.end('ok'));
+server.once('connection', () => setTimeout(() => process.exit(1), 200));
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    // A docker that takes a second to report c-db running.
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { sleep 1; printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // api's level is the last one and there is no proxy, so the check after it is
+      // the only one that can see api die.
+      await assert.rejects(
+        startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+        /service api exited while the stack was still starting/,
+      );
+      assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+    } finally {
+      process.env.PATH = savedPath;
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  });
+
   it('a restart without names replays the mode of recorded services that left the config', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
