@@ -228,6 +228,7 @@ export async function mountedVolumeSet(
   name: string,
   projectDir: string,
   expected: ReadonlyArray<{ name: string; destination: string }>,
+  volumeOwners: readonly string[],
   run: CommandRunner = runCommand,
 ): Promise<MountedVolumeSet> {
   const container = await run('docker', [
@@ -271,9 +272,11 @@ export async function mountedVolumeSet(
   try {
     lines.forEach((line, index) => {
       const labels = parseInspectLabels(line);
-      // The volume at a managed path must be that managed volume; anything else there (a
-      // config change, a hand-made volume) does not vote.
+      // The volume at a managed path must be that managed volume, and this project's: anything
+      // else there (a config change, a hand-made volume, another project's volume of the same
+      // name) does not vote.
       if (labels['portler.volume'] !== volumes[index]!.managedName) return;
+      if (!volumeOwners.includes(labels[PROJECT_LABEL] ?? '')) return;
       sets.add(labels['portler.volume-set'] ?? '');
     });
   } catch {

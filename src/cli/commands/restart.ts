@@ -374,8 +374,12 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
           if (info.volumeSet !== undefined || info.dockerContainer === undefined) return;
           const candidates = legacyMountCandidates(loadedConfig.services[serviceName], info);
           if (candidates.length === 0) return;
+          // Volumes are labelled with their scope's owner: the volume root, or the project's
+          // name for a named production stack. An older Portler without `name:` labelled
+          // production volumes with the volume root too, so that always counts.
+          const owners = [loadedConfig.volumeRoot, ...(info.prod === true && loadedConfig.name ? [loadedConfig.name] : [])];
           const found = await Promise.all(
-            candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected)),
+            candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected, owners)),
           );
           const set = combineMountedSets(found);
           if (set !== undefined) mountedVolumeSets[serviceName] = set;
