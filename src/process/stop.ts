@@ -31,7 +31,7 @@ import { identityVerdict, readProcessStartToken } from './identity.ts';
 import type { IdentityVerdict } from './identity.ts';
 import { removeOwnedContainer, removeOwnedNetwork, warnForeignResource } from './ownership.ts';
 import type { RemovalOutcome } from './ownership.ts';
-import { isPidRunning, readPids, removePidEntries } from './pids.ts';
+import { isPidAlive, isPidRunning, processGroupAlive, readPids, removePidEntries } from './pids.ts';
 import type { PidServiceInfo } from '../types/index.ts';
 
 const SIGTERM_GRACE_MS = 1_500;
@@ -69,15 +69,9 @@ export interface StopResult {
 /** 'alive' also covers EPERM: the group exists, it is simply not ours to signal. */
 export type GroupState = 'alive' | 'gone';
 
+/** A group holding only zombies is gone: see processGroupAlive. */
 function realProcessGroupState(pid: number): GroupState {
-  if (!Number.isInteger(pid) || pid <= 0) return 'gone';
-
-  try {
-    process.kill(-pid, 0);
-    return 'alive';
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM' ? 'alive' : 'gone';
-  }
+  return processGroupAlive(pid) ? 'alive' : 'gone';
 }
 
 /**
@@ -116,6 +110,8 @@ function realSendSignal(pid: number, signal: NodeJS.Signals): SignalOutcome {
 export interface StopHooks {
   readStartToken?: (pid: number) => Promise<string | null>;
   pidRunning?: (pid: number) => boolean;
+  /** Like pidRunning, but a zombie counts as dead; defaults to pidRunning when that is injected. */
+  pidAlive?: (pid: number) => boolean;
   groupState?: (pid: number) => GroupState;
   sendSignal?: (pid: number, signal: NodeJS.Signals) => SignalOutcome;
   graceMs?: number;
@@ -125,6 +121,7 @@ export interface StopHooks {
 interface Probes {
   readStartToken: (pid: number) => Promise<string | null>;
   pidRunning: (pid: number) => boolean;
+  pidAlive: (pid: number) => boolean;
   groupState: (pid: number) => GroupState;
   sendSignal: (pid: number, signal: NodeJS.Signals) => SignalOutcome;
   graceMs: number;
@@ -135,6 +132,7 @@ function resolveHooks(hooks: StopHooks): Probes {
   return {
     readStartToken: hooks.readStartToken ?? ((pid) => readProcessStartToken(pid)),
     pidRunning: hooks.pidRunning ?? isPidRunning,
+    pidAlive: hooks.pidAlive ?? hooks.pidRunning ?? isPidAlive,
     groupState: hooks.groupState ?? realProcessGroupState,
     sendSignal: hooks.sendSignal ?? realSendSignal,
     graceMs: hooks.graceMs ?? SIGTERM_GRACE_MS,
@@ -142,9 +140,15 @@ function resolveHooks(hooks: StopHooks): Probes {
   };
 }
 
-/** True while the leader or any member of its group is still alive. */
+/**
+ * True while the leader or any member of its group is still alive. A zombie is
+ * not: under a PID 1 that does not reap orphans a stopped service stays one for
+ * good, and waiting for it to vanish would turn every teardown there into a
+ * reported failure. The identity check still uses pidRunning, because a zombie
+ * leader keeps its start token and so still proves the group is ours.
+ */
 function isProcessGroupRunning(probes: Probes, pid: number): boolean {
-  return probes.groupState(pid) === 'alive' || probes.pidRunning(pid);
+  return probes.groupState(pid) === 'alive' || probes.pidAlive(pid);
 }
 
 export type SignalAction = 'group' | 'none';

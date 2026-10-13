@@ -642,13 +642,12 @@ describe('foreground teardown ownership', () => {
         pids.services.api!.startToken = token ?? 'unreadable-start-token';
       }));
 
-      // The zombie's own entry goes to stopServices with the rest, and it, like
-      // `portler down`, cannot see the zombie gone: that is reported, not hidden.
-      await assert.rejects(
-        withLifecycleLockForTeardown(projectDir, () => stack.teardown()),
-        (error: Error) => error.name === 'IncompleteTeardownError',
-      );
-      assert.equal((await readPids(projectDir))!.services[PROXY_SERVICE_NAME], undefined, 'the proxy is not kept');
+      // The zombie's own entry goes to stopServices with the rest, which counts a
+      // group that holds only a zombie as gone: the entry is pruned, not reported
+      // as a teardown failure.
+      await withLifecycleLockForTeardown(projectDir, () => stack.teardown());
+      assert.equal((await readPids(projectDir))?.services.api, undefined, "the zombie's entry is pruned");
+      assert.equal((await readPids(projectDir))?.services[PROXY_SERVICE_NAME], undefined, 'the proxy is not kept');
       assert.equal(isPidRunning(proxyPid), false, 'the proxy was stopped');
       assert.ok(
         !Object.values((await readRegistry()).ports).some((entry) => entry.service === PROXY_SERVICE_NAME),

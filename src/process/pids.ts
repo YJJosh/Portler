@@ -1,5 +1,5 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveServiceCwd } from '../config/index.ts';
@@ -179,6 +179,73 @@ export function isPidAlive(pid: number): boolean {
     return !result.stdout.trim().startsWith('Z');
   }
   return true;
+}
+
+/**
+ * True while the process group still holds a process that can run.
+ * kill(-pgid, 0) also succeeds for a group whose only members are zombies, and
+ * under a PID 1 that does not reap orphans (a container without an init) a
+ * stopped service's group stays like that for good, so the signal check alone
+ * would never see it go. On Linux, once the signal check says the group is
+ * there, its members are read from /proc and the group counts as gone only when
+ * every member found is a zombie. Anything unclear keeps the answer "alive": no
+ * /proc, a member whose state cannot be read, or a procfs mounted with hidepid,
+ * which hides other users' processes. On macOS launchd reaps orphans, and
+ * elsewhere the signal check decides. EPERM counts as alive: the group is
+ * there, just not ours to signal.
+ */
+export function processGroupAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  if (process.platform !== 'linux') return true;
+  return linuxGroupHasLiveMember(pgid);
+}
+
+function linuxGroupHasLiveMember(pgid: number): boolean {
+  let mounts: string;
+  let entries: string[];
+  try {
+    mounts = readFileSync('/proc/self/mounts', 'utf8');
+    entries = readdirSync('/proc');
+  } catch {
+    return true;
+  }
+  if (procHidesProcesses(mounts)) return true;
+
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+    } catch (error) {
+      // Exited since the listing; any other failure leaves the member unknown.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') continue;
+      return true;
+    }
+    // `pid (comm) state ppid pgrp ...`; comm may contain spaces or parentheses.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (Number(fields[2]) !== pgid) continue;
+    if (fields[0] !== 'Z' && fields[0] !== 'X') return true;
+  }
+  return false;
+}
+
+/** True when the procfs at /proc is mounted with a hidepid option that hides processes. */
+export function procHidesProcesses(mounts: string): boolean {
+  for (const line of mounts.split('\n')) {
+    const [, mountPoint, type, options] = line.split(' ');
+    if (mountPoint !== '/proc' || type !== 'proc' || !options) continue;
+    for (const option of options.split(',')) {
+      if (!option.startsWith('hidepid=')) continue;
+      const value = option.slice('hidepid='.length);
+      if (value !== '0' && value !== 'off') return true;
+    }
+  }
+  return false;
 }
 
 export function runningServices(pids: PidsFile | null, serviceNames?: string[]): string[] {

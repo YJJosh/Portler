@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import type { EnvMap } from '../types/index.ts';
+import { processGroupAlive } from './pids.ts';
 
 export interface ShellOptions {
   /** Called with every signal that is forwarded to the command's process group. */
@@ -43,14 +44,9 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   }
 }
 
-/** True while any process is left in the group (EPERM counts: it is there, just not ours). */
+/** True while the group holds a process that can run; a zombie-only group is gone (see processGroupAlive). */
 function groupAlive(pgid: number): boolean {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
+  return processGroupAlive(pgid);
 }
 
 /**
