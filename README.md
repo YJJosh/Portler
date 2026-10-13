@@ -4,6 +4,8 @@ Portler runs multi-service projects with automatic port assignment and environme
 
 [Documentation](https://yjjosh.github.io/Portler/) · [Getting started](https://yjjosh.github.io/Portler/guide/getting-started) · [CLI reference](https://yjjosh.github.io/Portler/reference/cli/) · [Configuration reference](https://yjjosh.github.io/Portler/reference/configuration)
 
+> **Note:** Portler is still evolving. The `portler.yml` format is being improved and can change in breaking ways in upcoming releases, so check the [release notes](https://github.com/YJJosh/Portler/releases) when you upgrade.
+
 ## Install
 
 Portler requires Node.js 22.6 or newer.
@@ -23,18 +25,41 @@ Generate a starter configuration and adapt it to your project:
 portler init
 ```
 
-A minimal `portler.yml` looks like this:
+A `portler.yml` for a web app with a database looks like this:
 
 ```yaml
 services:
+  postgres:
+    image: postgres:16-alpine
+    port: 5432
+    env:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - '@postgres-data:/var/lib/postgresql/data'
+    healthcheck:
+      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
+
   backend:
     command: npm run dev
+    cwd: backend
+    setup:
+      - run: npm install
+        if_missing: node_modules
     port: 4000
     port_env: PORT
+    depends_on:
+      - postgres
+    env:
+      DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
 
   frontend:
     command: npm run dev
     cwd: frontend
+    setup:
+      - run: npm install
+        if_missing: node_modules
     port: 3000
     port_env: PORT
     depends_on:
@@ -53,7 +78,13 @@ portler logs backend --follow
 portler down
 ```
 
-Portler assigns an available host port to each service. Local processes receive it through `port_env`, and generated URLs and service references always use the resolved host port.
+On `portler up`:
+
+- Every service gets a free host port, so this stack can run next to other projects and checkouts. Local processes receive it through `port_env`.
+- `${postgres.port}` and `backend.url` resolve to those ports, so `DATABASE_URL` and `VITE_API_URL` always point at the right place.
+- Postgres runs in Docker. Its data lives in the managed volume `@postgres-data`, which survives restarts and can be forked for another checkout.
+- `npm install` runs only while `node_modules` is missing.
+- The backend starts once Postgres passes its healthcheck, and the frontend once the backend answers.
 
 ## Highlights
 

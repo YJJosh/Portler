@@ -33,6 +33,7 @@ export default defineConfig({
           items: [
             { text: 'What is Portler?', link: '/guide/what-is-portler' },
             { text: 'Getting started', link: '/guide/getting-started' },
+            { text: 'Agent skill', link: '/guide/agent-skill' },
           ],
         },
         {
