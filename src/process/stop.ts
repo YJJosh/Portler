@@ -469,7 +469,7 @@ export async function stopServices(
   // can prove. Nothing is signalled here; a group that is still alive at the
   // deadline gets today's careful treatment.
   const settling = targets.filter(
-    (target) => containerCleanup.removed.has(target.name) && !probes.pidRunning(target.info.pid),
+    (target) => containerCleanup.removed.has(target.name) && !probes.pidAlive(target.info.pid),
   );
   const settleDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < settleDeadline && settling.some((target) => probes.groupState(target.info.pid) === 'alive')) {

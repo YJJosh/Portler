@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
-import { isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
+import { isPidAlive, isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
 import { signalDecision, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
@@ -74,13 +74,14 @@ function pidInfo(pid: number, startToken: string | undefined): PidServiceInfo {
 }
 
 /** Poll until the pid is gone, so the assertion does not race the signal. */
+/** Waits until `pid` no longer runs: a zombie counts as exited, as under a PID 1 that never reaps it stays one. */
 async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isPidRunning(pid)) return true;
+    if (!isPidAlive(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return !isPidRunning(pid);
+  return !isPidAlive(pid);
 }
 
 describe('signalDecision', () => {
@@ -686,7 +687,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
     try {
       const result = await stopServices(projectDir, ['db']);
-      assert.ok(!isPidRunning(member), 'the member was gone before Portler first looked at its group');
+      assert.ok(!isPidAlive(member), 'the member was gone before Portler first looked at its group');
       assert.deepEqual(result.stopped, ['db']);
       assert.deepEqual(result.unverified, []);
       assert.deepEqual(result.completed, ['db']);
