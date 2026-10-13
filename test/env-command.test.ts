@@ -139,3 +139,75 @@ describe('env for a running service', () => {
     assert.match(result.stderr, /--prod does not apply to k8s mode, and backend was started with "portler up k8s"/);
   });
 });
+
+describe('env for a Kubernetes service without a port', () => {
+  // `up k8s` records a service only through its port-forward, so one without a port has
+  // no pids.json entry: env asks the cluster, but only when `up k8s` rendered its manifest.
+  const K8S_CONFIG = `services:
+  worker:
+    command: node worker.js
+    env: {MODE: local}
+    docker:
+      image: example/worker
+      env: {MODE: docker}
+`;
+  let calls: string;
+
+  async function fakeKubectl(script: string[]): Promise<void> {
+    const bin = path.join(projectDir, 'bin');
+    calls = path.join(projectDir, 'kubectl-calls');
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(
+      path.join(bin, 'kubectl'),
+      ['#!/bin/sh', `echo "$*" >> '${calls}'`, 'case "$*" in', ...script, 'esac', 'exit 0', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ''}`;
+  }
+
+  async function renderedManifest(): Promise<void> {
+    await fs.mkdir(path.join(projectDir, '.portler', 'k8s'), { recursive: true });
+    await fs.writeFile(path.join(projectDir, '.portler', 'k8s', 'worker.yml'), 'kind: Deployment\n', 'utf8');
+  }
+
+  const cluster = ['  "config current-context") echo docker-desktop ;;', '  "config view"*) echo https://127.0.0.1:6443 ;;'];
+
+  beforeEach(async () => {
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), K8S_CONFIG, 'utf8');
+  });
+
+  it('shows the k8s environment when the cluster runs its Deployment', async () => {
+    await renderedManifest();
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'docker');
+    assert.match(result.stderr, /worker was started with "portler up k8s"; this shows the environment it got/);
+  });
+
+  it('keeps the development view when the cluster has no Deployment for it', async () => {
+    await renderedManifest();
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo 'No resources found' ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'local');
+    assert.equal(result.stderr, '');
+  });
+
+  it('never asks kubectl when up k8s rendered no manifest for it here', async () => {
+    await fakeKubectl([...cluster, `  *" get deployment "*) echo deployment.apps/worker ;;`]);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'local');
+    await assert.rejects(fs.access(calls));
+  });
+
+  it('says so when the cluster cannot be asked, and shows the development view', async () => {
+    await renderedManifest();
+    await fakeKubectl(['  "config current-context") echo "no context" >&2; exit 1 ;;']);
+    const result = run('worker');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'MODE'), 'local');
+    assert.match(result.stderr, /could not ask the cluster whether worker runs there/);
+  });
+});

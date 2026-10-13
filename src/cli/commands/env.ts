@@ -1,7 +1,10 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
+import { deployedK8sServices, detectCluster, k8sManifestDir, k8sServiceNames } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
 import { readPids, runningServices } from '../../process/index.ts';
@@ -52,6 +55,29 @@ function upCommand(mode: RunMode, prod: boolean): string {
   return `portler up${mode === 'local' ? '' : ` ${mode}`}${prod ? ' --prod' : ''}`;
 }
 
+/**
+ * Whether a service with no pids.json entry runs in the cluster. `up k8s` records a
+ * service only through its port-forward, so one without a port leaves no entry and
+ * the cluster is the only witness. kubectl is only asked when `up k8s` rendered a
+ * manifest for the service in this checkout, so a project that never used k8s mode
+ * never waits on it. Undefined when the cluster could not be asked.
+ */
+async function deployedInCluster(config: PortlerConfig, serviceName: string): Promise<boolean | undefined> {
+  let k8sName: string | undefined;
+  try {
+    k8sName = k8sServiceNames(Object.keys(config.services)).get(serviceName);
+  } catch {
+    return false;
+  }
+  if (!k8sName || !existsSync(path.join(k8sManifestDir(config.projectDir), `${k8sName}.yml`))) return false;
+  try {
+    const deployed = await deployedK8sServices(await detectCluster(), config);
+    return deployed?.includes(serviceName);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function commandEnv(args: ParsedArgs): Promise<number> {
   const { mode: requestedMode, requested } = parseRunMode(args.positionals);
   const modeExplicit = requested.length < args.positionals.length;
@@ -66,7 +92,16 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     // run mode and, if it was started with --prod, in production. A typed mode token or
     // --prod wins over the record, as it does for restart, and a notice says so.
     const recorded = serviceName ? (await readPids(loadedConfig.projectDir))?.services[serviceName] : undefined;
-    const recordedMode = recorded && recordedRunMode(configForRunMode(loadedConfig, 'local'), serviceName!, recorded);
+    let recordedMode = recorded && recordedRunMode(configForRunMode(loadedConfig, 'local'), serviceName!, recorded);
+    if (serviceName && !recorded && !modeExplicit) {
+      const inCluster = await deployedInCluster(loadedConfig, serviceName);
+      if (inCluster) recordedMode = 'k8s';
+      if (inCluster === undefined) {
+        process.stderr.write(
+          `[portler] could not ask the cluster whether ${serviceName} runs there; showing the local environment ("portler env k8s ${serviceName}" shows its Kubernetes one)\n`,
+        );
+      }
+    }
     const recordedProd = recorded?.prod === true;
     const mode: RunMode = modeExplicit ? requestedMode : recordedMode ?? 'local';
     const prod = args.prod === true || recordedProd;
