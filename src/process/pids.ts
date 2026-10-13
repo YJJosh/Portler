@@ -222,12 +222,13 @@ function linuxGroupHasLiveMember(pgid: number): boolean {
 
 /**
  * One pass over /proc: what it saw of the group, or 'unknown' when a member's state
- * cannot be read. `members` holds every member pid, every thread id a zombie member
- * listed (`pid/tid`), and every pid that exited between the listing and its own read
- * (`?pid`, its group unknown). Two scans compare equal only when nothing came, went or
- * changed in between, which is what groupHoldsOnlyZombies relies on.
+ * cannot be read. `members` holds every member pid it read and every thread of a zombie
+ * member it read (`pid/tid`). `settled` is false when a process or thread exited
+ * between the listing and its own read: it may have been ours and may have started one
+ * the listing missed, and its id can be reused by the next one, so groupHoldsOnlyZombies
+ * never matches such a scan.
  */
-export type GroupScan = { members: string[]; live: boolean } | 'unknown';
+export type GroupScan = { members: string[]; live: boolean; settled: boolean } | 'unknown';
 
 /** One pass over a procfs (`procRoot` is only for tests). */
 export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
@@ -238,28 +239,32 @@ export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
     return 'unknown';
   }
   const members: string[] = [];
+  let settled = true;
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const stat = readProcState(`${procRoot}/${entry}/stat`);
     // It exited after the listing. It may have been ours and may have forked a
-    // process this listing missed, so it stays in the record and the next scan,
-    // which no longer lists it, cannot match this one.
+    // process this listing missed.
     if (stat === 'gone') {
-      members.push(`?${entry}`);
+      settled = false;
       continue;
     }
     if (stat === 'unknown') return 'unknown';
     if (stat.pgrp !== pgid) continue;
     members.push(entry);
-    if (!isZombieState(stat.state)) return { members, live: true };
+    if (!isZombieState(stat.state)) return { members, live: true, settled };
     // The /proc/<pid>/stat state is the main thread's. Its other threads may still run.
     const threads = readThreads(`${procRoot}/${entry}/task`);
-    if (threads === 'gone') continue; // reaped since; the next listing will not show it
+    if (threads === 'gone') {
+      settled = false; // reaped since its stat was read
+      continue;
+    }
     if (threads === 'unknown') return 'unknown';
     members.push(...threads.tids.map((tid) => `${entry}/${tid}`));
-    if (threads.live) return { members, live: true };
+    if (!threads.settled) settled = false;
+    if (threads.live) return { members, live: true, settled };
   }
-  return { members, live: false };
+  return { members, live: false, settled };
 }
 
 function isZombieState(state: string): boolean {
@@ -282,12 +287,12 @@ function readProcState(path: string): { state: string; pgrp: number } | 'gone' |
 }
 
 /**
- * A process's listed thread ids and whether any of them can run; 'gone' when the
- * process has been reaped since. A thread that exited between the listing and its
- * own read stays listed: it may have started a thread this listing missed, and the
- * next scan, which no longer lists it, then cannot match this one.
+ * A process's thread ids that were read, whether any of them can run, and whether all
+ * listed threads could be read; 'gone' when the process has been reaped since. A thread
+ * that exited between the listing and its own read may have started one this listing
+ * missed, so it leaves the result unsettled.
  */
-function readThreads(taskDir: string): { tids: string[]; live: boolean } | 'gone' | 'unknown' {
+function readThreads(taskDir: string): { tids: string[]; live: boolean; settled: boolean } | 'gone' | 'unknown' {
   let entries: string[];
   try {
     entries = readdirSync(taskDir);
@@ -296,28 +301,32 @@ function readThreads(taskDir: string): { tids: string[]; live: boolean } | 'gone
     return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
   }
   const tids: string[] = [];
+  let settled = true;
   for (const tid of entries) {
     if (!/^\d+$/.test(tid)) continue;
-    tids.push(tid);
     const state = readProcState(`${taskDir}/${tid}/stat`);
-    if (state === 'gone') continue;
+    if (state === 'gone') {
+      settled = false;
+      continue;
+    }
     if (state === 'unknown') return 'unknown';
-    if (!isZombieState(state.state)) return { tids, live: true };
+    tids.push(tid);
+    if (!isZombieState(state.state)) return { tids, live: true, settled };
   }
-  return { tids, live: false };
+  return { tids, live: false, settled };
 }
 
 /**
  * Decides from repeated scans whether a group holds only zombies. One scan is not
  * enough: a live process or thread can start another after the listing and exit
  * before its own state is read, so the new one is missed. The answer is yes only when
- * two consecutive scans record the same processes and threads, including any that
- * exited mid-read, and none of them can run. Nothing then exited during the first
- * scan (it would be missing from the second listing), and every process and thread of
- * the second scan was already a zombie when the first scan read it, before the second
- * listing, so none of them could start one the second listing missed. A live member,
- * an unreadable one, or records that keep changing for `attempts` scans keep the
- * answer no.
+ * two consecutive scans are both settled (nothing exited between a listing and its
+ * read), record the same processes and threads, and none of them can run. Every
+ * process and thread of the second scan was then read as a zombie by the first one,
+ * before the second listing, so none of them could start one the second listing
+ * missed. Ids are not compared across a mid-read exit, since a new process or thread
+ * can reuse the id. A live member, an unreadable one, or scans that keep changing or
+ * stay unsettled for `attempts` scans keep the answer no.
  */
 export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
   let previous = scan();
@@ -325,7 +334,7 @@ export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): bool
     if (previous === 'unknown' || previous.live) return false;
     const current = scan();
     if (current === 'unknown' || current.live) return false;
-    if (sameMembers(previous.members, current.members)) return true;
+    if (previous.settled && current.settled && sameMembers(previous.members, current.members)) return true;
     previous = current;
   }
   return false;

@@ -78,7 +78,7 @@ describe('processGroupAlive', () => {
       let calls = 0;
       return { scan: () => scans[Math.min(calls++, scans.length - 1)], calls: () => calls };
     };
-    const zombies = (...members: number[]): GroupScan => ({ members: members.map(String), live: false });
+    const zombies = (...members: number[]): GroupScan => ({ members: members.map(String), live: false, settled: true });
 
     // Stable: the same zombies twice.
     let run = scripted(zombies(5), zombies(5));
@@ -87,7 +87,7 @@ describe('processGroupAlive', () => {
 
     // The race: 5 forked 6 after the first listing and then exited, so the first scan
     // read 5 as a zombie and never saw 6. The second listing finds 6 running.
-    run = scripted(zombies(5), { members: ['5', '6'], live: true });
+    run = scripted(zombies(5), { members: ['5', '6'], live: true, settled: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
 
     // 6 had already become a zombie by the second scan: the members changed, so a
@@ -102,7 +102,7 @@ describe('processGroupAlive', () => {
     assert.equal(run.calls(), 4);
 
     // A live member or an unreadable one in the first scan ends it at once.
-    run = scripted({ members: ['5'], live: true });
+    run = scripted({ members: ['5'], live: true, settled: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
     assert.equal(run.calls(), 1);
     run = scripted('unknown');
@@ -112,6 +112,15 @@ describe('processGroupAlive', () => {
 
     // No members twice: the group went away between the signal check and the scans.
     assert.equal(groupHoldsOnlyZombies(scripted(zombies(), zombies()).scan), true);
+
+    // A scan in which something exited mid-read never matches, even with the same ids:
+    // the id may now belong to a new process or thread. Two settled scans after it do.
+    const unsettled = (...members: number[]): GroupScan => ({ members: members.map(String), live: false, settled: false });
+    run = scripted(unsettled(5), unsettled(5), unsettled(5), unsettled(5));
+    assert.equal(groupHoldsOnlyZombies(run.scan, 4), false);
+    run = scripted(unsettled(5), zombies(5), zombies(5));
+    assert.equal(groupHoldsOnlyZombies(run.scan), true);
+    assert.equal(run.calls(), 3);
   });
 
   it('reads a member whose main thread exited as live while another of its threads runs', () => {
@@ -132,16 +141,16 @@ describe('processGroupAlive', () => {
       mkdirSync(path.join(root, 'self'));
       proc(900, 'S', 77, { 900: 'S' }); // another group, never a member
       proc(100, 'Z', 100, { 100: 'Z', 101: 'S' });
-      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: true });
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: true, settled: true });
 
       // Once the worker has exited too, the member is a zombie through and through.
       writeFileSync(path.join(root, '100', 'task', '101', 'stat'), stat(101, 'Z', 100));
-      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false });
-      // A thread that went away between listing and reading cannot run, but it stays
-      // in the record, so a scan after it is gone does not match this one.
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false, settled: true });
+      // A thread that went away between listing and reading cannot run, but it may
+      // have started one the listing missed, so the scan is unsettled.
       rmSync(path.join(root, '100', 'task', '101'), { recursive: true });
       mkdirSync(path.join(root, '100', 'task', '101'));
-      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false });
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100'], live: false, settled: false });
 
       // A task list that cannot be read leaves the answer unknown, never "gone".
       rmSync(path.join(root, '100', 'task'), { recursive: true });
@@ -180,12 +189,18 @@ describe('processGroupAlive', () => {
       assert.equal(groupHoldsOnlyZombies(scan), false, 'the thread that is still running keeps the group alive');
       assert.equal(calls, 3);
 
-      // A process listed but gone before its read may have been ours: it is recorded,
-      // and the next scan, which no longer lists it, cannot match.
+      // Codex's reuse case: two different workers with the same id 101 each exit
+      // between a task listing and their read, so by ids alone both scans look the
+      // same. Each may have started a thread its listing missed, so neither counts.
       rmSync(path.join(root, '100', 'task'), { recursive: true });
       thread(100, 'Z');
+      listedNotRead(101);
+      assert.equal(groupHoldsOnlyZombies(() => scanProcGroup(100, root)), false, 'scans with a mid-read exit never match');
+
+      // A process listed but gone before its read may have been ours too.
+      rmSync(task(101), { recursive: true });
       mkdirSync(path.join(root, '555'));
-      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '?555'], live: false });
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100'], live: false, settled: false });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
