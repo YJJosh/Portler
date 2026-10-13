@@ -6,14 +6,12 @@ import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resol
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
-  identityVerdict,
   isPidAlive,
-  ownedContainerLiveness,
   pidInfoFor,
   readPids,
-  readProcessStartToken,
   runningServices,
   serviceLogPath,
+  serviceLiveness,
   spawnService,
   stopServices,
   updatePids,
@@ -180,33 +178,20 @@ export interface StartedStack {
 type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status: 'dead' };
 
 /**
- * Whether a pids.json entry still names something alive. The pid first, by
- * identity: a live pid whose start token differs from the recorded one was
- * recycled by the OS for an unrelated process, so the entry is as dead as one
- * whose pid is gone or a zombie. A live pid
- * that cannot be identified (no recorded token, or the platform will not say)
- * counts as alive. Then, for a Docker service, its container: `docker run` is
- * supervised by a shell whose pid can be gone while the container runs on, and
- * handing such an entry to stopServices would remove a container that another
- * run is serving through. An entry whose container cannot be inspected (daemon
- * down, permission error) is 'unknown' and treated as alive: guessing "dead" is
- * the one mistake that destroys something.
+ * Whether a pids.json entry still names something alive, in the words the
+ * teardown reports (serviceLiveness decides). An entry whose container cannot
+ * be inspected is 'unknown' and treated as alive: handing it to stopServices
+ * would remove a container another run may be serving through, and guessing
+ * "dead" is the one mistake that destroys something.
  */
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
-  // A zombie counts as gone. Under a PID 1 that does not reap orphans (a
-  // container without an init), a replacement that exited keeps its pid and its
-  // start token, and the existence check alone would keep it, and everything it
-  // depends on, alive for good.
-  const exists = isPidAlive(info.pid);
-  const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
-  if (verdict === 'match' || verdict === 'unverifiable') return { status: 'alive', reason: 'its PID entry belongs to another run' };
-  if (!info.dockerContainer) return { status: 'dead' };
-  const container = await ownedContainerLiveness(info.dockerContainer, projectDir);
-  if (container.status === 'running') {
+  const liveness = await serviceLiveness(projectDir, info);
+  if (liveness.status === 'running' && liveness.via === 'pid') return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  if (liveness.status === 'running') {
     return { status: 'alive', reason: `its container "${info.dockerContainer}" is still running under another run` };
   }
-  if (container.status === 'error') {
-    return { status: 'unknown', reason: `its container "${info.dockerContainer}" could not be inspected (${container.message})` };
+  if (liveness.status === 'unknown') {
+    return { status: 'unknown', reason: `its container "${info.dockerContainer}" could not be inspected (${liveness.message})` };
   }
   return { status: 'dead' };
 }
