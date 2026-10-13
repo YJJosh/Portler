@@ -312,7 +312,14 @@ export function assertServiceCwd(config: PortlerConfig, service: ServiceConfig):
   let isDirectory: boolean | undefined;
   try {
     isDirectory = statSync(cwd).isDirectory();
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Only absence means "does not exist"; a permission or I/O error is reported as itself.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw new Error(
+        `service "${service.name}": cwd "${service.cwd}" resolves to ${cwd}, which cannot be checked: ${(error as Error).message}`,
+      );
+    }
     isDirectory = undefined;
   }
   if (isDirectory) return;

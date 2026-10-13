@@ -47,6 +47,35 @@ describe('a service whose cwd is missing', () => {
     );
   });
 
+  it('reports a filesystem error as itself, and only absence as missing', async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-cwd-')));
+    dirs.push(dir);
+    const config = { projectDir: dir, filePath: path.join(dir, 'portler.yml') } as PortlerConfig;
+    const check = (cwd: string) => () => assertServiceCwd(config, { name: 'api', cwd } as ServiceConfig);
+
+    // A symlink loop: ELOOP for every user on every platform.
+    await fs.symlink('loop-b', path.join(dir, 'loop-a'));
+    await fs.symlink('loop-a', path.join(dir, 'loop-b'));
+    assert.throws(check('loop-a/sub'), /cwd "loop-a\/sub" resolves to .*, which cannot be checked: ELOOP/);
+
+    // A path through a regular file cannot exist (ENOTDIR), so it is still "does not exist".
+    await fs.writeFile(path.join(dir, 'file'), 'x');
+    assert.throws(check('file/sub'), /which does not exist\./);
+    assert.throws(check('file'), /which is not a directory\./);
+
+    // An unsearchable parent is a permission problem, not a missing folder (root bypasses it).
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const locked = path.join(dir, 'locked');
+      await fs.mkdir(path.join(locked, 'sub'), { recursive: true });
+      await fs.chmod(locked, 0o000);
+      try {
+        assert.throws(check('locked/sub'), /which cannot be checked: EACCES/);
+      } finally {
+        await fs.chmod(locked, 0o755);
+      }
+    }
+  });
+
   it('is refused by up, setup and start before anything runs', async () => {
     const projectDir = await project(
       [
