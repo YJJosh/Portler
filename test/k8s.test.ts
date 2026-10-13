@@ -662,5 +662,14 @@ describe('portForwardPidInfo', () => {
     const info = await portForwardPidInfo(config, service, { pid: process.pid } as unknown as ChildProcess, assignment);
     assert.equal(info.runMode, 'k8s');
     assert.ok(info.command.startsWith(`${K8S_FORWARD_COMMAND} `), info.command);
+    assert.equal('image' in info, false, 'no pin, no image field');
+  });
+
+  it('records an --image pin, as a container entry does', async () => {
+    const service = { name: 'api', command: 'node server.js', port: 3000 } as ServiceConfig;
+    const config = makeConfig({ api: service });
+    const assignment = { name: 'api', port: 53000, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: 'http://localhost:53000' };
+    const info = await portForwardPidInfo(config, service, { pid: process.pid } as unknown as ChildProcess, assignment, 'example/api@sha256:pinned');
+    assert.equal(info.image, 'example/api@sha256:pinned');
   });
 });

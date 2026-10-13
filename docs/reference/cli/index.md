@@ -12,7 +12,7 @@ portler restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <se
 portler ps [service...]
 portler logs [service...] [-f|--follow]
 portler ports
-portler env [service] [--prod] [--reveal]
+portler env [docker|k8s] [service] [--prod] [--reveal]
 portler clean [--ports] [--global] [--force]
 portler volumes [list] [--prod]
 portler volumes fork <volume> <new-set> [--prod]
@@ -35,7 +35,7 @@ portler init
 | `--setup` / `--no-setup` | `up`, `restart` | Force / skip setup (not Kubernetes) |
 | `-d, --detach` | `up` | Start services in the background |
 | `-f, --follow` | `logs` | Keep streaming new output |
-| `--reveal` | `env` | With `--prod`, print secret-looking values instead of `***` |
+| `--reveal` | `env` | With `--prod`, or for a service started with `--prod`, print secret-looking values instead of `***` |
 | `--drain-ms <ms>` | `start` | After the shell exits, wait up to `<ms>` for the rest of its process group (default 10000) |
 | `--image <service>=<image>` | `up`, `restart` | Run that Docker service from this image instead of building it (repeatable) |
 | `--volumes` | `down k8s` | Also delete the project's PersistentVolumeClaims |

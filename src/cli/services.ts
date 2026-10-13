@@ -1,7 +1,8 @@
 import type { RunMode } from '../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../constants.ts';
+import { K8S_FORWARD_COMMAND } from '../k8s/index.ts';
 import { didYouMean } from '../util/suggest.ts';
-import type { PortlerConfig } from '../types/index.ts';
+import type { PidServiceInfo, PortlerConfig } from '../types/index.ts';
 
 /**
  * Strip the optional leading 'docker'/'k8s' mode token shared by `up` and
@@ -18,6 +19,25 @@ export function parseRunMode(positionals: string[]): { mode: RunMode; requested:
   }
 
   return { mode: 'local', requested: positionals };
+}
+
+/**
+ * The run mode a pids.json entry was started in. Entries without runMode predate the
+ * field. One running the port-forward was started by `up k8s`, and one without a
+ * container was a local process. A container of a service whose docker: block only
+ * applies under `up docker` must have come from docker mode; one the service also runs
+ * under plain `up` (a top-level image:) counts as local, the conservative reading. A
+ * container of a service no longer in the config says neither, since plain `up` runs a
+ * top-level image: in one too, so that entry has no say in the run mode.
+ * `localConfig` is the plain `up` view of the config.
+ */
+export function recordedRunMode(localConfig: PortlerConfig, name: string, info: PidServiceInfo): RunMode | undefined {
+  if (info.runMode !== undefined) return info.runMode;
+  if (info.command.startsWith(`${K8S_FORWARD_COMMAND} `)) return 'k8s';
+  if (info.dockerContainer === undefined) return 'local';
+  const service = localConfig.services[name];
+  if (service === undefined) return undefined;
+  return service.docker === undefined ? 'docker' : 'local';
 }
 
 /** Refuse to start services that already have a live pids.json entry. */
