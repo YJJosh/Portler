@@ -90,14 +90,20 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     );
   }
 
-  // Entries without runMode predate the field. A container of a service whose
-  // docker: block only applies under `up docker` must have come from docker
-  // mode; anything else counts as local, the conservative reading.
+  // Entries without runMode predate the field. One without a container was a local
+  // process. A container of a service whose docker: block only applies under
+  // `up docker` must have come from docker mode; one the service also runs under
+  // plain `up` (a top-level image:) counts as local, the conservative reading. A
+  // container of a service no longer in the config says neither, since plain `up`
+  // runs a top-level image: in one too, so that entry has no say in the run mode.
   const localConfig = configForRunMode(rawConfig, 'local');
-  const recordedMode = (name: string): RunMode => {
+  const recordedMode = (name: string): RunMode | undefined => {
     const info = entry(name);
     if (info.runMode !== undefined) return info.runMode;
-    return info.dockerContainer !== undefined && localConfig.services[name]?.docker === undefined ? 'docker' : 'local';
+    if (info.dockerContainer === undefined) return 'local';
+    const service = localConfig.services[name];
+    if (service === undefined) return undefined;
+    return service.docker === undefined ? 'docker' : 'local';
   };
   const modeWord = (prod: boolean): string => (prod ? 'production' : 'development');
 
@@ -122,12 +128,12 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
   if (input.modeExplicit) {
     mode = input.requestedMode;
   } else {
-    const modes = new Set(involved.map(recordedMode));
+    const modes = new Set(involved.map(recordedMode).filter((recorded) => recorded !== undefined));
     if (modes.size > 1) {
       const dockerNames = involved.filter((name) => recordedMode(name) === 'docker');
-      const localNames = involved.filter((name) => recordedMode(name) !== 'docker');
+      const localNames = involved.filter((name) => recordedMode(name) === 'local');
       throw new Error(
-        `${list(dockerNames)} ${verb(dockerNames, 'was', 'were')} started in Docker mode and ${list(localNames)} as local ${verb(localNames, 'process', 'processes')}, ` +
+        `${list(dockerNames)} ${verb(dockerNames, 'was', 'were')} started in Docker mode and ${list(localNames)} as ${verb(localNames, 'a local process', 'local processes')}, ` +
           'so there is no one run mode to replay. Pass "docker" to restart in Docker mode, or run "portler down" and then "portler up" to start over.',
       );
     }
@@ -148,7 +154,10 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
         `or run "portler down" and then "portler up${flag}" to switch modes.`,
     );
   }
-  const otherMode = leftAlone.filter((name) => recordedMode(name) !== mode);
+  const otherMode = leftAlone.filter((name) => {
+    const recorded = recordedMode(name);
+    return recorded !== undefined && recorded !== mode;
+  });
   if (otherMode.length > 0) {
     const dockerFlag = mode === 'docker' ? ' docker' : '';
     const theirs = mode === 'docker' ? 'as a local process' : 'in Docker mode';

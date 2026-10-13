@@ -267,6 +267,22 @@ describe('restart', () => {
     await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), notAMismatch);
   });
 
+  it('does not read a removed service\'s legacy container entry as Docker mode', async () => {
+    // api has no Docker config. old is no longer in the config, and its entry predates runMode and
+    // names a container, which plain `up` also makes for a top-level image:.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), ['services:', '  api:', '    command: node -e ""', '    port: 3000'].join('\n'), 'utf8');
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { old: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52347, prod: false, startedAt, dockerContainer: 'portler-test-old' } },
+    });
+    // Read as Docker, the restart would refuse in its pre-start checks ("has no Docker config");
+    // read as no evidence, it plans plain mode and gets as far as the stop.
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), (error: Error) => /restart could not stop/.test(error.message));
+  });
+
   it('refuses a mode change that would leave a dependency in the other mode, before stopping anything', async () => {
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),
@@ -415,6 +431,20 @@ describe('restart', () => {
     // Entries that predate runMode: a container of a docker:-block service came from Docker mode.
     const { runMode: _dropped, ...legacyDb } = running.db!;
     assert.equal(plan({ running: { ...running, db: legacyDb } }).mode, 'docker');
+    // A container of a service no longer in the config proves neither mode (plain `up` runs a
+    // top-level image: in one too), so that legacy entry has no say; a legacy entry without a
+    // container was a local process wherever it came from.
+    const gone = { ...base, prod: false, dockerContainer: 'c-gone' };
+    const nameless = { stopping: ['gone', 'api'], involved: ['gone', 'api'], starting: ['db', 'api'], runningNow: new Set(['gone', 'api']) };
+    const alone = plan({ running: { gone }, stopping: ['gone'], involved: ['gone'], starting: ['db', 'api'], runningNow: new Set(['gone']) });
+    assert.equal(alone.mode, 'local');
+    assert.deepEqual(alone.replayed, []);
+    assert.equal(plan({ running: { gone, api: { ...base, prod: false } }, ...nameless }).mode, 'local');
+    assert.equal(plan({ running: { gone, api: { ...base, prod: false, dockerContainer: 'c-api' } }, ...nameless }).mode, 'docker');
+    assert.throws(
+      () => plan({ running: { gone: { ...base, prod: false }, api: { ...base, prod: false, dockerContainer: 'c-api' } }, ...nameless }),
+      /api was started in Docker mode and gone as a local process/,
+    );
 
     // Entries `up k8s` wrote are refused, whether they record runMode or (older ones) only
     // name the forward process, whatever the flags say; the stop never runs.
