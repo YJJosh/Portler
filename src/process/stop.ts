@@ -442,11 +442,73 @@ async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<
   return again === 'gone' || again === 'reused';
 }
 
+/**
+ * Splits the services to stop into levels, dependents first: a service is only
+ * stopped once every selected service that depends on it has been. Edges come
+ * from the `dependsOn` each PID entry recorded when it started, so the order is
+ * the one that run actually used, whatever portler.yml says now. An entry
+ * written before Portler recorded it has no edges and goes with the first level.
+ * Names on a cycle (which config validation should rule out) share the last level.
+ */
+export function stopOrder(services: Record<string, PidServiceInfo>, names: string[]): string[][] {
+  const selected = new Set(names);
+  const dependents = new Map<string, Set<string>>();
+  for (const name of names) dependents.set(name, new Set());
+  for (const name of names) {
+    for (const dep of services[name]?.dependsOn ?? []) {
+      if (dep !== name && selected.has(dep)) dependents.get(dep)!.add(name);
+    }
+  }
+  const levels: string[][] = [];
+  const done = new Set<string>();
+  while (done.size < names.length) {
+    const level = names.filter((name) => !done.has(name) && [...dependents.get(name)!].every((d) => done.has(d)));
+    if (level.length === 0) {
+      levels.push(names.filter((name) => !done.has(name)));
+      break;
+    }
+    for (const name of level) done.add(name);
+    levels.push(level);
+  }
+  return levels;
+}
+
+/**
+ * Stops the selected services (all of them when `serviceNames` is omitted),
+ * dependents before the services they depend on, so a worker or an api that is
+ * draining can still reach its database or queue. Each level is a full stop on
+ * its own (containers, signals, confirmation, pruning) before the next starts.
+ */
 export async function stopServices(
   projectDir: string,
   serviceNames?: string[],
   options: StopOptions = {},
   hooks: StopHooks = {},
+): Promise<StopResult> {
+  const pids = await readPids(projectDir);
+  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  const targetSet = serviceNames ? new Set(serviceNames) : null;
+  const selected = Object.keys(pids.services).filter((name) => !targetSet || targetSet.has(name));
+  const levels = stopOrder(pids.services, selected);
+  if (levels.length <= 1) return stopLevel(projectDir, serviceNames, options, hooks);
+
+  const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  for (const level of levels) {
+    const result = await stopLevel(projectDir, level, options, hooks);
+    total.stopped.push(...result.stopped);
+    total.unverified.push(...result.unverified);
+    total.failures.push(...result.failures);
+    total.completed.push(...result.completed);
+    total.remaining.push(...result.remaining);
+  }
+  return total;
+}
+
+async function stopLevel(
+  projectDir: string,
+  serviceNames: string[] | undefined,
+  options: StopOptions,
+  hooks: StopHooks,
 ): Promise<StopResult> {
   const probes = resolveHooks(hooks);
   const pids = await readPids(projectDir);

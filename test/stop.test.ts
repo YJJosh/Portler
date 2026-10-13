@@ -18,7 +18,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { isPidAlive, isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
-import { signalDecision, stopServices } from '../src/process/stop.ts';
+import { signalDecision, stopOrder, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
 import { startZombieGroup } from './zombie-group.ts';
@@ -118,6 +118,47 @@ describe('signalDecision', () => {
   it('does nothing when the pid and its group are both gone', () => {
     assert.equal(signalDecision('gone', 'gone', true), 'none');
     assert.equal(signalDecision('gone', 'gone', false), 'none');
+  });
+});
+
+describe('stopOrder', () => {
+  const entry = (dependsOn?: string[]): PidServiceInfo => ({
+    pid: 1,
+    command: 'x',
+    cwd: '/',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    ...(dependsOn ? { dependsOn } : {}),
+  });
+
+  it('stops dependents first and what they depend on last', () => {
+    const services = {
+      redis: entry([]),
+      api: entry(['redis']),
+      worker: entry(['redis']),
+      web: entry(['api']),
+      proxy: entry([]),
+    };
+    assert.deepEqual(stopOrder(services, ['redis', 'api', 'worker', 'web', 'proxy']), [
+      ['worker', 'web', 'proxy'],
+      ['api'],
+      ['redis'],
+    ]);
+  });
+
+  it('only orders the selected services', () => {
+    const services = { redis: entry([]), api: entry(['redis']), web: entry(['api']) };
+    assert.deepEqual(stopOrder(services, ['api', 'web']), [['web'], ['api']]);
+    assert.deepEqual(stopOrder(services, ['redis']), [['redis']]);
+  });
+
+  it('keeps entries without a recorded dependsOn in one level', () => {
+    const services = { redis: entry(), api: entry() };
+    assert.deepEqual(stopOrder(services, ['redis', 'api']), [['redis', 'api']]);
+  });
+
+  it('puts names on a cycle into the last level instead of looping', () => {
+    const services = { a: entry(['b']), b: entry(['a']), c: entry(['a']) };
+    assert.deepEqual(stopOrder(services, ['a', 'b', 'c']), [['c'], ['a', 'b']]);
   });
 });
 
@@ -243,6 +284,44 @@ describe('stopServices', () => {
 
     assert.deepEqual(result.stopped, [], 'a pid that died before the signal is not "stopped"');
     assert.equal(await readPids(projectDir), null, 'its entry is pruned');
+  });
+
+  it('stops a dependency only after the services that depend on it have exited', async () => {
+    // The dependent drains for 300 ms on SIGTERM; the dependency notes when its
+    // own SIGTERM arrives. pids.json lists the dependency first, as start order does.
+    const marks = path.join(projectDir, 'marks');
+    await fs.mkdir(marks);
+    const script = (name: string, drainMs: number) =>
+      `const fs = require('fs'); process.on('SIGTERM', () => {` +
+      ` fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.term`))}, String(Date.now()));` +
+      ` setTimeout(() => { fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.exit`))}, String(Date.now())); process.exit(0); }, ${drainMs}); });` +
+      ` fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.ready`))}, ''); setInterval(() => {}, 1000);`;
+    const start = async (name: string, drainMs: number) => {
+      const child = spawn(process.execPath, ['-e', script(name, drainMs)], { detached: true, stdio: 'ignore' });
+      spawned.push(child);
+      // Wait until the SIGTERM handler is installed, or the signal would kill it outright.
+      const ready = path.join(marks, `${name}.ready`);
+      for (let i = 0; i < 200; i += 1) {
+        if (await fs.stat(ready).then(() => true, () => false)) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return child;
+    };
+    const db = await start('db', 0);
+    const api = await start('api', 300);
+    await writePidsFile({
+      db: pidInfo(db.pid!, (await readProcessStartToken(db.pid!)) ?? undefined),
+      api: { ...pidInfo(api.pid!, (await readProcessStartToken(api.pid!)) ?? undefined), dependsOn: ['db'] },
+    });
+
+    const result = await stopServices(projectDir);
+
+    assert.deepEqual(result.stopped, ['api', 'db']);
+    assert.deepEqual(result.failures, []);
+    const apiExit = Number(await fs.readFile(path.join(marks, 'api.exit'), 'utf8'));
+    const dbTerm = Number(await fs.readFile(path.join(marks, 'db.term'), 'utf8'));
+    assert.ok(dbTerm >= apiExit, `db got SIGTERM ${apiExit - dbTerm} ms before api finished draining`);
+    assert.equal(await readPids(projectDir), null);
   });
 
   it('leaves other services running when stopping one by name', async () => {
