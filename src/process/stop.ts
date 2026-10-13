@@ -584,10 +584,18 @@ export async function stopServices(
   const lateStart = Date.now();
   const lateDeadlineFor = (target: Target): number =>
     settling.includes(target) ? settleDeadline : lateStart + probes.confirmMs;
-  const judgeLate = async (target: Target): Promise<void> => {
+  // A group seen gone in the wait below is LATCHED and handed in: its pid can
+  // go to a stranger a moment later, whose own group would then read as alive.
+  // Once the group has been seen gone, only a leader proven ours by its start
+  // token and still runnable (our own process, moved to another group) keeps
+  // the entry; a stranger at the pid can never prove that.
+  const judgeLate = async (target: Target, sawGroupGone: boolean): Promise<void> => {
     const verdict = await verifyPid(probes, target.info);
-    const groupGone = probes.groupState(target.info.pid) === 'gone';
-    if (verdict === 'reused' || (groupGone && (verdict === 'gone' || (await leaderNotRunnable(probes, target.info))))) {
+    const groupGone = sawGroupGone || probes.groupState(target.info.pid) === 'gone';
+    if (
+      verdict === 'reused' ||
+      (groupGone && (verdict !== 'match' || (await leaderNotRunnable(probes, target.info))))
+    ) {
       stopped.push(target.name);
       return;
     }
@@ -603,9 +611,13 @@ export async function stopServices(
   const pendingLate = [...lateSettling];
   while (pendingLate.length > 0) {
     for (const target of [...pendingLate]) {
-      if (Date.now() < lateDeadlineFor(target) && probes.groupState(target.info.pid) === 'alive') continue;
+      let sawGroupGone = false;
+      if (Date.now() < lateDeadlineFor(target)) {
+        if (probes.groupState(target.info.pid) === 'alive') continue;
+        sawGroupGone = true;
+      }
       pendingLate.splice(pendingLate.indexOf(target), 1);
-      await judgeLate(target);
+      await judgeLate(target, sawGroupGone);
     }
     if (pendingLate.length > 0) await sleep(POLL_MS);
   }
