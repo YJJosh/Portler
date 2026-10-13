@@ -78,6 +78,9 @@ user documentation lives in [`docs/`](docs/).
 A change to a command, flag or config key also updates:
 
 - `src/cli/help.ts` and `docs/reference/cli/<command>.md`;
+- for a new or renamed command, also the table in `docs/reference/cli/index.md`
+  and the sidebar list in `docs/.vitepress/config.mts` (the docs build does not
+  catch these);
 - `docs/reference/configuration.md` for config keys;
 - `skills/portler/SKILL.md` if it changes how an agent should use Portler.
 
