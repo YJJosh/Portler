@@ -6,7 +6,7 @@ import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import type { PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
@@ -332,157 +332,236 @@ export function combineMountedSets(found: readonly MountedVolumeSet[]): string |
   return sets.size === 1 ? [...sets][0]! : null;
 }
 
-export async function commandRestart(args: ParsedArgs): Promise<number> {
-  const { mode, requested } = parseRunMode(args.positionals);
-  const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
+/** What a restart was asked to do: the parsed command line, as planRestart reads it. */
+export interface RestartRequest {
+  mode: RunMode;
+  /** The service names given (none: everything recorded). */
+  requested: string[];
+  /** Whether the run mode was typed (`restart docker …`) rather than defaulted. */
+  modeExplicit: boolean;
+  prod: boolean | undefined;
+  setup: boolean | undefined;
+  images: Record<string, string> | undefined;
+}
 
+/**
+ * The checks a restart makes before it takes the lifecycle lock: Kubernetes mode is refused,
+ * and under --prod the services prod.services leaves out are the deployment's, as for
+ * `up --prod`: naming one is refused and none is stopped or started. Returns the config the
+ * command line selects; a --prod replayed from pids.json narrows the same way once the plan
+ * has read it (prepareRestart).
+ */
+function restartTarget(loadedConfig: PortlerConfig, request: RestartRequest): PortlerConfig {
   // `restart k8s` used to be accepted and then quietly do the wrong thing: it
   // applied the k8s config overlay (k8s.env, in-cluster DNS hostnames) but ran
   // the services as LOCAL processes, because only `up` routes k8s mode to
   // commandUpK8s. Nothing was ever applied to the cluster. Reject it instead of
   // guessing which half the user meant.
-  if (mode === 'k8s') {
+  if (request.mode === 'k8s') {
     throw new Error(`restart does not support Kubernetes mode. ${KUBERNETES_RESTART_HINT}`);
   }
+  const explicitConfig = productionServices(loadedConfig, request.prod, request.requested);
+  selectServiceNames(explicitConfig, request.requested);
+  return explicitConfig;
+}
 
-  // Under --prod the services prod.services leaves out are the deployment's, as for
-  // `up --prod`: naming one is refused and none is stopped or started. A --prod that is
-  // replayed from pids.json narrows the same way once the plan has read it (below).
-  const explicitConfig = productionServices(loadedConfig, args.prod, requested);
-  selectServiceNames(explicitConfig, requested);
+/**
+ * Containers recorded without a volume set were started by an older Portler: their set is
+ * read from the volumes they mount, so a restart does not take them for the base volumes.
+ * Only asked when no set is given and the service mounts a managed volume.
+ */
+async function legacyVolumeSets(
+  loadedConfig: PortlerConfig,
+  running: Readonly<Record<string, PidServiceInfo>>,
+): Promise<Record<string, string | null>> {
+  const mountedVolumeSets: Record<string, string | null> = {};
+  if (loadedConfig.volumeSet !== undefined) return mountedVolumeSets;
+  await Promise.all(
+    Object.entries(running).map(async ([serviceName, info]) => {
+      if (info.volumeSet !== undefined || info.dockerContainer === undefined) return;
+      const candidates = legacyMountCandidates(loadedConfig.services[serviceName], info);
+      if (candidates.length === 0) return;
+      // Volumes are labelled with their scope's owner: the volume root, or the project's
+      // name for a named production stack. An older Portler without `name:` labelled
+      // production volumes with the volume root too, so that always counts.
+      const owners = [loadedConfig.volumeRoot, ...(info.prod === true && loadedConfig.name ? [loadedConfig.name] : [])];
+      const found = await Promise.all(
+        candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected, owners)),
+      );
+      const set = combineMountedSets(found);
+      if (set !== undefined) mountedVolumeSets[serviceName] = set;
+    }),
+  );
+  return mountedVolumeSets;
+}
+
+/**
+ * Everything a restart decides before it stops anything, from pids.json as read under the
+ * lifecycle lock (`before`) and what is running then (`runningNow`): the config it runs on
+ * (narrowed to prod.services when --prod is given or replayed), the launch, the services it
+ * starts again, and the checks startPhase would make (`preflight`). `planFor` and `startingFor`
+ * plan again after the stop, from what is running by then.
+ */
+async function prepareRestart(
+  loadedConfig: PortlerConfig,
+  request: RestartRequest,
+  before: PidsFile | null,
+  runningNow: ReadonlySet<string>,
+) {
+  const { mode, requested } = request;
+  const explicitConfig = restartTarget(loadedConfig, request);
+  // What this restart touches: the recorded entries it stops and the running
+  // dependencies it leaves alone. pids.json says how each was started, and the
+  // launch is decided from that, and from the flags, before anything is stopped.
+  const running = before?.services ?? {};
+  const mountedVolumeSets = await legacyVolumeSets(loadedConfig, running);
+  const scope = (config: PortlerConfig) => {
+    const requestedRootNames = selectServiceNames(config, requested);
+    // A restart without names stops every recorded service, including ones no longer in
+    // the config; they are part of the running stack and count. The proxy's entry is
+    // Portler's own and carries no mode.
+    const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
+    const involved = [...new Set([...expandAndOrderServices(config, requestedRootNames), ...stopping])].filter(
+      (name) => Object.hasOwn(running, name),
+    );
+    return { requestedRootNames, stopping, involved };
+  };
+  // liveNow is what is running when the plan is made: before the stop, and again after it,
+  // since a dependency can exit on its own in between (commandRestart). The records stay the
+  // ones read before the stop, which still hold the stopped services' launches.
+  const startingFor = (config: PortlerConfig, liveNow: ReadonlySet<string>) => {
+    const { requestedRootNames, stopping, involved } = scope(config);
+    const stoppingSet = new Set(stopping);
+    const starting = expandAndOrderServices(config, requestedRootNames).filter(
+      (serviceName) => !liveNow.has(serviceName) || stoppingSet.has(serviceName),
+    );
+    return { requestedRootNames, stopping, involved, starting };
+  };
+  const planFor = (config: PortlerConfig, prod: boolean | undefined, liveNow: ReadonlySet<string> = runningNow) => {
+    const { requestedRootNames, stopping, involved, starting } = startingFor(config, liveNow);
+    const launch = planRestart({
+      rawConfig: config,
+      running,
+      runningNow: liveNow,
+      stopping,
+      involved,
+      starting,
+      requestedMode: mode,
+      modeExplicit: request.modeExplicit,
+      prod,
+      setup: request.setup,
+      images: request.images,
+      volumeSetGiven: loadedConfig.volumeSet !== undefined,
+      mountedVolumeSets,
+    });
+    return { requestedRootNames, starting, launch };
+  };
+  // A replayed --prod narrows to prod.services exactly as a typed one does, and whether
+  // it is replayed is decided on that narrowed stack: a service prod.services leaves out
+  // is the deployment's, so a development copy of it that happens to be running has no
+  // say, as it has none under `restart --prod`. The proxy is left out of this look only;
+  // a route to a left-out service is still refused below if production is replayed.
+  let rawConfig = explicitConfig;
+  const listed = loadedConfig.prod?.services;
+  if (
+    !request.prod &&
+    listed !== undefined &&
+    requested.every((name) => !Object.hasOwn(loadedConfig.services, name) || listed.includes(name))
+  ) {
+    const { involved } = scope(productionServices({ ...loadedConfig, proxy: undefined }, true, requested));
+    if (involved.length > 0 && involved.every((name) => running[name]?.prod === true)) {
+      rawConfig = productionServices(loadedConfig, true, requested);
+    }
+  }
+  let planProd = request.prod;
+  let { requestedRootNames, starting, launch } = planFor(rawConfig, planProd);
+  // The look above passes over a requested service prod.services has since dropped, and a
+  // stack whose narrowed records are all gone; the records can still replay --prod. That
+  // launch runs on the narrowed stack, so it is planned on it: narrowing refuses a dropped
+  // name the way `restart --prod` does, before anything is stopped, and the plan keeps
+  // production, which the records chose and checked above.
+  if (launch.prod && request.prod !== true && rawConfig === explicitConfig) {
+    rawConfig = productionServices(loadedConfig, true, requested);
+    const replayedProd = launch.replayed.includes('--prod');
+    planProd = true;
+    ({ requestedRootNames, starting, launch } = planFor(rawConfig, planProd));
+    if (replayedProd) launch.replayed.unshift('--prod');
+  }
+
+  // Everything startPhase checks before it spawns anything is checked before the stop, on
+  // the configuration it will run with; any of it failing after the stop would leave the
+  // requested services down with nothing restarted. That is the run mode the launch replays
+  // (a recorded Docker mode whose docker: config has since been removed), the commands and
+  // container names, --image (applyImageOverrides rejects an unknown service or one that does
+  // not run in Docker in this mode, and a target this restart leaves running would keep its
+  // old image), and prod.require (a deployment value that has gone missing).
+  const finalConfig = rawConfig;
+  const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
+    const { config: runConfig } = launchConfig(withVolumeSet(finalConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
+    checkLaunch(runConfig, plan.mode, names);
+    if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
+    if (plan.prod) {
+      assertProductionRequirements(runConfig, names, await loadBaseEnv(runConfig, { allowMissing: true }), {
+        projectSetup: plan.setup !== false,
+      });
+    }
+  };
+  return { rawConfig, planProd, requestedRootNames, starting, launch, planFor, startingFor, preflight };
+}
+
+/**
+ * Whether `restart` with this request would do exactly that: plan without refusing, replay
+ * nothing the request does not say (so it starts what was asked, as asked), and pass the
+ * checks it makes before it stops anything. `up` offers a restart instead of a refusal only
+ * when this holds, read from the same pids.json and running set its refusal comes from.
+ */
+export async function restartAccepts(
+  loadedConfig: PortlerConfig,
+  request: RestartRequest,
+  before: PidsFile | null,
+  runningNow: ReadonlySet<string>,
+): Promise<boolean> {
+  try {
+    const prepared = await prepareRestart(loadedConfig, request, before, runningNow);
+    if (prepared.launch.replayed.length > 0 || prepared.launch.droppedPins.length > 0) return false;
+    await prepared.preflight(prepared.launch, prepared.starting, runningNow);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function commandRestart(args: ParsedArgs): Promise<number> {
+  const { mode, requested } = parseRunMode(args.positionals);
+  const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
+  const request: RestartRequest = {
+    mode,
+    requested,
+    modeExplicit: args.positionals.length > requested.length,
+    prod: args.prod,
+    setup: args.setup,
+    images: args.images,
+  };
+  restartTarget(loadedConfig, request);
 
   // Stop and start under ONE lifecycle lock. Taking it twice (once per half)
   // would leave a window in which another `portler up` sees the services as
   // stopped and starts them itself, and this restart then starts them again.
   // restart always detaches, so the lock is released as soon as startup is done.
   return withLifecycleLock(loadedConfig.projectDir, async () => {
-    // What this restart touches: the recorded entries it stops and the running
-    // dependencies it leaves alone. pids.json says how each was started, and the
-    // launch is decided from that, and from the flags, before anything is stopped.
     const before = await readPids(loadedConfig.projectDir);
-    const running = before?.services ?? {};
     // Running as startPhase will see it (liveServiceNames): a dependency whose container runs
     // on after its `docker run` shell is gone is running and left alone, not started again.
     const runningNow = new Set(await liveServiceNames(loadedConfig.projectDir, before));
-    // Containers recorded without a volume set were started by an older Portler: their
-    // set is read from the volumes they mount, so a restart does not take them for the
-    // base volumes. Only asked when no set is given and the service mounts a managed volume.
-    const mountedVolumeSets: Record<string, string | null> = {};
-    if (loadedConfig.volumeSet === undefined) {
-      await Promise.all(
-        Object.entries(running).map(async ([serviceName, info]) => {
-          if (info.volumeSet !== undefined || info.dockerContainer === undefined) return;
-          const candidates = legacyMountCandidates(loadedConfig.services[serviceName], info);
-          if (candidates.length === 0) return;
-          // Volumes are labelled with their scope's owner: the volume root, or the project's
-          // name for a named production stack. An older Portler without `name:` labelled
-          // production volumes with the volume root too, so that always counts.
-          const owners = [loadedConfig.volumeRoot, ...(info.prod === true && loadedConfig.name ? [loadedConfig.name] : [])];
-          const found = await Promise.all(
-            candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected, owners)),
-          );
-          const set = combineMountedSets(found);
-          if (set !== undefined) mountedVolumeSets[serviceName] = set;
-        }),
-      );
-    }
-    const scope = (config: PortlerConfig) => {
-      const requestedRootNames = selectServiceNames(config, requested);
-      // A restart without names stops every recorded service, including ones no longer in
-      // the config; they are part of the running stack and count. The proxy's entry is
-      // Portler's own and carries no mode.
-      const stopping = requested.length > 0 ? requestedRootNames : Object.keys(running).filter((name) => name !== PROXY_SERVICE_NAME);
-      const involved = [...new Set([...expandAndOrderServices(config, requestedRootNames), ...stopping])].filter(
-        (name) => Object.hasOwn(running, name),
-      );
-      return { requestedRootNames, stopping, involved };
-    };
-    // liveNow is what is running when the plan is made: before the stop, and again after it,
-    // since a dependency can exit on its own in between (below). The records stay the ones
-    // read before the stop, which still hold the stopped services' launches.
-    const startingFor = (config: PortlerConfig, liveNow: ReadonlySet<string>) => {
-      const { requestedRootNames, stopping, involved } = scope(config);
-      const stoppingSet = new Set(stopping);
-      const starting = expandAndOrderServices(config, requestedRootNames).filter(
-        (serviceName) => !liveNow.has(serviceName) || stoppingSet.has(serviceName),
-      );
-      return { requestedRootNames, stopping, involved, starting };
-    };
-    const planFor = (config: PortlerConfig, prod: boolean | undefined, liveNow: ReadonlySet<string> = runningNow) => {
-      const { requestedRootNames, stopping, involved, starting } = startingFor(config, liveNow);
-      const launch = planRestart({
-        rawConfig: config,
-        running,
-        runningNow: liveNow,
-        stopping,
-        involved,
-        starting,
-        requestedMode: mode,
-        modeExplicit: args.positionals.length > requested.length,
-        prod,
-        setup: args.setup,
-        images: args.images,
-        volumeSetGiven: loadedConfig.volumeSet !== undefined,
-        mountedVolumeSets,
-      });
-      return { requestedRootNames, starting, launch };
-    };
-    // A replayed --prod narrows to prod.services exactly as a typed one does, and whether
-    // it is replayed is decided on that narrowed stack: a service prod.services leaves out
-    // is the deployment's, so a development copy of it that happens to be running has no
-    // say, as it has none under `restart --prod`. The proxy is left out of this look only;
-    // a route to a left-out service is still refused below if production is replayed.
-    let rawConfig = explicitConfig;
-    const listed = loadedConfig.prod?.services;
-    if (
-      !args.prod &&
-      listed !== undefined &&
-      requested.every((name) => !Object.hasOwn(loadedConfig.services, name) || listed.includes(name))
-    ) {
-      const { involved } = scope(productionServices({ ...loadedConfig, proxy: undefined }, true, requested));
-      if (involved.length > 0 && involved.every((name) => running[name]?.prod === true)) {
-        rawConfig = productionServices(loadedConfig, true, requested);
-      }
-    }
-    let planProd = args.prod;
-    let { requestedRootNames, starting, launch } = planFor(rawConfig, planProd);
-    // The look above passes over a requested service prod.services has since dropped, and a
-    // stack whose narrowed records are all gone; the records can still replay --prod. That
-    // launch runs on the narrowed stack, so it is planned on it: narrowing refuses a dropped
-    // name the way `restart --prod` does, before anything is stopped, and the plan keeps
-    // production, which the records chose and checked above.
-    if (launch.prod && args.prod !== true && rawConfig === explicitConfig) {
-      rawConfig = productionServices(loadedConfig, true, requested);
-      const replayedProd = launch.replayed.includes('--prod');
-      planProd = true;
-      ({ requestedRootNames, starting, launch } = planFor(rawConfig, planProd));
-      if (replayedProd) launch.replayed.unshift('--prod');
-    }
+    const prepared = await prepareRestart(loadedConfig, request, before, runningNow);
+    const { rawConfig, planProd, planFor, startingFor, preflight } = prepared;
+    let { requestedRootNames, starting, launch } = prepared;
     if (launch.replayed.length > 0) {
       process.stdout.write(`[portler] restart keeps the recorded launch: ${launch.replayed.join(', ')}\n`);
     }
     for (const name of launch.droppedPins) {
       process.stdout.write(`[portler] ${name}: the recorded image pin does not apply in this run mode and is dropped\n`);
     }
-
-    // Everything startPhase checks before it spawns anything is checked here, before the
-    // stop, on the configuration it will run with; any of it failing after the stop would
-    // leave the requested services down with nothing restarted. That is the run mode the
-    // launch replays (a recorded Docker mode whose docker: config has since been removed),
-    // the commands and container names, --image (applyImageOverrides rejects an unknown
-    // service or one that does not run in Docker in this mode, and a target this restart
-    // leaves running would keep its old image), and prod.require (a deployment value that
-    // has gone missing).
-    const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
-      const { config: runConfig } = launchConfig(withVolumeSet(rawConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
-      checkLaunch(runConfig, plan.mode, names);
-      if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
-      if (plan.prod) {
-        assertProductionRequirements(runConfig, names, await loadBaseEnv(runConfig, { allowMissing: true }), {
-          projectSetup: plan.setup !== false,
-        });
-      }
-    };
     await preflight(launch, starting, runningNow);
 
     // With no names, stop everything in pids.json (like `portler down`) so

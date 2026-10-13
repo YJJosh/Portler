@@ -460,6 +460,7 @@ describe('stopServices', () => {
       failures: [],
       completed: [],
       remaining: [],
+      containersRemoved: [],
     });
   });
 
@@ -793,6 +794,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.unverified, []);
       assert.deepEqual(result.failures, []);
       assert.deepEqual(result.completed, ['db']);
+      assert.deepEqual(result.containersRemoved, ['db']);
       assert.equal((await readPids(projectDir))?.services.db, undefined);
       assert.ok(await waitForExit(member), 'the member exited when its container was removed');
     } finally {
@@ -1312,6 +1314,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.stopped, []);
       assert.deepEqual(result.unverified, []);
       assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.containersRemoved, [], 'an exited container was not running, so removing it took nothing away');
       assert.equal((await readPids(projectDir))?.services.db, undefined, 'the stale entry is pruned');
     } finally {
       process.env.PATH = savedPath;
@@ -1422,6 +1425,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.stopped, []);
       assert.deepEqual(result.unverified, ['db']);
       assert.deepEqual(result.completed, []);
+      assert.deepEqual(result.containersRemoved, ['db'], 'the container is gone even though the entry is kept');
       assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
       assert.ok(isPidRunning(member), 'nothing was signalled');
     } finally {
@@ -1441,7 +1445,7 @@ describe('stopServices in dependency levels with a Docker network', () => {
     const bin = path.join(projectDir, 'fake-bin');
     const log = path.join(projectDir, 'docker.log');
     await fs.mkdir(bin, { recursive: true });
-    const container = JSON.stringify({ id: 'sha256:c-api', labels: { 'portler.project': projectDir }, running: false });
+    const container = JSON.stringify({ id: 'sha256:c-api', labels: { 'portler.project': projectDir }, running: true });
     const network = JSON.stringify({ id: 'net-id', labels: { 'portler.project': projectDir } });
     const rm = networkRmFails
       ? `echo "Error response from daemon: error while removing network: network net-x has active endpoints" >&2; exit 1`
@@ -1492,6 +1496,7 @@ describe('stopServices in dependency levels with a Docker network', () => {
       assert.deepEqual(result.failures, []);
       assert.deepEqual([...result.completed].sort(), ['api', 'db']);
       assert.deepEqual(result.remaining, []);
+      assert.deepEqual(result.containersRemoved, ['api'], 'the staged stop reports the container its first level removed');
       assert.equal(await readPids(projectDir), null);
       const calls = (await fs.readFile(log, 'utf8')).split('\n');
       assert.ok(calls.includes('network rm net-id'), `the network was removed; docker calls:\n${calls.join('\n')}`);

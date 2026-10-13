@@ -171,16 +171,35 @@ export function requiredEnvKeys(config: PortlerConfig, service?: ServiceConfig):
 }
 
 /**
+ * The keys requiredEnvKeys asks for only because a `prod.env` entry is blank, not
+ * because `prod.require` lists them; the error names which is which.
+ */
+export function blankRequiredKeys(config: PortlerConfig, service?: ServiceConfig): Set<string> {
+  const listed = new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])]);
+  return new Set(requiredEnvKeys(config, service).filter((key) => !listed.has(key)));
+}
+
+/**
  * Under --prod every key in `required` must be present and non-empty in `env`.
  * A required key is the deployment's to supply: its config value, if any, is
  * not used, so a blank `prod.env` entry and a `require` entry mean the same.
+ * `blank` names the keys that are required because a `prod.env` entry is left
+ * blank, so the error points at the line the user actually wrote.
  */
-export function assertRequiredEnv(owner: string, required: string[], env: EnvMap): void {
+export function assertRequiredEnv(owner: string, required: string[], env: EnvMap, blank: ReadonlySet<string> = new Set()): void {
   const missing = required.filter((key) => !Object.hasOwn(env, key) || env[key] === '');
   if (missing.length === 0) return;
   const one = missing.length === 1;
+  const fromBlank = missing.filter((key) => blank.has(key));
+  const fromRequire = missing.filter((key) => !blank.has(key));
+  const source =
+    fromBlank.length === 0
+      ? 'prod.require'
+      : fromRequire.length === 0
+        ? 'left blank in prod.env'
+        : `prod.require: ${fromRequire.join(', ')}; left blank in prod.env: ${fromBlank.join(', ')}`;
   throw new Error(
-    `${owner} requires ${missing.join(', ')} in production (prod.require), and ${one ? 'it is' : 'they are'} missing or empty. ` +
+    `${owner} requires ${missing.join(', ')} in production (${source}), and ${one ? 'it is' : 'they are'} missing or empty. ` +
       `Supply ${one ? 'it' : 'them'} through the platform environment or a use_env file.`,
   );
 }
@@ -211,9 +230,10 @@ export function assertProductionRequirements(
 ): void {
   const supplied = deploymentEnv(baseEnv);
   const projectSetup = options.projectSetup !== false && (config.setup?.length ?? 0) > 0;
-  assertRequiredEnv('the project', projectSetup ? requiredEnvKeys(config) : [...(config.prod?.require ?? [])], supplied);
+  assertRequiredEnv('the project', projectSetup ? requiredEnvKeys(config) : [...(config.prod?.require ?? [])], supplied, blankRequiredKeys(config));
   for (const name of serviceNames) {
-    assertRequiredEnv(`service ${name}`, requiredEnvKeys(config, config.services[name]!), supplied);
+    const service = config.services[name]!;
+    assertRequiredEnv(`service ${name}`, requiredEnvKeys(config, service), supplied, blankRequiredKeys(config, service));
   }
 }
 

@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { assertRequiredEnv, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
+import { assertRequiredEnv, blankRequiredKeys, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
 import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -110,7 +110,12 @@ export function assertStartRequirements(
         'a use_env file does not.',
     );
   }
-  assertRequiredEnv(`service ${service.name}`, required.filter((key) => !service.portEnv.includes(key)), deploymentEnv(baseEnv));
+  assertRequiredEnv(
+    `service ${service.name}`,
+    required.filter((key) => !service.portEnv.includes(key)),
+    deploymentEnv(baseEnv),
+    blankRequiredKeys(config, service),
+  );
 }
 
 /** How long `start` waits for the rest of the process group after the shell exits. */

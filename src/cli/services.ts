@@ -30,11 +30,26 @@ export function validateDockerMode(config: PortlerConfig, selectedNames: string[
   }
 }
 
-export function ensureNoOverlap(runningNames: ReadonlySet<string>, selectedNames: string[]): void {
+/**
+ * Refuse to start a service that is already running. `alternative`, when given, is a
+ * command that does what the user most likely wanted instead (restart for local and
+ * Docker stacks), offered before the `down` that clears the way for a fresh `up`.
+ */
+export function ensureNoOverlap(
+  runningNames: ReadonlySet<string>,
+  selectedNames: string[],
+  alternative?: string,
+  alternativeNote?: string,
+): void {
   const running = selectedNames.filter((serviceName) => runningNames.has(serviceName));
 
   if (running.length > 0) {
-    throw new Error(`already running: ${running.join(', ')}. Use "portler down ${running.join(' ')}" first.`);
+    const down = `"portler down ${running.join(' ')}"`;
+    throw new Error(
+      alternative
+        ? `already running: ${running.join(', ')}. To (re)start services next to what is running, use "${alternative}"${alternativeNote ? ` (${alternativeNote})` : ''}; to start over, use ${down} first.`
+        : `already running: ${running.join(', ')}. Use ${down} first.`,
+    );
   }
 }
 

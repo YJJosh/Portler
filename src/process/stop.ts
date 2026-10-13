@@ -64,6 +64,12 @@ export interface StopResult {
   completed: string[];
   /** Targets deliberately kept in pids.json; their reservations must remain. */
   remaining: string[];
+  /**
+   * Services whose running container this call removed. Removing it is what takes a
+   * Docker service away, so whatever depends on it has lost it, even when its entry is
+   * kept because a leftover `docker run` client still holds the group.
+   */
+  containersRemoved: string[];
 }
 
 /** 'alive' also covers EPERM: the group exists, it is simply not ours to signal. */
@@ -486,7 +492,7 @@ export async function stopServices(
   hooks: StopHooks = {},
 ): Promise<StopResult> {
   const pids = await readPids(projectDir);
-  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [], containersRemoved: [] };
   const targetSet = serviceNames ? new Set(serviceNames) : null;
   const selected = Object.keys(pids.services).filter((name) => !targetSet || targetSet.has(name));
   const levels = stopOrder(pids.services, selected);
@@ -508,7 +514,7 @@ export async function stopServices(
       group: 'gone' as GroupState,
     }));
 
-  const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [], containersRemoved: [] };
   // A dependent that a level could not stop is still running, so what it
   // depends on (directly or through other selected services) stays up too:
   // stopping it would leave the dependent without it, and a restart would then
@@ -548,6 +554,7 @@ export async function stopServices(
     total.failures.push(...result.failures);
     total.completed.push(...result.completed);
     total.remaining.push(...result.remaining);
+    total.containersRemoved.push(...result.containersRemoved);
   }
 
   if (fullTeardown && networkTargets.length > 0) {
@@ -576,7 +583,7 @@ async function stopLevel(
 ): Promise<StopResult> {
   const probes = resolveHooks(hooks);
   const pids = await readPids(projectDir);
-  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [], containersRemoved: [] };
 
   const targetSet = serviceNames ? new Set(serviceNames) : null;
   const targets: Target[] = Object.entries(pids.services)
@@ -848,5 +855,6 @@ async function stopLevel(
     if (containerCleanup.removed.has(name) && !stopped.includes(name)) stopped.push(name);
   }
 
-  return { stopped, unverified, failures, completed, remaining };
+  const containersRemoved = selectedNames.filter((name) => containerCleanup.removed.has(name));
+  return { stopped, unverified, failures, completed, remaining, containersRemoved };
 }

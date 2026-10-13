@@ -390,6 +390,14 @@ export function deleteResourceKinds(deleteVolumes: boolean): string {
   return deleteVolumes ? 'deployment,service,persistentvolumeclaim' : 'deployment,service';
 }
 
+/** What deleteK8sResources found to delete. */
+export interface K8sDeleteResult {
+  /** Whether anything was deleted: the namespace, or at least one resource in it. */
+  deleted: boolean;
+  /** Of the services asked for by name, those whose Deployment was deleted: no longer running in the cluster. */
+  services: string[];
+}
+
 /**
  * Delete the generated Kubernetes resources. Ownership is verified first: a
  * namespace Portler did not create is never touched.
@@ -398,14 +406,15 @@ export function deleteResourceKinds(deleteVolumes: boolean): string {
  * any PersistentVolumeClaims in place, so `portler down k8s && portler up k8s`
  * keeps a database's data. `deleteVolumes` opts into the destructive path
  * (`down k8s --volumes`), which for a full teardown deletes the whole
- * project-owned namespace.
+ * project-owned namespace. Reports what was there to delete: nothing when the
+ * namespace does not exist, or when none of the resources do.
  */
 export async function deleteK8sResources(
   cluster: ClusterInfo,
   config: PortlerConfig,
   options: DeleteK8sOptions = {},
   run: CommandRunner = runCommand,
-): Promise<void> {
+): Promise<K8sDeleteResult> {
   const { serviceNames, deleteVolumes = false, awaitNamespace = false } = options;
   const namespace = config.k8sNamespace;
 
@@ -414,7 +423,7 @@ export async function deleteK8sResources(
   // would go on to release the ports and forget the state.
   const read = await readNamespace(cluster, namespace, run);
   if (read.status === 'error') throw namespaceReadError(namespace, read.message);
-  if (read.status === 'absent') return;
+  if (read.status === 'absent') return { deleted: false, services: [] };
 
   const ownership = namespaceOwnership(read.labels, config);
   if (ownership === 'foreign') throw foreignNamespaceError(namespace);
@@ -440,7 +449,7 @@ export async function deleteK8sResources(
         );
       }
     }
-    return;
+    return { deleted: true, services: [] };
   }
 
   const deleted = await run(
@@ -454,6 +463,10 @@ export async function deleteK8sResources(
       deleteSelector(config, serviceNames),
       '--ignore-not-found',
       '--wait=false',
+      // One `kind/name` line per deleted resource: --ignore-not-found succeeds whether or
+      // not anything was there, so this is what tells the two apart.
+      '-o',
+      'name',
     ]),
   );
 
@@ -467,10 +480,65 @@ export async function deleteK8sResources(
     );
   }
 
-  process.stdout.write(`[portler] deleted Kubernetes resources ${what}\n`);
+  // Deployments and Services are named after their service; a PVC is not, so it names none.
+  // Only `kind/name` lines count: when nothing matches, kubectl prints "No resources found"
+  // on stdout instead.
+  const removed = deleted.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^[\w.-]+\/\S+$/.test(line));
+  const byK8sName = new Map([...k8sServiceNames(serviceNames ?? []).entries()].map(([service, name]) => [name, service]));
+  const owners = (kinds: (kind: string) => boolean) => [
+    ...new Set(
+      removed.flatMap((resource) => {
+        const [kind = '', name = ''] = resource.split('/', 2);
+        const service = kinds(kind) ? byK8sName.get(name) : undefined;
+        return service !== undefined ? [service] : [];
+      }),
+    ),
+  ];
+  if (removed.length === 0) {
+    process.stdout.write(`[portler] no Kubernetes resources found ${what}\n`);
+    return { deleted: false, services: [] };
+  }
+  const touched = owners((kind) => kind.startsWith('deployment') || kind === 'service');
+  process.stdout.write(`[portler] deleted Kubernetes resources ${touched.length > 0 ? `for: ${touched.join(', ')}` : what}\n`);
   if (!deleteVolumes) {
     process.stdout.write('[portler] kept PersistentVolumeClaims; pass --volumes to delete stored data too\n');
   }
+  return { deleted: true, services: owners((kind) => kind.startsWith('deployment')) };
+}
+
+/**
+ * The services of this project that have a Deployment in its namespace: what runs in the
+ * cluster, whether a port-forward (and with it a PID entry) tracks it or not. Undefined when
+ * kubectl could not say, or when two services share a Kubernetes name and a Deployment
+ * could be either.
+ */
+export async function deployedK8sServices(
+  cluster: ClusterInfo,
+  config: PortlerConfig,
+  run: CommandRunner = runCommand,
+): Promise<string[] | undefined> {
+  let byK8sName: Map<string, string>;
+  try {
+    byK8sName = new Map([...k8sServiceNames(Object.keys(config.services)).entries()].map(([service, name]) => [name, service]));
+  } catch {
+    return undefined;
+  }
+  const listed = await run(
+    'kubectl',
+    kubectlArgs(cluster, ['get', 'deployment', '--namespace', config.k8sNamespace, '--selector', deleteSelector(config), '-o', 'name']),
+  );
+  if (listed.code !== 0) return undefined;
+  return listed.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^[\w.-]+\/\S+$/.test(line))
+    .flatMap((resource) => {
+      const service = byK8sName.get(resource.split('/', 2)[1] ?? '');
+      return service !== undefined ? [service] : [];
+    });
 }
 
 /**
