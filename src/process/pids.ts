@@ -188,7 +188,8 @@ export function isPidAlive(pid: number): boolean {
  * stopped service's group stays like that for good, so the signal check alone
  * would never see it go. On Linux, once the signal check says the group is
  * there, its members are read from /proc and the group counts as gone only when
- * every member found is a zombie. Anything unclear keeps the answer "alive": no
+ * two consecutive scans find the same members, all zombies (see
+ * groupHoldsOnlyZombies). Anything unclear keeps the answer "alive": no
  * /proc, a member whose state cannot be read, or a procfs mounted with hidepid,
  * which hides other users' processes. On macOS launchd reaps orphans, and
  * elsewhere the signal check decides. EPERM counts as alive: the group is
@@ -207,15 +208,26 @@ export function processGroupAlive(pgid: number): boolean {
 
 function linuxGroupHasLiveMember(pgid: number): boolean {
   let mounts: string;
-  let entries: string[];
   try {
     mounts = readFileSync('/proc/self/mounts', 'utf8');
-    entries = readdirSync('/proc');
   } catch {
     return true;
   }
   if (procHidesProcesses(mounts)) return true;
+  return !groupHoldsOnlyZombies(() => scanProcGroup(pgid));
+}
 
+/** One pass over /proc: the group's members, or 'unknown' when a member's state cannot be read. */
+export type GroupScan = { members: number[]; live: boolean } | 'unknown';
+
+function scanProcGroup(pgid: number): GroupScan {
+  let entries: string[];
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return 'unknown';
+  }
+  const members: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     let stat: string;
@@ -224,14 +236,43 @@ function linuxGroupHasLiveMember(pgid: number): boolean {
     } catch (error) {
       // Exited since the listing; any other failure leaves the member unknown.
       if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') continue;
-      return true;
+      return 'unknown';
     }
     // `pid (comm) state ppid pgrp ...`; comm may contain spaces or parentheses.
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
     if (Number(fields[2]) !== pgid) continue;
-    if (fields[0] !== 'Z' && fields[0] !== 'X') return true;
+    if (fields[0] !== 'Z' && fields[0] !== 'X') return { members: [...members, Number(entry)], live: true };
+    members.push(Number(entry));
+  }
+  return { members, live: false };
+}
+
+/**
+ * Decides from repeated scans whether a group holds only zombies. One scan is not
+ * enough: a live member can fork after the listing and exit before its own state is
+ * read, so the new child is missed while its parent already reads as a zombie. The
+ * answer is yes only when two consecutive scans find the same members and none of
+ * them can run. Every member of the second scan was then already a zombie when the
+ * first scan read it, before the second listing, so none of them could fork a member
+ * the second listing missed. A live member, an unreadable one, or members that keep
+ * changing for `attempts` scans keep the answer no.
+ */
+export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
+  let previous = scan();
+  for (let i = 1; i < attempts; i++) {
+    if (previous === 'unknown' || previous.live) return false;
+    const current = scan();
+    if (current === 'unknown' || current.live) return false;
+    if (sameMembers(previous.members, current.members)) return true;
+    previous = current;
   }
   return false;
+}
+
+function sameMembers(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  return b.every((pid) => seen.has(pid));
 }
 
 /** True when the procfs at /proc is mounted with a hidepid option that hides processes. */

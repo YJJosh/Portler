@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { describe, it } from 'node:test';
-import { isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses } from '../src/process/pids.ts';
+import { groupHoldsOnlyZombies, isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses, type GroupScan } from '../src/process/pids.ts';
 import { startZombieGroup, waitFor } from './zombie-group.ts';
 
 describe('isPidAlive', () => {
@@ -68,6 +68,47 @@ describe('processGroupAlive', () => {
     assert.equal(procHidesProcesses('proc /proc proc rw,relatime,hidepid=2 0 0\n'), true);
     assert.equal(procHidesProcesses('proc /proc proc rw,relatime,hidepid=invisible,gid=10 0 0\n'), true);
     assert.equal(procHidesProcesses('proc /other/proc proc rw,hidepid=2 0 0\nsysfs /sys sysfs rw 0 0\n'), false);
+  });
+
+  it('trusts only two scans that find the same zombies, so a child forked mid-scan is not missed', () => {
+    const scripted = (...scans: GroupScan[]) => {
+      let calls = 0;
+      return { scan: () => scans[Math.min(calls++, scans.length - 1)], calls: () => calls };
+    };
+    const zombies = (...members: number[]): GroupScan => ({ members, live: false });
+
+    // Stable: the same zombies twice.
+    let run = scripted(zombies(5), zombies(5));
+    assert.equal(groupHoldsOnlyZombies(run.scan), true);
+    assert.equal(run.calls(), 2);
+
+    // The race: 5 forked 6 after the first listing and then exited, so the first scan
+    // read 5 as a zombie and never saw 6. The second listing finds 6 running.
+    run = scripted(zombies(5), { members: [5, 6], live: true });
+    assert.equal(groupHoldsOnlyZombies(run.scan), false);
+
+    // 6 had already become a zombie by the second scan: the members changed, so a
+    // third scan decides; the same set again is stable.
+    run = scripted(zombies(5), zombies(5, 6), zombies(5, 6));
+    assert.equal(groupHoldsOnlyZombies(run.scan), true);
+    assert.equal(run.calls(), 3);
+
+    // Members that keep changing never settle within the attempts.
+    run = scripted(zombies(5), zombies(5, 6), zombies(5, 6, 7), zombies(5, 6, 7, 8), zombies(5, 6, 7, 8, 9));
+    assert.equal(groupHoldsOnlyZombies(run.scan, 4), false);
+    assert.equal(run.calls(), 4);
+
+    // A live member or an unreadable one in the first scan ends it at once.
+    run = scripted({ members: [5], live: true });
+    assert.equal(groupHoldsOnlyZombies(run.scan), false);
+    assert.equal(run.calls(), 1);
+    run = scripted('unknown');
+    assert.equal(groupHoldsOnlyZombies(run.scan), false);
+    run = scripted(zombies(5), 'unknown');
+    assert.equal(groupHoldsOnlyZombies(run.scan), false);
+
+    // No members twice: the group went away between the signal check and the scans.
+    assert.equal(groupHoldsOnlyZombies(scripted(zombies(), zombies()).scan), true);
   });
 
   it('counts a group holding only a zombie as gone', { skip: process.platform !== 'linux' }, async () => {
