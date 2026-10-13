@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   managedVolumeName,
   normalizeVolumeSet,
@@ -14,6 +15,14 @@ import type { PortlerConfig } from '../types/index.ts';
 
 /** Image used to copy data between volumes when forking. */
 const COPY_IMAGE = 'alpine:3';
+
+/**
+ * Label holding a random token for the fork attempt that created a target volume.
+ * The project label cannot tell two concurrent forks of the same project apart, and
+ * `docker volume create` succeeds for an existing name, so this token is what proves
+ * that this attempt created the target it copies into (and may roll back).
+ */
+const FORK_ATTEMPT_LABEL = 'portler.fork-attempt';
 
 export interface ProjectVolume {
   /** Full Docker volume name. */
@@ -210,14 +219,50 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     );
   }
 
-  await dockerOrThrow(['volume', 'create', ...volumeLabelArgs(volumeScope(config).owner, parsed.name, newSet), target]);
+  const owner = volumeScope(config).owner;
+  const attempt = randomUUID();
+  const created = await runDocker([
+    'volume',
+    'create',
+    ...volumeLabelArgs(owner, parsed.name, newSet),
+    '--label',
+    `${FORK_ATTEMPT_LABEL}=${attempt}`,
+    target,
+  ]);
 
-  // `docker volume create` returns success for an existing volume. Re-check after
-  // creation so a foreign volume that won the exists/create race is never used as
-  // the copy target (and never removed by our rollback).
-  if ((await volumeOwnership(target, volumeScope(config).owner)) !== 'owned') {
+  // Whether the target is still the volume this attempt created: ours, and carrying
+  // this attempt's token. Unknown (inspect failed) counts as not ours.
+  const createdByThisAttempt = async (): Promise<boolean> => {
+    const labels = await volumeLabels(target).catch(() => null);
+    return labels !== null && ownershipVerdict(labels, owner) === 'owned' && labels[FORK_ATTEMPT_LABEL] === attempt;
+  };
+  // Fail closed on the cleanup too: only remove a target that STILL carries this
+  // attempt's token. A name can be deleted/recreated between Docker calls, and a
+  // concurrent fork's target carries the project label just like ours.
+  const rollback = async (): Promise<void> => {
+    if (await createdByThisAttempt()) await runDocker(['volume', 'rm', target]);
+  };
+
+  // `docker volume create` returns success for an existing volume and keeps its
+  // labels. Re-check after creation so a volume that won the exists/create race,
+  // foreign or made by a concurrent fork, is never used as the copy target (and
+  // never removed by our rollback).
+  const labels = await volumeLabels(target);
+  if (labels !== null && ownershipVerdict(labels, owner) !== 'owned') {
     throw new Error(`target volume ${target} appeared during creation but is not owned by this project; refusing to overwrite it`);
   }
+  if (labels !== null && labels[FORK_ATTEMPT_LABEL] !== attempt) {
+    throw new Error(
+      `another fork created target volume ${target} at the same time; refusing to copy into it. ` +
+        `Check it with "portler volumes" once that fork has finished.`,
+    );
+  }
+  if (created.code !== 0) {
+    await rollback();
+    const detail = created.stderr.trim() || created.stdout.trim() || `exit code ${created.code}`;
+    throw new Error(`"docker volume create" failed: ${detail}`);
+  }
+  if (labels === null) throw new Error(`target volume ${target} disappeared right after it was created; refusing to continue`);
 
   try {
     await dockerOrThrow([
@@ -233,11 +278,7 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
       'cd /from && cp -a . /to',
     ]);
   } catch (error) {
-    // Fail closed on the cleanup too: only remove a target that is STILL ours.
-    // A name can be deleted/recreated between Docker calls.
-    if ((await volumeOwnership(target, volumeScope(config).owner).catch(() => 'absent' as const)) === 'owned') {
-      await runDocker(['volume', 'rm', target]);
-    }
+    await rollback();
     throw new Error(`copying volume data failed: ${(error as Error).message}`);
   }
 
@@ -250,16 +291,22 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
  * irreversibly — so it is checked separately.
  */
 export async function volumeOwnership(fullName: string, volumeRoot: string): Promise<OwnershipVerdict> {
+  const labels = await volumeLabels(fullName);
+  return labels === null ? 'absent' : ownershipVerdict(labels, volumeRoot);
+}
+
+/** A volume's labels (empty when unlabelled), or null when it does not exist. */
+async function volumeLabels(fullName: string): Promise<Record<string, string> | null> {
   const result = await runDocker(['volume', 'inspect', '--format', '{{json .Labels}}', fullName]);
   if (result.code !== 0) {
-    if (/no such volume|not found/i.test(result.stderr)) return 'absent';
+    if (/no such volume|not found/i.test(result.stderr)) return null;
     throw new Error(
       `could not determine ownership of Docker volume ${fullName}: ` +
         (result.stderr.trim().split('\n')[0] || `docker volume inspect exited ${result.code}`),
     );
   }
 
-  return ownershipVerdict(parseInspectLabels(result.stdout), volumeRoot);
+  return parseInspectLabels(result.stdout);
 }
 
 /** Remove a project volume, refusing while a running container mounts it unless forced. */

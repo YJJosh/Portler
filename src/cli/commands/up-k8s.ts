@@ -159,12 +159,14 @@ async function startK8sPhase(
 
   printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
 
-  const isFullSelection = selectedNames.length === Object.keys(config.services).length;
   const children = new Map<string, ChildProcess>();
-  let applied = false;
+  // The services whose manifests this run has started applying. Teardown deletes
+  // exactly these, by label, even when the run selected every service the config
+  // had when it started: the config may have grown since, and a newer run may
+  // own the services it added.
+  const appliedNames: string[] = [];
   // stopServices kills the port-forward supervisors and prunes their pids.json
-  // entries; the Kubernetes resources themselves go with the namespace (full)
-  // or by label (partial). Nothing to delete when the failure came before apply.
+  // entries. Nothing to delete when the failure came before the first apply.
   // Rolling back a failed start never deletes volumes: a PVC that already holds
   // a database's data must survive a crash-loop during startup.
   //
@@ -177,9 +179,9 @@ async function startK8sPhase(
     const incomplete = reportIncompleteTeardown(result);
     let resourceCleanupError: Error | undefined;
 
-    if (applied) {
+    if (appliedNames.length > 0) {
       try {
-        await deleteK8sResources(cluster, config, { serviceNames: isFullSelection ? undefined : selectedNames });
+        await deleteK8sResources(cluster, config, { serviceNames: appliedNames });
       } catch (error) {
         resourceCleanupError = error as Error;
         process.stderr.write(`[portler] warning: could not clean up Kubernetes resources: ${resourceCleanupError.message}\n`);
@@ -225,7 +227,6 @@ async function startK8sPhase(
     // namespace and thereby authorizing a later `down k8s --volumes` to delete
     // it. `create` fails on AlreadyExists instead, and ensureNamespace re-reads
     // the namespace and refuses unless it really is ours.
-    applied = true;
     await ensureNamespace(cluster, config);
 
     // Apply and await one dependency level at a time — a service's manifests
@@ -234,6 +235,8 @@ async function startK8sPhase(
     // avoids crash-loops like an api migrating against a postgres that is
     // still initializing (and the dead port-forwards those restarts leave).
     for (const level of dependencyLevels(config, selectedNames)) {
+      // Recorded before the apply: a failed apply may still have created some.
+      appliedNames.push(...level);
       await applyManifestFiles(cluster, level.map((serviceName) => path.join(manifestDir, `${rendered.names.get(serviceName)!}.yml`)));
 
       await Promise.all(

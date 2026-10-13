@@ -1,4 +1,5 @@
 import type { RunMode } from '../config/index.ts';
+import { PROXY_SERVICE_NAME } from '../constants.ts';
 import { K8S_FORWARD_COMMAND } from '../k8s/index.ts';
 import { didYouMean } from '../util/suggest.ts';
 import type { PidServiceInfo, PortlerConfig } from '../types/index.ts';
@@ -85,6 +86,17 @@ export function selectServiceNames(config: PortlerConfig, requested: string[]): 
     }
   }
 
+  return requested;
+}
+
+/**
+ * Like selectServiceNames, but also accepts "proxy" when the config has a
+ * proxy block: the proxy is not a service, yet `down proxy` and `ps proxy`
+ * should reach it.
+ */
+export function selectServiceTargets(config: PortlerConfig, requested: string[]): string[] {
+  const services = requested.filter((name) => !(name === PROXY_SERVICE_NAME && config.proxy));
+  if (services.length > 0) selectServiceNames(config, services);
   return requested;
 }
 
