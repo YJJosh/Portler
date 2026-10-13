@@ -10,7 +10,7 @@ portler clean [--ports] [--global] [--force]
 
 Plain `portler clean` removes the local [`.portler/` runtime files](/reference/generated-files) and releases this project's ports from the global registry (`~/.portler/ports.json`).
 
-Clean **refuses to run while services are running**; pass `--force` to stop them first.
+Clean **refuses to run while services are running**; pass `--force` to stop them first. This includes a Docker container that outlives its host supervisor, and a container whose liveness cannot be checked (for example, when the Docker daemon is unavailable). A surviving process group whose leader has exited also counts as running, even though its ownership cannot be verified. The same guard applies to `--ports`.
 
 ## Options
 
