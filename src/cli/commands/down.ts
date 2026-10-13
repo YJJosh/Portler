@@ -9,7 +9,7 @@ import type { StopResult } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { parseRunMode, servicesWithPorts } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, servicesWithPorts } from '../services.ts';
 import { legacyMountCandidates } from './restart.ts';
 
 /**
@@ -70,22 +70,29 @@ export function recordedVolumeSet(service: ServiceConfig | undefined, launch: Pi
   return legacyMountCandidates(service, launch).length > 0 ? null : undefined;
 }
 
+/** How the stopped services were started, as one command line would repeat it. */
+interface RecordedLaunch {
+  runMode: RunMode;
+  prod: boolean;
+  noSetup: boolean;
+  images: string[];
+  volumeSet: string | undefined;
+}
+
 /**
- * The `up` that starts the stopped services again the way they were started: the mode,
- * `--prod`, `--no-setup`, image pins and volume set their PID entries recorded (Kubernetes
- * mode when this down deleted them from the cluster), and this invocation's `--file`.
- * Undefined when no single `up` would do that: they were started in different ways, an
- * entry does not say which volume set it was on, or they were on the base volumes while
- * PORTLER_VOLUME_SET would make a plain `up` pick another set.
+ * The single way the stopped services were started: the mode, `--prod`, `--no-setup`,
+ * image pins and volume set their PID entries recorded (Kubernetes mode when this down
+ * deleted them from the cluster). Undefined when there is no single way: they were started
+ * differently, an entry does not say which volume set it was on, or they were on the base
+ * volumes while PORTLER_VOLUME_SET would make a plain command pick another set.
  */
-export function upSuggestion(
+function recordedLaunch(
   serviceNames: readonly string[],
   launches: ReadonlyArray<PidServiceInfo | undefined>,
   mode: RunMode,
-  file: string | undefined,
-  volumeSets: ReadonlyArray<string | null | undefined> = [],
-  envVolumeSet: string | undefined = process.env.PORTLER_VOLUME_SET,
-): string | undefined {
+  volumeSets: ReadonlyArray<string | null | undefined>,
+  envVolumeSet: string | undefined,
+): RecordedLaunch | undefined {
   const modes = new Set<RunMode>();
   const prods = new Set<boolean>();
   const setups = new Set<boolean>();
@@ -103,16 +110,67 @@ export function upSuggestion(
   if (sets.size > 1) return undefined;
   const [volumeSet] = sets;
   if (volumeSet === '' && (envVolumeSet ?? '').trim() !== '') return undefined;
-
   const [runMode] = modes;
-  const parts = ['portler', 'up'];
-  if (runMode !== 'local') parts.push(runMode!);
-  parts.push('-d', ...serviceNames.map(shellQuote));
+  return { runMode: runMode!, prod: prods.has(true), noSetup: setups.has(false), images, volumeSet: volumeSet || undefined };
+}
+
+function launchFlags(launch: RecordedLaunch, file: string | undefined): string[] {
+  const parts: string[] = [];
   if (file) parts.push('--file', shellQuote(file));
-  if (prods.has(true)) parts.push('--prod');
-  if (setups.has(false)) parts.push('--no-setup');
-  for (const image of images) parts.push('--image', shellQuote(image));
-  if (volumeSet) parts.push('--volume-set', shellQuote(volumeSet));
+  if (launch.prod) parts.push('--prod');
+  if (launch.noSetup) parts.push('--no-setup');
+  for (const image of launch.images) parts.push('--image', shellQuote(image));
+  if (launch.volumeSet) parts.push('--volume-set', shellQuote(launch.volumeSet));
+  return parts;
+}
+
+/**
+ * The `up` that starts the stopped services again the way they were started, with this
+ * invocation's `--file`. Undefined when no single `up` would (see recordedLaunch).
+ */
+export function upSuggestion(
+  serviceNames: readonly string[],
+  launches: ReadonlyArray<PidServiceInfo | undefined>,
+  mode: RunMode,
+  file: string | undefined,
+  volumeSets: ReadonlyArray<string | null | undefined> = [],
+  envVolumeSet: string | undefined = process.env.PORTLER_VOLUME_SET,
+): string | undefined {
+  const launch = recordedLaunch(serviceNames, launches, mode, volumeSets, envVolumeSet);
+  if (!launch) return undefined;
+  const parts = ['portler', 'up'];
+  if (launch.runMode !== 'local') parts.push(launch.runMode);
+  parts.push('-d', ...serviceNames.map(shellQuote), ...launchFlags(launch, file));
+  return parts.join(' ');
+}
+
+/**
+ * The command that brings the stopped services back. `up` refuses when something the
+ * services depend on is still running (it would start that too), so while a prerequisite
+ * runs this is a `restart`, which starts what is stopped and leaves what runs alone.
+ * Undefined when no command would do it: no single recorded launch (see recordedLaunch),
+ * Kubernetes mode (which has no restart) with a prerequisite still running, or a running
+ * prerequisite started in another mode or with another `--prod`, which restart refuses.
+ */
+export function recoveryCommand(
+  serviceNames: readonly string[],
+  launches: ReadonlyArray<PidServiceInfo | undefined>,
+  mode: RunMode,
+  file: string | undefined,
+  volumeSets: ReadonlyArray<string | null | undefined>,
+  runningPrerequisites: ReadonlyArray<PidServiceInfo | undefined>,
+  envVolumeSet: string | undefined = process.env.PORTLER_VOLUME_SET,
+): string | undefined {
+  if (runningPrerequisites.length === 0) return upSuggestion(serviceNames, launches, mode, file, volumeSets, envVolumeSet);
+  const launch = recordedLaunch(serviceNames, launches, mode, volumeSets, envVolumeSet);
+  if (!launch || launch.runMode === 'k8s') return undefined;
+  const compatible = runningPrerequisites.every(
+    (prerequisite) => prerequisite?.runMode === launch.runMode && (prerequisite.prod === true) === launch.prod,
+  );
+  if (!compatible) return undefined;
+  const parts = ['portler', 'restart'];
+  if (launch.runMode === 'docker') parts.push('docker');
+  parts.push(...serviceNames.map(shellQuote), ...launchFlags(launch, file));
   return parts.join(' ');
 }
 
@@ -129,11 +187,13 @@ async function warnAboutDependents(
   before: PidsFile | null,
   mode: RunMode,
   file: string | undefined,
+  retained: ReadonlySet<string>,
 ): Promise<void> {
   const stopped = new Set(stoppedNames);
   const pids = await readPids(config.projectDir);
+  const live = await liveServiceNames(config.projectDir, pids);
   const dependents: string[] = [];
-  for (const name of await liveServiceNames(config.projectDir, pids)) {
+  for (const name of live) {
     if (stopped.has(name)) continue;
     const dependencies =
       pids?.services[name]?.dependsOn ?? config.services[name]?.dependsOn.map((dependency) => dependency.service) ?? [];
@@ -146,13 +206,33 @@ async function warnAboutDependents(
   const them = back.length === 1 ? 'it' : 'them';
   const launches = back.map((name) => before?.services[name]);
   const volumeSets = back.map((name, index) => recordedVolumeSet(config.services[name], launches[index]));
-  const command = back.length > 0 ? upSuggestion(back, launches, mode, file, volumeSets) : undefined;
+  // A service whose entry had to be kept is not fully stopped: starting it again now would be
+  // refused, or would lose track of what is left of it. Name the dependents, offer no command.
+  const unfinished = back.filter((name) => retained.has(name));
+  const wasWere = back.length === 1 ? 'was' : 'were';
+  let command: string | undefined;
+  if (back.length > 0 && unfinished.length === 0) {
+    // What the stopped services depend on and is still running: `up` would refuse it.
+    let prerequisites: string[] | undefined;
+    try {
+      prerequisites = expandAndOrderServices(config, back).filter((name) => !stopped.has(name));
+    } catch {
+      prerequisites = undefined; // a stopped service no longer in portler.yml: nothing to suggest
+    }
+    if (prerequisites) {
+      const liveNow = new Set(live);
+      const running = prerequisites.filter((name) => liveNow.has(name)).map((name) => pids?.services[name]);
+      command = recoveryCommand(back, launches, mode, file, volumeSets, running);
+    }
+  }
   const fix =
     back.length === 0
       ? 'Stop them too.'
-      : command
-        ? `Stop them too, or bring ${them} back with "${command}".`
-        : `Stop them too, or start ${back.join(', ')} again the way ${them} ${back.length === 1 ? 'was' : 'were'} started.`;
+      : unfinished.length > 0
+        ? `Stop them too; once ${unfinished.join(', ')} ${unfinished.length === 1 ? 'is' : 'are'} fully stopped (see below), start ${back.join(', ')} again the way ${them} ${wasWere} started.`
+        : command
+          ? `Stop them too, or bring ${them} back with "${command}".`
+          : `Stop them too, or start ${back.join(', ')} again the way ${them} ${wasWere} started.`;
   process.stderr.write(`[portler] warning: still running and depending on what was stopped: ${dependents.join(', ')}. ${fix}\n`);
 }
 
@@ -213,7 +293,7 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
         ...(deletedFromCluster && selectedNames ? selectedNames.filter((name) => name !== PROXY_SERVICE_NAME) : []),
       ]),
     ];
-    if (selectedNames && takenAway.length > 0) await warnAboutDependents(config, takenAway, before, mode, args.file);
+    if (selectedNames && takenAway.length > 0) await warnAboutDependents(config, takenAway, before, mode, args.file, new Set(result.remaining));
 
     // Exit non-zero when down did NOT finish the job: a service is only
     // "stopped" once its process group is confirmed gone, so what is left here

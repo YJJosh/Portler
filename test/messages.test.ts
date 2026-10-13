@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { recordedVolumeSet, upSuggestion } from '../src/cli/commands/down.ts';
+import { recordedVolumeSet, recoveryCommand, upSuggestion } from '../src/cli/commands/down.ts';
 import { restartSuggestion } from '../src/cli/commands/up.ts';
 import { ensureNoOverlap } from '../src/cli/services.ts';
 import { assertRequiredEnv } from '../src/env/index.ts';
@@ -203,6 +203,24 @@ describe('the up a dependents warning suggests', () => {
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, ['branch'], 'other'), 'portler up docker -d db --volume-set branch');
   });
 
+  it('restarts instead when a prerequisite still runs, and only when restart would accept it', () => {
+    const docker = entry({ runMode: 'docker', dockerContainer: 'c-db', prod: true });
+    const cache = entry({ runMode: 'docker', dockerContainer: 'c-cache', prod: true });
+    assert.equal(
+      recoveryCommand(['db'], [docker], 'local', 'deploy/portler.yml', ['branch'], [cache], undefined),
+      "portler restart docker db --file deploy/portler.yml --prod --volume-set branch",
+    );
+    assert.equal(recoveryCommand(['db'], [entry({ runMode: 'local' })], 'local', undefined, [], [entry({ runMode: 'local' })], undefined), 'portler restart db');
+    // Nothing still running: up, as before.
+    assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [], undefined), 'portler up docker -d db --prod');
+    // restart would refuse a prerequisite started another way, or one whose mode is not recorded.
+    assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ runMode: 'docker' })], undefined), undefined);
+    assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ runMode: 'local', prod: true })], undefined), undefined);
+    assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ prod: true })], undefined), undefined);
+    // Kubernetes has no restart.
+    assert.equal(recoveryCommand(['db'], [undefined], 'k8s', undefined, [], [entry({ runMode: 'k8s' })], undefined), undefined);
+  });
+
   it('reads the volume set from the entry, or says when an older entry cannot tell', () => {
     const service = (volumes: string[]): ServiceConfig =>
       ({ dependsOn: [], env: {}, docker: { image: 'postgres:16-alpine', volumes } }) as unknown as ServiceConfig;
@@ -280,7 +298,48 @@ describe('down warns from what is running, not from an edited portler.yml', () =
 
     const down = portlerWith(projectDir, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` }, 'down', 'db');
     assert.equal(down.status, 1, 'the entry is kept, so down reports it did not finish');
-    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up docker -d db"\./);
+    // db's entry is kept, so it is not fully stopped yet: the warning names api but offers no command.
+    assert.match(
+      down.stderr,
+      /depending on what was stopped: api \(on db\)\. Stop them too; once db is fully stopped \(see below\), start db again the way it was started\./,
+    );
+    assert.doesNotMatch(down.stderr, /portler up|portler restart/);
+  });
+
+  it('suggests a restart when what the stopped service depends on is still running', async () => {
+    const projectDir = await project(
+      [
+        'services:',
+        '  cache:',
+        '    command: node server.js',
+        '    port: 4110',
+        '    port_env: PORT',
+        '  db:',
+        '    command: node server.js',
+        '    port: 4111',
+        '    port_env: PORT',
+        '    depends_on: [cache]',
+        '  api:',
+        '    command: node server.js',
+        '    port: 4112',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    const up = portler(projectDir, 'up', '-d');
+    assert.equal(up.status, 0, up.stdout + up.stderr);
+
+    const down = portler(projectDir, 'down', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    // `up -d db` would also start cache, which is still running, and be refused.
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler restart db"\./);
+    assert.equal(portler(projectDir, 'up', '-d', 'db').status, 1, 'the up form is refused while cache runs');
+
+    const restart = portler(projectDir, 'restart', 'db');
+    assert.equal(restart.status, 0, restart.stdout + restart.stderr);
+    assert.match(portler(projectDir, 'ps').stdout, /^db\s.*running/m);
   });
 
   it('uses the dependencies each running service recorded when it started', async () => {
