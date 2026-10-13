@@ -10,10 +10,25 @@ import { allocateAssignments } from '../../ports/index.ts';
 import { readPids, runningServices, serviceLiveness } from '../../process/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
-import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, servicesWithPorts, validateDockerMode } from '../services.ts';
 import { validateK8sMode } from './up-k8s.ts';
+
+/**
+ * A cached assignment as a fresh allocation for this config would give it: a service that
+ * is no container here gets no container name or image. state.json keeps whichever run mode
+ * last allocated (an `env docker` view, or an `up docker` that has since stopped), and the
+ * local view must not name that container.
+ */
+function asAllocatedFor(config: PortlerConfig, name: string, assignment: ServiceAssignment): ServiceAssignment {
+  const service = config.services[name];
+  if (!service || service.docker) return assignment;
+  const copy = { ...assignment };
+  delete copy.containerName;
+  delete copy.image;
+  return copy;
+}
 
 /**
  * Return the current port assignments plus their generated env, allocating
@@ -37,7 +52,11 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
     // prints no values for an external service and `setup --prod` cannot resolve `${db.url}`
     // where `up --prod` rejects it. state.json itself is left as it is.
     const configured = new Set(configuredWithPorts);
-    const assignments: Assignments = Object.assign(Object.create(null) as Assignments, Object.fromEntries(Object.entries(state.services).filter(([name]) => configured.has(name))));
+    const cached = Object.entries(state.services).filter(([name]) => configured.has(name));
+    const assignments: Assignments = Object.assign(
+      Object.create(null) as Assignments,
+      Object.fromEntries(cached.map(([name, assignment]) => [name, asAllocatedFor(config, name, assignment)])),
+    );
     return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
   }
 
@@ -177,7 +196,14 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
       else validateK8sMode(config, launched);
     }
 
-    const { assignments, generatedEnv } = await ensureAssignments(config);
+    // A partial `up` rewrites state.json with only its own pins, so a cached image can name
+    // portler.yml's image while a running container's pids.json entry still holds its pin.
+    const { assignments: cached } = await ensureAssignments(config);
+    const assignments: Assignments = Object.assign(Object.create(null) as Assignments, cached);
+    for (const [name, image] of Object.entries(pins)) {
+      if (assignments[name]) assignments[name] = { ...assignments[name], image };
+    }
+    const generatedEnv = buildGeneratedEnv(assignments);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);

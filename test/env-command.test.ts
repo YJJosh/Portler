@@ -102,6 +102,19 @@ describe('env for a running service', () => {
     assert.match(result.stderr, /backend was started with "portler up k8s"; this shows the environment it got/);
   });
 
+  it('replays a running container\'s pin over a cached image a later partial up reverted', async () => {
+    await record({ runMode: 'docker', dockerContainer: 'c-backend', image: 'example/backend@sha256:pinned' });
+    assert.equal(run('backend').status, 0);
+    // A later `up` of another service rewrites state.json with only its own pins.
+    const stateFile = path.join(projectDir, '.portler', 'state.json');
+    const state = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+    state.services.backend.image = 'example/backend';
+    await fs.writeFile(stateFile, JSON.stringify(state), 'utf8');
+    const result = run('backend');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend@sha256:pinned');
+  });
+
   it('keeps the --image pin of a stopped launch it shows as the last one', async () => {
     // The containers have exited: a fake docker reports them gone, so this does not
     // depend on a real daemon. backend's entry is the launch env shows, so its pin stays;
@@ -176,6 +189,20 @@ describe('env for a running service', () => {
     assert.equal(value(local.stdout, 'MODE'), 'local');
     assert.equal(local.stderr, '');
     assert.match(run('backend', '--reveal').stderr, /--reveal applies to "env --prod"/);
+  });
+
+  it('leaves no container name or image from a typed Docker view in the plain one', async () => {
+    // `env docker` allocates (and persists) the Docker view's container metadata; the plain
+    // view of a command-backed service must not name that container afterwards.
+    const docker = run('docker', 'backend');
+    assert.equal(docker.status, 0, docker.stderr);
+    assert.ok(value(docker.stdout, 'PORTLER_BACKEND_CONTAINER'), 'the Docker view names the container');
+    assert.equal(value(docker.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend');
+    const local = run('backend');
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(value(local.stdout, 'PORTLER_BACKEND_CONTAINER'), undefined);
+    assert.equal(value(local.stdout, 'PORTLER_BACKEND_IMAGE'), undefined);
+    assert.ok(value(local.stdout, 'PORTLER_POSTGRES_CONTAINER'), 'a service that is a container in the plain view keeps its name');
   });
 
   it('refuses a typed k8s mode for a service that up k8s would refuse', async () => {
