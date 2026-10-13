@@ -551,6 +551,59 @@ services:
     }
   });
 
+  it('a dev copy of a service prod.services leaves out does not stop a plain restart replaying --prod', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    // Under --prod, db is the deployment's; a development db happens to run next to api.
+    await config(`prod:
+  services: [api]
+services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`);
+    try {
+      await commandUp(parseArgs(['db', '-d'], 'up'));
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['dev', 'prod']);
+      const dbPid = (await readPids(dir))?.services.db?.pid;
+      assert.ok(dbPid);
+
+      // The same as `restart api --prod`: db has no say in the replayed mode.
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'prod', 'prod']);
+      const after = await readPids(dir);
+      assert.equal(after?.services.api?.prod, true);
+      assert.equal(after?.services.db?.pid, dbPid, 'db was left alone');
+      assert.notEqual(after?.services.db?.prod, true);
+
+      // db itself still restarts as what it is.
+      await commandRestart(parseArgs(['db'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'prod', 'prod', 'dev']);
+
+      // Restarting everything takes in both, and there is no one mode for that.
+      const before = await readPids(dir);
+      await assert.rejects(commandRestart(parseArgs([], 'restart')), /no one mode to replay/);
+      assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';

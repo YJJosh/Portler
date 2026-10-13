@@ -226,7 +226,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     const before = await readPids(loadedConfig.projectDir);
     const running = before?.services ?? {};
     const runningNow = new Set(runningServices(before));
-    const planFor = (config: PortlerConfig) => {
+    const scope = (config: PortlerConfig) => {
       const requestedRootNames = selectServiceNames(config, requested);
       // A restart without names stops every recorded service, including ones no longer in
       // the config; they are part of the running stack and count. The proxy's entry is
@@ -235,6 +235,10 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       const involved = [...new Set([...expandAndOrderServices(config, requestedRootNames), ...stopping])].filter(
         (name) => Object.hasOwn(running, name),
       );
+      return { requestedRootNames, stopping, involved };
+    };
+    const planFor = (config: PortlerConfig) => {
+      const { requestedRootNames, stopping, involved } = scope(config);
       const stoppingSet = new Set(stopping);
       const starting = expandAndOrderServices(config, requestedRootNames).filter(
         (serviceName) => !runningNow.has(serviceName) || stoppingSet.has(serviceName),
@@ -254,15 +258,24 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       });
       return { requestedRootNames, starting, launch };
     };
+    // A replayed --prod narrows to prod.services exactly as a typed one does, and whether
+    // it is replayed is decided on that narrowed stack: a service prod.services leaves out
+    // is the deployment's, so a development copy of it that happens to be running has no
+    // say, as it has none under `restart --prod`. The proxy is left out of this look only;
+    // a route to a left-out service is still refused below if production is replayed.
     let rawConfig = explicitConfig;
-    let plan = planFor(rawConfig);
-    if (plan.launch.prod && !args.prod) {
-      // A replayed --prod narrows to prod.services exactly as a typed one does, and the
-      // plan is made again on what is left.
-      rawConfig = productionServices(loadedConfig, true, requested);
-      plan = planFor(rawConfig);
+    const listed = loadedConfig.prod?.services;
+    if (
+      !args.prod &&
+      listed !== undefined &&
+      requested.every((name) => !Object.hasOwn(loadedConfig.services, name) || listed.includes(name))
+    ) {
+      const { involved } = scope(productionServices({ ...loadedConfig, proxy: undefined }, true, requested));
+      if (involved.length > 0 && involved.every((name) => running[name]?.prod === true)) {
+        rawConfig = productionServices(loadedConfig, true, requested);
+      }
     }
-    const { requestedRootNames, starting, launch } = plan;
+    const { requestedRootNames, starting, launch } = planFor(rawConfig);
     if (launch.replayed.length > 0) {
       process.stdout.write(`[portler] restart keeps the recorded launch: ${launch.replayed.join(', ')}\n`);
     }
