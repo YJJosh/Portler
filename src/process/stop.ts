@@ -486,8 +486,17 @@ export async function stopServices(
   const settling = targets.filter(
     (target) => containerCleanup.removed.has(target.name) && !probes.pidAlive(target.info.pid),
   );
+  // A group seen gone here stays gone: the leader was already not runnable, so
+  // nothing of ours can bring the group back, and once its pid is free a
+  // stranger may lead a group under the same number. So each target's gone is
+  // remembered, and a later probe never overturns it.
+  const sawGone = new Set<Target>();
   const settleDeadline = Date.now() + probes.confirmMs;
-  while (Date.now() < settleDeadline && settling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
+  for (;;) {
+    for (const target of settling) {
+      if (!sawGone.has(target) && probes.groupState(target.info.pid) === 'gone') sawGone.add(target);
+    }
+    if (sawGone.size === settling.length || Date.now() >= settleDeadline) break;
     await sleep(POLL_MS);
   }
   // A leader whose pid now runs a different process (its start token no longer
@@ -500,7 +509,7 @@ export async function stopServices(
   const settled = new Set<Target>();
   for (const target of targets) {
     if (!containerCleanup.removed.has(target.name)) continue;
-    if (settling.includes(target) && probes.groupState(target.info.pid) === 'gone') {
+    if (settling.includes(target) && (sawGone.has(target) || probes.groupState(target.info.pid) === 'gone')) {
       settled.add(target);
     } else if ((await verifyPid(probes, target.info)) === 'reused') {
       settled.add(target);

@@ -1125,6 +1125,58 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('keeps a group seen gone during the settle wait counted as gone while another group holds the wait', { timeout: 15_000 }, async () => {
+    // db (no start token) and cache both had their shells exit before down
+    // started. db's old group is seen gone mid-wait; a stranger then takes its pid
+    // and leads a group under that number. cache's group never goes, so the wait
+    // runs on. The gone seen for db must stand rather than be re-probed.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({
+      db: { ...pidInfo(4646, undefined), dockerContainer: 'c-db' },
+      cache: { ...pidInfo(4747, 'Mon Oct 12 20:48:05 2026 4747'), dockerContainer: 'c-cache' },
+    });
+
+    let dbProbes = 0;
+    let stranger = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      const result = await stopServices(projectDir, ['db', 'cache'], {}, {
+        graceMs: 20,
+        confirmMs: 300,
+        // db's pid is free until its group is seen gone, then a stranger holds it
+        pidRunning: (pid) => (pid === 4646 ? stranger : false),
+        pidAlive: (pid) => (pid === 4646 ? stranger : false),
+        readStartToken: async (pid) => (pid === 4646 && stranger ? 'Mon Oct 12 21:00:00 2026 4646' : null),
+        groupState: (pid) => {
+          if (pid !== 4646) return 'alive'; // cache's group never goes
+          dbProbes += 1;
+          if (dbProbes === 2) {
+            stranger = true;
+            return 'gone';
+          }
+          return 'alive'; // before: the old group; after: the stranger's own
+        },
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, ['cache']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, "db's entry is pruned");
+      assert.ok((await readPids(projectDir))?.services.cache, "cache's entry is kept");
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });
