@@ -78,10 +78,12 @@ path in the PR description.
   When in doubt, treat it as not ours and still running. Only `down --force`
   and `clean --force` (both through the `force` option of `stopServices`)
   signal an unverifiable process, and never one whose pid was provably reused.
-- Docker: only touch existing containers, networks and volumes labelled as
+- Docker: only remove existing containers, networks and volumes labelled as
   this project's (`src/process/ownership.ts`), and re-check ownership right
-  before a destructive call. Removing something owned can remove unlabelled
-  things with it, on purpose: a container's own anonymous volumes
+  before the call. Volumes the user configures as plain names or bind mounts
+  are mounted as given, with no label check, and never removed. Removing
+  something owned can remove unlabelled things with it, on purpose: a
+  container's own anonymous volumes
   (`docker rm -f -v`, so an image `VOLUME` does not leak;
   `test/ownership.test.ts`) and the short-lived `--rm` copy container that
   `volumes fork` starts (`forkVolume` in `src/volumes/manager.ts`).
