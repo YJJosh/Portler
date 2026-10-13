@@ -73,6 +73,14 @@ export interface LockOptions {
   waitMs: number;
   /** Used in the timeout message, e.g. "global port registry". */
   description: string;
+  /** Tests only: how the lock directory's metadata is read (defaults to fs.stat). */
+  stat?: (target: string) => Promise<LockDirStat>;
+}
+
+export interface LockDirStat {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
 }
 
 export interface LockOwner {
@@ -197,6 +205,24 @@ async function pathMissing(target: string): Promise<boolean> {
   }
 }
 
+/**
+ * The lock directory's mtime and owner, read as one generation. Another waiter
+ * can take the lock over between the two reads, which would pair the replaced
+ * directory's mtime with the new owner (or with no owner yet, mid-write). The
+ * directory is read again after the owner file, and a change in between means
+ * the snapshot is mixed: 'changed', try again.
+ */
+async function readLockSnapshot(
+  lockDir: string,
+  stat: (target: string) => Promise<LockDirStat>,
+): Promise<{ mtimeMs: number; owner: LockOwner | null } | 'changed'> {
+  const before = await stat(lockDir);
+  const owner = await readOwner(lockDir);
+  const after = await stat(lockDir);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs) return 'changed';
+  return { mtimeMs: after.mtimeMs, owner };
+}
+
 function timeoutError(lockDir: string, options: LockOptions, owner: LockOwner | null, thisHost: string): LockTimeoutError {
   const held =
     owner === null
@@ -215,6 +241,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   const startedAt = Date.now();
   const host = os.hostname();
   const token = randomToken();
+  const stat = options.stat ?? ((target: string) => fs.stat(target));
   let lastOwner: LockOwner | null = null;
   // One deadline for the whole wait. It only ever moves later: once a dead
   // owner's lock has been found, the wait it justified holds even after
@@ -236,8 +263,12 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
 
       // Someone else owns the existing directory; continue into the wait path.
       try {
-        const stat = await fs.stat(lockDir);
-        lastOwner = await readOwner(lockDir);
+        const snapshot = await readLockSnapshot(lockDir, stat);
+        if (snapshot === 'changed') {
+          if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host);
+          continue;
+        }
+        lastOwner = snapshot.owner;
         const now = Date.now();
         if (lastOwner !== null && (seenOwner === null || !sameOwner(lastOwner, seenOwner))) {
           seenOwner = lastOwner;
@@ -247,9 +278,9 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
         // makes the lock look younger (never stale early); it must not push the
         // deadline past what we observed, so it counts as the moment we first
         // saw this owner (fixed, so the deadline cannot slide on every poll).
-        const mtime = Math.min(stat.mtimeMs, lastOwner === null ? now : seenAt);
+        const mtime = Math.min(snapshot.mtimeMs, lastOwner === null ? now : seenAt);
 
-        if (isTakeoverAllowed(lastOwner, now - stat.mtimeMs, options.staleMs, host)) {
+        if (isTakeoverAllowed(lastOwner, now - snapshot.mtimeMs, options.staleMs, host)) {
           await takeOverStaleLock(lockDir);
           continue;
         }
@@ -271,7 +302,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
         }
       } catch (statError) {
         // ENOENT: the holder released the lock between our failed mkdir and the
-        // stat — retry immediately. Anything else (e.g. permissions) falls
+        // reads — retry immediately. Anything else (e.g. permissions) falls
         // through to the sleep so it cannot busy-spin.
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
       }

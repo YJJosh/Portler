@@ -241,6 +241,56 @@ describe('withDirLock', () => {
     assert.deepEqual([...ran].sort(), ['a', 'b']);
   });
 
+  it('reads the lock\'s age and its owner from the same lock when a takeover lands between them', async () => {
+    // Another waiter takes the dead owner's lock over right after this waiter
+    // read the old directory's mtime. Pairing that old mtime with the new
+    // owner would give the replacement a wait window that ended long ago.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const lockDir = path.join(dir, 'midread.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+    const deadMtime = (await fs.stat(lockDir)).mtimeMs;
+    const replacement = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+
+    // Stale at 1.5 s, margin until 2.5 s. The takeover lands at 1.3 s and the
+    // replacement holds 1.6 s (until about 2.9 s), inside its own 2 s waitMs.
+    let swapped = false;
+    let released: Promise<void> | undefined;
+    const stat = async (target: string) => {
+      const before = await fs.stat(target);
+      if (!swapped && Date.now() - deadMtime >= 1_300) {
+        swapped = true;
+        await fs.rename(lockDir, `${lockDir}.taken`);
+        await fs.rm(`${lockDir}.taken`, { recursive: true, force: true });
+        await fs.mkdir(lockDir);
+        await fs.writeFile(
+          path.join(lockDir, 'owner'),
+          JSON.stringify({ pid: replacement.pid, host: os.hostname(), at: new Date().toISOString(), token: 'replacement' }),
+        );
+        released = new Promise((resolve) => setTimeout(resolve, 1_600)).then(() =>
+          fs.rm(lockDir, { recursive: true, force: true }),
+        );
+      }
+      return before;
+    };
+
+    try {
+      let ran = false;
+      await withDirLock(lockDir, { staleMs: 1_500, waitMs: 2_000, description: 'test', stat }, async () => {
+        ran = true;
+      });
+      assert.equal(swapped, true, 'the takeover was injected');
+      assert.equal(ran, true);
+    } finally {
+      replacement.kill('SIGKILL');
+      await released;
+    }
+  });
+
   it('does not let a dead owner\'s lock dated in the future stretch the wait', async () => {
     // A lock directory on a filesystem whose clock runs ahead of ours: its
     // mtime counts as now, so the wait ends about staleMs plus the margin
