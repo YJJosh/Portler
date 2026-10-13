@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { spawn } from 'node:child_process';
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import net from 'node:net';
@@ -5,7 +6,6 @@ import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
 import { resolveEnvValue } from '../env/index.ts';
-import { sleep } from '../util/sleep.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
 /**
@@ -16,7 +16,7 @@ import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssi
  */
 export const DOCKER_TCP_HOLD_MS = 200;
 
-export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0): Promise<boolean> {
+export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0, signal?: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     let holdTimer: NodeJS.Timeout | undefined;
@@ -26,9 +26,13 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
       if (settled) return;
       settled = true;
       clearTimeout(holdTimer);
+      signal?.removeEventListener('abort', abort);
       socket.destroy();
       resolve(ready);
     };
+    const abort = (): void => finish(false);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     socket.setTimeout(Math.max(1, timeoutMs));
     socket.on('connect', () => {
       if (holdMs <= 0) return finish(true);
@@ -57,7 +61,7 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
   });
 }
 
-async function isHttpReady(url: string, timeoutMs: number, accept?: number[]): Promise<boolean> {
+async function isHttpReady(url: string, timeoutMs: number, accept?: number[], signal?: AbortSignal): Promise<boolean> {
   try {
     // A 2xx or 3xx response proves the app answered the request. redirect:
     // 'manual' returns 3xx responses directly (passing the check) instead of
@@ -69,7 +73,7 @@ async function isHttpReady(url: string, timeoutMs: number, accept?: number[]): P
     const response = await fetch(url, {
       method: 'GET',
       redirect: 'manual',
-      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
+      signal: AbortSignal.any([AbortSignal.timeout(Math.max(1, timeoutMs)), ...(signal ? [signal] : [])]),
     });
     return accept ? accept.includes(response.status) : response.status >= 200 && response.status < 400;
   } catch {
@@ -77,7 +81,7 @@ async function isHttpReady(url: string, timeoutMs: number, accept?: number[]): P
   }
 }
 
-function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: number): Promise<boolean> {
+function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     const child = spawn(command, {
@@ -94,10 +98,11 @@ function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: nu
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       resolve(ready);
     };
 
-    const timer = setTimeout(() => {
+    const abort = (): void => {
       if (child.pid !== undefined) {
         try {
           process.kill(-child.pid, 'SIGKILL');
@@ -108,7 +113,10 @@ function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: nu
         child.kill('SIGKILL');
       }
       finish(false);
-    }, Math.max(1, timeoutMs));
+    };
+    const timer = setTimeout(abort, Math.max(1, timeoutMs));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
 
     child.on('error', () => finish(false));
     child.on('exit', (code) => finish(code === 0));
@@ -129,22 +137,23 @@ async function checkReady(
   healthcheck: HealthcheckConfig,
   attemptTimeoutMs: number,
   tcpHoldMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   switch (healthcheck.type) {
     case 'none':
       return true;
     case 'tcp':
       if (!assignment) return true;
-      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs);
+      return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs, signal);
     case 'http': {
       const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
       if (!url) return true;
-      return isHttpReady(url, attemptTimeoutMs, healthcheck.accept);
+      return isHttpReady(url, attemptTimeoutMs, healthcheck.accept, signal);
     }
     case 'command': {
       if (!healthcheck.command) throw new Error(`service "${service.name}" healthcheck command is missing`);
       const command = resolveEnvValue(healthcheck.command, assignments);
-      return isCommandReady(command, resolveServiceCwd(config, service), env, attemptTimeoutMs);
+      return isCommandReady(command, resolveServiceCwd(config, service), env, attemptTimeoutMs, signal);
     }
   }
 }
@@ -298,7 +307,9 @@ export async function waitForServiceReady(
   tcpHoldMs = 0,
   /** The detached log file of the service, named in errors; undefined when its output is on this terminal. */
   logFile?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   const healthcheck = service.healthcheck ?? defaultHealthcheck(service, assignment);
   if (healthcheck.type === 'none') return;
 
@@ -306,12 +317,14 @@ export async function waitForServiceReady(
   process.stdout.write(`[portler] waiting for ${service.name} to be ready (${healthcheck.type})...\n`);
 
   while (Date.now() - startedAt <= healthcheck.timeoutMs) {
+    signal?.throwIfAborted();
     if (childHasExited()) throw exitedError(service, logFile);
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
-    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs);
+    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs, signal);
     // The probe can pass against a port whose process died while it ran: Docker's
     // proxy keeps accepting, a hold timer keeps ticking. The exit wins.
+    signal?.throwIfAborted();
     if (childHasExited()) throw exitedError(service, logFile);
     if (ready) {
       process.stdout.write(`[portler] ${service.name} is ready\n`);
@@ -319,7 +332,7 @@ export async function waitForServiceReady(
     }
 
     const remainingAfterCheck = healthcheck.timeoutMs - (Date.now() - startedAt);
-    if (remainingAfterCheck > 0) await sleep(Math.min(healthcheck.intervalMs, remainingAfterCheck));
+    if (remainingAfterCheck > 0) await delay(Math.min(healthcheck.intervalMs, remainingAfterCheck), undefined, { signal });
   }
 
   throw new Error(
