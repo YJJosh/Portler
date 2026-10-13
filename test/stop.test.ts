@@ -18,7 +18,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { isPidAlive, isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
-import { signalDecision, stopServices } from '../src/process/stop.ts';
+import { signalDecision, stopOrder, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
 import { startZombieGroup } from './zombie-group.ts';
@@ -118,6 +118,47 @@ describe('signalDecision', () => {
   it('does nothing when the pid and its group are both gone', () => {
     assert.equal(signalDecision('gone', 'gone', true), 'none');
     assert.equal(signalDecision('gone', 'gone', false), 'none');
+  });
+});
+
+describe('stopOrder', () => {
+  const entry = (dependsOn?: string[]): PidServiceInfo => ({
+    pid: 1,
+    command: 'x',
+    cwd: '/',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    ...(dependsOn ? { dependsOn } : {}),
+  });
+
+  it('stops dependents first and what they depend on last', () => {
+    const services = {
+      redis: entry([]),
+      api: entry(['redis']),
+      worker: entry(['redis']),
+      web: entry(['api']),
+      proxy: entry([]),
+    };
+    assert.deepEqual(stopOrder(services, ['redis', 'api', 'worker', 'web', 'proxy']), [
+      ['worker', 'web', 'proxy'],
+      ['api'],
+      ['redis'],
+    ]);
+  });
+
+  it('only orders the selected services', () => {
+    const services = { redis: entry([]), api: entry(['redis']), web: entry(['api']) };
+    assert.deepEqual(stopOrder(services, ['api', 'web']), [['web'], ['api']]);
+    assert.deepEqual(stopOrder(services, ['redis']), [['redis']]);
+  });
+
+  it('keeps entries without a recorded dependsOn in one level', () => {
+    const services = { redis: entry(), api: entry() };
+    assert.deepEqual(stopOrder(services, ['redis', 'api']), [['redis', 'api']]);
+  });
+
+  it('puts names on a cycle into the last level instead of looping', () => {
+    const services = { a: entry(['b']), b: entry(['a']), c: entry(['a']) };
+    assert.deepEqual(stopOrder(services, ['a', 'b', 'c']), [['c'], ['a', 'b']]);
   });
 });
 
@@ -245,6 +286,85 @@ describe('stopServices', () => {
     assert.equal(await readPids(projectDir), null, 'its entry is pruned');
   });
 
+  it('stops a dependency only after the services that depend on it have exited', async () => {
+    // The dependent drains for 300 ms on SIGTERM; the dependency notes when its
+    // own SIGTERM arrives. pids.json lists the dependency first, as start order does.
+    const marks = path.join(projectDir, 'marks');
+    await fs.mkdir(marks);
+    const script = (name: string, drainMs: number) =>
+      `const fs = require('fs'); process.on('SIGTERM', () => {` +
+      ` fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.term`))}, String(Date.now()));` +
+      ` setTimeout(() => { fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.exit`))}, String(Date.now())); process.exit(0); }, ${drainMs}); });` +
+      ` fs.writeFileSync(${JSON.stringify(path.join(marks, `${name}.ready`))}, ''); setInterval(() => {}, 1000);`;
+    const start = async (name: string, drainMs: number) => {
+      const child = spawn(process.execPath, ['-e', script(name, drainMs)], { detached: true, stdio: 'ignore' });
+      spawned.push(child);
+      // Wait until the SIGTERM handler is installed, or the signal would kill it outright.
+      const ready = path.join(marks, `${name}.ready`);
+      for (let i = 0; i < 200; i += 1) {
+        if (await fs.stat(ready).then(() => true, () => false)) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return child;
+    };
+    const db = await start('db', 0);
+    const api = await start('api', 300);
+    await writePidsFile({
+      db: pidInfo(db.pid!, (await readProcessStartToken(db.pid!)) ?? undefined),
+      api: { ...pidInfo(api.pid!, (await readProcessStartToken(api.pid!)) ?? undefined), dependsOn: ['db'] },
+    });
+
+    const result = await stopServices(projectDir);
+
+    assert.deepEqual(result.stopped, ['api', 'db']);
+    assert.deepEqual(result.failures, []);
+    const apiExit = Number(await fs.readFile(path.join(marks, 'api.exit'), 'utf8'));
+    const dbTerm = Number(await fs.readFile(path.join(marks, 'db.term'), 'utf8'));
+    assert.ok(dbTerm >= apiExit, `db got SIGTERM ${apiExit - dbTerm} ms before api finished draining`);
+    assert.equal(await readPids(projectDir), null);
+  });
+
+
+  it('leaves what a dependent needs running when that dependent could not be stopped', async () => {
+    // cache <- db <- api, and web on its own. api has no start token, so its
+    // identity cannot be proven and it is kept; db and cache must then stay up
+    // with it instead of being stopped under a still-running api.
+    const entry = (pid: number, token: string | undefined, dependsOn: string[]): PidServiceInfo => ({
+      ...pidInfo(pid, token),
+      dependsOn,
+    });
+    await writePidsFile({
+      cache: entry(9104, 'cache-token', []),
+      db: entry(9103, 'db-token', ['cache']),
+      api: entry(9101, undefined, ['db']),
+      web: entry(9102, 'web-token', []),
+    });
+    const tokens: Record<number, string> = { 9102: 'web-token', 9103: 'db-token', 9104: 'cache-token' };
+    const signalled = new Set<number>();
+    const signals: string[] = [];
+    const result = await stopServices(projectDir, undefined, {}, {
+      graceMs: 20,
+      confirmMs: 50,
+      pidRunning: (pid) => !signalled.has(pid),
+      pidAlive: (pid) => !signalled.has(pid),
+      readStartToken: async (pid) => (signalled.has(pid) ? null : tokens[pid] ?? null),
+      groupState: (pid) => (signalled.has(pid) ? 'gone' : 'alive'),
+      sendSignal: (pid, signal) => {
+        signals.push(`${pid}:${signal}`);
+        signalled.add(pid);
+        return { status: 'sent' };
+      },
+    });
+
+    assert.deepEqual(signals, ['9102:SIGTERM'], 'only web may be signalled; db and cache stay up under api');
+    assert.deepEqual(result.stopped, ['web']);
+    assert.deepEqual(result.unverified, ['api']);
+    assert.deepEqual([...result.remaining].sort(), ['api', 'cache', 'db']);
+    assert.ok(result.failures.some((f) => f.includes('did not stop service "db"') && f.includes('"api" depends on it')));
+    assert.ok(result.failures.some((f) => f.includes('did not stop service "cache"') && f.includes('"db" depends on it')));
+    const pids = await readPids(projectDir);
+    assert.deepEqual(Object.keys(pids?.services ?? {}).sort(), ['api', 'cache', 'db']);
+  });
   it('leaves other services running when stopping one by name', async () => {
     const keep = await startSleeper();
     const drop = await startSleeper();
@@ -1315,6 +1435,90 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       } catch {
         // Already gone.
       }
+    }
+  });
+});
+
+describe('stopServices in dependency levels with a Docker network', () => {
+  /** A fake docker on PATH that logs every call; `network rm` fails when `networkRmFails`. */
+  async function networkDocker(networkRmFails: boolean): Promise<{ bin: string; log: string }> {
+    const bin = path.join(projectDir, 'fake-bin');
+    const log = path.join(projectDir, 'docker.log');
+    await fs.mkdir(bin, { recursive: true });
+    const container = JSON.stringify({ id: 'sha256:c-api', labels: { 'portler.project': projectDir }, running: true });
+    const network = JSON.stringify({ id: 'net-id', labels: { 'portler.project': projectDir } });
+    const rm = networkRmFails
+      ? `echo "Error response from daemon: error while removing network: network net-x has active endpoints" >&2; exit 1`
+      : 'exit 0';
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> '${log}'`,
+        'case "$1 $2" in',
+        `  "network inspect") printf '%s\\n' '${network}' ;;`,
+        `  "network rm") ${rm} ;;`,
+        `  inspect*) printf '%s\\n' '${container}' ;;`,
+        '  rm*) exit 0 ;;',
+        '  *) echo "Error: No such object" >&2; exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return { bin, log };
+  }
+
+  /** api runs in Docker and is the only entry naming the network; it depends on a local db. */
+  async function mixedStack(): Promise<Record<string, PidServiceInfo>> {
+    const api = await startSleeper();
+    const db = await startSleeper();
+    const services: Record<string, PidServiceInfo> = {
+      api: {
+        ...pidInfo(api.pid!, (await readProcessStartToken(api.pid!)) ?? undefined),
+        dockerContainer: 'c-api',
+        dockerNetwork: 'net-x',
+        dependsOn: ['db'],
+      },
+      db: { ...pidInfo(db.pid!, (await readProcessStartToken(db.pid!)) ?? undefined), dependsOn: [] },
+    };
+    await writePidsFile(services);
+    return services;
+  }
+
+  it('removes the network after the last level, though the entry naming it was pruned in the first', { timeout: 15_000 }, async () => {
+    await mixedStack();
+    const { bin, log } = await networkDocker(false);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual([...result.completed].sort(), ['api', 'db']);
+      assert.deepEqual(result.remaining, []);
+      assert.deepEqual(result.containersRemoved, ['api'], 'the staged stop reports the container its first level removed');
+      assert.equal(await readPids(projectDir), null);
+      const calls = (await fs.readFile(log, 'utf8')).split('\n');
+      assert.ok(calls.includes('network rm net-id'), `the network was removed; docker calls:\n${calls.join('\n')}`);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('keeps the entry that names a network it could not remove', { timeout: 15_000 }, async () => {
+    const services = await mixedStack();
+    const { bin } = await networkDocker(true);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir);
+      assert.equal(result.failures.length, 1);
+      assert.match(result.failures[0]!, /could not remove Docker network "net-x"/);
+      assert.deepEqual(result.completed, ['db']);
+      assert.deepEqual(result.remaining, ['api']);
+      assert.deepEqual((await readPids(projectDir))?.services, { api: services.api });
+    } finally {
+      process.env.PATH = savedPath;
     }
   });
 });
