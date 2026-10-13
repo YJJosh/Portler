@@ -254,7 +254,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
       return { requestedRootNames, stopping, involved };
     };
-    const planFor = (config: PortlerConfig) => {
+    const planFor = (config: PortlerConfig, prod: boolean | undefined) => {
       const { requestedRootNames, stopping, involved } = scope(config);
       const stoppingSet = new Set(stopping);
       const starting = expandAndOrderServices(config, requestedRootNames).filter(
@@ -269,7 +269,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         starting,
         requestedMode: mode,
         modeExplicit: args.positionals.length > requested.length,
-        prod: args.prod,
+        prod,
         setup: args.setup,
         images: args.images,
       });
@@ -292,7 +292,18 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         rawConfig = productionServices(loadedConfig, true, requested);
       }
     }
-    const { requestedRootNames, starting, launch } = planFor(rawConfig);
+    let { requestedRootNames, starting, launch } = planFor(rawConfig, args.prod);
+    // The look above passes over a requested service prod.services has since dropped, and a
+    // stack whose narrowed records are all gone; the records can still replay --prod. That
+    // launch runs on the narrowed stack, so it is planned on it: narrowing refuses a dropped
+    // name the way `restart --prod` does, before anything is stopped, and the plan keeps
+    // production, which the records chose and checked above.
+    if (launch.prod && args.prod !== true && rawConfig === explicitConfig) {
+      rawConfig = productionServices(loadedConfig, true, requested);
+      const replayedProd = launch.replayed.includes('--prod');
+      ({ requestedRootNames, starting, launch } = planFor(rawConfig, true));
+      if (replayedProd) launch.replayed.unshift('--prod');
+    }
     if (launch.replayed.length > 0) {
       process.stdout.write(`[portler] restart keeps the recorded launch: ${launch.replayed.join(', ')}\n`);
     }

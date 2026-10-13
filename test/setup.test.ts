@@ -604,6 +604,69 @@ services:
     }
   });
 
+  it('a restart replaying --prod plans on prod.services as they are now', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const services = `services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+  web:
+    command: node server.mjs
+    port: 4002
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`;
+    await config(`prod:\n  services: [db, api, web]\n${services}`);
+    try {
+      await commandUp(parseArgs(['api', 'web', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
+
+      // api has since been dropped from prod.services: its record still says --prod, and a
+      // plain restart is refused the way `restart api --prod` is, with api still running.
+      await config(`prod:\n  services: [db, web]\n${services}`);
+      const before = await readPids(dir);
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service "api" is not in prod\.services/);
+      assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
+
+      // web is not running and db, which it depends on, has died and been dropped too: the
+      // only record the restart sees is db's, which replays --prod, and web starts in
+      // production without db (the deployment's under --prod).
+      await commandDown(parseArgs(['web'], 'down'));
+      const dbPid = before?.services.db?.pid;
+      assert.ok(dbPid);
+      process.kill(-dbPid, 'SIGKILL');
+      for (let i = 0; i < 100; i++) {
+        try { process.kill(dbPid, 0); } catch { break; }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await config(`prod:\n  services: [web]\n${services}`);
+      await commandRestart(parseArgs(['web'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.web?.prod, true);
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
