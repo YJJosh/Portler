@@ -244,23 +244,32 @@ export async function mountedVolumeSet(
     return { status: 'unknown', reason: container.stderr.trim().split('\n')[0] || `docker inspect exited ${container.code}` };
   }
   // Only the service's `@name` entries follow the volume set, so only the volumes mounted at
-  // their paths count; any other volume, Portler-labelled or not, says nothing about the set.
+  // their paths vote; any other volume, Portler-labelled or not, says nothing about the set.
   const expectedAt = new Map(expected.map((mount) => [mount.destination, mount.name]));
   let volumes: Array<{ volume: string; managedName: string; destination: string }>;
+  let elsewhere: Array<{ volume: string; destination: string }>;
   try {
     const parsed = JSON.parse(container.stdout.trim()) as { labels?: unknown; mounts?: unknown };
     const labels = parsed.labels === null || parsed.labels === undefined ? {} : parseInspectLabels(JSON.stringify(parsed.labels));
     if (ownershipVerdict(labels, projectDir) !== 'owned') return { status: 'unknown', reason: 'the container under its name is not this project\'s' };
     const mounts = Array.isArray(parsed.mounts) ? (parsed.mounts as Array<{ Type?: unknown; Name?: unknown; Destination?: unknown }>) : [];
-    volumes = mounts.flatMap((mount) => {
-      if (mount.Type !== 'volume' || typeof mount.Name !== 'string' || mount.Name === '' || typeof mount.Destination !== 'string') return [];
-      const managedName = expectedAt.get(mount.Destination);
-      return managedName === undefined ? [] : [{ volume: mount.Name, managedName, destination: mount.Destination }];
+    const named = mounts.flatMap((mount) =>
+      mount.Type === 'volume' && typeof mount.Name === 'string' && mount.Name !== '' && typeof mount.Destination === 'string'
+        ? [{ volume: mount.Name, destination: mount.Destination }]
+        : [],
+    );
+    volumes = named.flatMap((mount) => {
+      const managedName = expectedAt.get(mount.destination);
+      return managedName === undefined ? [] : [{ ...mount, managedName }];
     });
+    elsewhere = named.filter((mount) => !expectedAt.has(mount.destination));
   } catch {
     return { status: 'unknown', reason: 'could not parse docker inspect output' };
   }
-  if (volumes.length === 0) return { status: 'none' };
+  if (volumes.length === 0) {
+    const moved = await movedManagedVolume(expected, elsewhere, volumeOwners, run);
+    return moved ?? { status: 'none' };
+  }
 
   const inspected = await run('docker', ['volume', 'inspect', '--format', '{{json .Labels}}', ...volumes.map((entry) => entry.volume)]);
   if (inspected.code !== 0) {
@@ -290,9 +299,49 @@ export async function mountedVolumeSet(
   if (stranger) {
     return { status: 'unknown', reason: `the volume at ${stranger.destination} (${stranger.volume}) is not this project's @${stranger.managedName} volume` };
   }
+  const unmatched = expected.filter((mount) => !volumes.some((entry) => entry.destination === mount.destination));
+  const moved = await movedManagedVolume(unmatched, elsewhere, volumeOwners, run);
+  if (moved) return moved;
   if (sets.size === 0) return { status: 'none' };
   if (sets.size > 1) return { status: 'unknown', reason: 'it mounts volumes from different sets' };
   return { status: 'set', set: [...sets][0]! };
+}
+
+/**
+ * For `@` entries with no volume at their path, look for this project's volume of that name
+ * mounted somewhere else: the config moved the path since the container started, so its data
+ * still came from that volume and the base set is not a safe guess. Returns an unknown answer
+ * naming the volume, or undefined when nothing was moved (or nothing needs checking).
+ */
+async function movedManagedVolume(
+  unmatched: ReadonlyArray<{ name: string; destination: string }>,
+  elsewhere: ReadonlyArray<{ volume: string; destination: string }>,
+  volumeOwners: readonly string[],
+  run: CommandRunner,
+): Promise<MountedVolumeSet | undefined> {
+  if (unmatched.length === 0 || elsewhere.length === 0) return undefined;
+  const inspected = await run('docker', ['volume', 'inspect', '--format', '{{json .Labels}}', ...elsewhere.map((entry) => entry.volume)]);
+  if (inspected.code !== 0) {
+    return { status: 'unknown', reason: inspected.stderr.trim().split('\n')[0] || `docker volume inspect exited ${inspected.code}` };
+  }
+  const lines = inspected.stdout.split('\n').filter((line) => line.trim() !== '');
+  if (lines.length !== elsewhere.length) return { status: 'unknown', reason: 'docker volume inspect returned an unexpected answer' };
+  try {
+    for (const [index, line] of lines.entries()) {
+      const labels = parseInspectLabels(line);
+      const mount = unmatched.find((entry) => entry.name === labels['portler.volume']);
+      if (mount && volumeOwners.includes(labels[PROJECT_LABEL] ?? '')) {
+        const found = elsewhere[index]!;
+        return {
+          status: 'unknown',
+          reason: `this project's @${mount.name} volume (${found.volume}) is mounted at ${found.destination}, not at ${mount.destination} where the config now puts it`,
+        };
+      }
+    }
+  } catch {
+    return { status: 'unknown', reason: 'could not parse docker volume inspect output' };
+  }
+  return undefined;
 }
 
 /** Remove a Docker network only when it carries this project's label (by ID). */
