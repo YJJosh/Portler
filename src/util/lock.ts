@@ -212,6 +212,10 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   const host = os.hostname();
   const token = randomToken();
   let lastOwner: LockOwner | null = null;
+  // One deadline for the whole wait. It only ever moves later: once a dead
+  // owner's lock has been found, the wait it justified holds even after
+  // another waiter takes the lock over and becomes the (live) owner.
+  let deadline = startedAt + options.waitMs;
 
   for (;;) {
     try {
@@ -220,8 +224,6 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
 
       // Someone else owns the existing directory; continue into the wait path.
-      let deadline = startedAt + options.waitMs;
-
       try {
         const stat = await fs.stat(lockDir);
         lastOwner = await readOwner(lockDir);

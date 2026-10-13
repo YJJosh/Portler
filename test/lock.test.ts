@@ -186,6 +186,34 @@ describe('withDirLock', () => {
     assert.ok(Date.now() - started >= options.staleMs - 50, 'the lock is only taken once it is stale');
   });
 
+  it('keeps waiting when another waiter takes over the dead owner\'s lock first', async () => {
+    // Several commands started shortly after a crash all wait for the dead
+    // owner's lock. One of them takes it over; the others now see a live owner
+    // and must keep the deadline the dead lock justified, not fall back to an
+    // already expired waitMs and fail while the winner's short section runs.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const lockDir = path.join(dir, 'contended.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+
+    // Each holder keeps the lock longer than waitMs and several poll intervals,
+    // but well inside the extended deadline (staleMs plus its margin).
+    const options = { staleMs: 600, waitMs: 200, description: 'test' };
+    const ran: string[] = [];
+    const hold = (name: string) =>
+      withDirLock(lockDir, options, async () => {
+        ran.push(name);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      });
+
+    await Promise.all([hold('a'), hold('b')]);
+    assert.deepEqual([...ran].sort(), ['a', 'b']);
+  });
+
   it('still gives up at waitMs on a lock whose owner is alive', async () => {
     const lockDir = path.join(dir, 'busy.lock');
     await fs.mkdir(lockDir);
