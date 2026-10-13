@@ -31,7 +31,7 @@ import { identityVerdict, readProcessStartToken } from './identity.ts';
 import type { IdentityVerdict } from './identity.ts';
 import { removeOwnedContainer, removeOwnedNetwork, warnForeignResource } from './ownership.ts';
 import type { RemovalOutcome } from './ownership.ts';
-import { isPidAlive, isPidRunning, processGroupAlive, processGroupAliveAfterKill, readPids, removePidEntries } from './pids.ts';
+import { isPidAlive, isPidRunning, processGroupAlive, processGroupAliveAfterKill, readPids, removePidEntries, updatePids } from './pids.ts';
 import type { PidServiceInfo } from '../types/index.ts';
 
 const SIGTERM_GRACE_MS = 1_500;
@@ -442,11 +442,137 @@ async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<
   return again === 'gone' || again === 'reused';
 }
 
+/**
+ * Splits the services to stop into levels, dependents first: a service is only
+ * stopped once every selected service that depends on it has been. Edges come
+ * from the `dependsOn` each PID entry recorded when it started, so the order is
+ * the one that run actually used, whatever portler.yml says now. An entry
+ * written before Portler recorded it has no edges and goes with the first level.
+ * Names on a cycle (which config validation should rule out) share the last level.
+ */
+export function stopOrder(services: Record<string, PidServiceInfo>, names: string[]): string[][] {
+  const selected = new Set(names);
+  const dependents = new Map<string, Set<string>>();
+  for (const name of names) dependents.set(name, new Set());
+  for (const name of names) {
+    for (const dep of services[name]?.dependsOn ?? []) {
+      if (dep !== name && selected.has(dep)) dependents.get(dep)!.add(name);
+    }
+  }
+  const levels: string[][] = [];
+  const done = new Set<string>();
+  while (done.size < names.length) {
+    const level = names.filter((name) => !done.has(name) && [...dependents.get(name)!].every((d) => done.has(d)));
+    if (level.length === 0) {
+      levels.push(names.filter((name) => !done.has(name)));
+      break;
+    }
+    for (const name of level) done.add(name);
+    levels.push(level);
+  }
+  return levels;
+}
+
+/**
+ * Stops the selected services (all of them when `serviceNames` is omitted),
+ * dependents before the services they depend on, so a worker or an api that is
+ * draining can still reach its database or queue. Each level is a full stop on
+ * its own (containers, signals, confirmation, pruning) before the next starts.
+ */
 export async function stopServices(
   projectDir: string,
   serviceNames?: string[],
   options: StopOptions = {},
   hooks: StopHooks = {},
+): Promise<StopResult> {
+  const pids = await readPids(projectDir);
+  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  const targetSet = serviceNames ? new Set(serviceNames) : null;
+  const selected = Object.keys(pids.services).filter((name) => !targetSet || targetSet.has(name));
+  const levels = stopOrder(pids.services, selected);
+  if (levels.length <= 1) return stopLevel(projectDir, serviceNames, options, hooks, true);
+
+  // A dependent stopped in an earlier level is pruned with its entry, and that
+  // entry may be the only one naming the project's Docker network. So the levels
+  // leave networks alone, and they are removed once, after every level, from the
+  // entries as they were before the stop.
+  const fullTeardown = selected.length === Object.keys(pids.services).length;
+  const networkTargets: Target[] = selected
+    .filter((name) => pids.services[name]!.dockerNetwork)
+    .map((name) => ({
+      name,
+      info: pids.services[name]!,
+      provenOurs: false,
+      forced: false,
+      verdict: 'gone' as IdentityVerdict,
+      group: 'gone' as GroupState,
+    }));
+
+  const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  // A dependent that a level could not stop is still running, so what it
+  // depends on (directly or through other selected services) stays up too:
+  // stopping it would leave the dependent without it, and a restart would then
+  // abort on that failure with the dependency already down.
+  const heldBy = new Map<string, Set<string>>();
+  const holdDependencies = (dependent: string): void => {
+    const stack = [dependent];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      for (const dep of pids.services[current]?.dependsOn ?? []) {
+        if (dep === current || !selected.includes(dep)) continue;
+        const holders = heldBy.get(dep) ?? new Set<string>();
+        if (holders.has(current)) continue;
+        holders.add(current);
+        heldBy.set(dep, holders);
+        stack.push(dep);
+      }
+    }
+  };
+  for (const level of levels) {
+    const held = level.filter((name) => heldBy.has(name));
+    for (const name of held) {
+      const holders = [...heldBy.get(name)!];
+      total.remaining.push(name);
+      total.failures.push(
+        `did not stop service "${name}": ${holders.map((holder) => `"${holder}"`).join(', ')} ${holders.length === 1 ? 'depends' : 'depend'} on it and could not be stopped`,
+      );
+      // A held service stays up, so what it depends on stays up as well.
+      holdDependencies(name);
+    }
+    const free = level.filter((name) => !heldBy.has(name));
+    if (free.length === 0) continue;
+    const result = await stopLevel(projectDir, free, options, hooks, false);
+    for (const name of result.remaining) holdDependencies(name);
+    total.stopped.push(...result.stopped);
+    total.unverified.push(...result.unverified);
+    total.failures.push(...result.failures);
+    total.completed.push(...result.completed);
+    total.remaining.push(...result.remaining);
+  }
+
+  if (fullTeardown && networkTargets.length > 0) {
+    const networkCleanup = await removeDockerNetworks(projectDir, networkTargets);
+    total.failures.push(...networkCleanup.failures);
+    // A network we failed to remove keeps the entries that name it, as a
+    // single-level stop does: they are the only record of what is left behind.
+    const restore = total.completed.filter((name) => networkCleanup.keep.has(name));
+    if (restore.length > 0) {
+      await updatePids(projectDir, (current) => {
+        for (const name of restore) current.services[name] = pids.services[name]!;
+      });
+      total.completed = total.completed.filter((name) => !restore.includes(name));
+      total.remaining.push(...restore);
+    }
+  }
+  return total;
+}
+
+async function stopLevel(
+  projectDir: string,
+  serviceNames: string[] | undefined,
+  options: StopOptions,
+  hooks: StopHooks,
+  cleanNetworks: boolean,
 ): Promise<StopResult> {
   const probes = resolveHooks(hooks);
   const pids = await readPids(projectDir);
@@ -700,11 +826,11 @@ export async function stopServices(
   }
 
   // Networks last, and only on a full teardown: another service of this project
-  // may still be attached.
+  // may still be attached. A staged stop removes them after its last level.
   const selectedNames = targets.map((target) => target.name);
   const isFullTeardown = targets.length === Object.keys(pids.services).length;
 
-  if (isFullTeardown) {
+  if (cleanNetworks && isFullTeardown) {
     const networkCleanup = await removeDockerNetworks(projectDir, targets);
     for (const name of networkCleanup.keep) keep.add(name);
     failures.push(...networkCleanup.failures);
