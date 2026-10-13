@@ -1,6 +1,8 @@
 import { loadConfig } from '../../config/index.ts';
+import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { readPids, serviceLiveness } from '../../process/index.ts';
 import type { ServiceLiveness } from '../../process/index.ts';
+import type { PidServiceInfo } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { printTable } from '../table.ts';
 import { selectServiceNames } from '../services.ts';
@@ -25,7 +27,7 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   const rows = entries.map(([serviceName, info], index) => {
     return [
       serviceName,
-      `${info.dockerContainer ? 'docker' : 'local'}${info.prod ? ' (prod)' : ''}`,
+      modeLabel(info),
       String(info.pid),
       statusLabel(liveness[index]!),
       info.port !== undefined ? String(info.port) : '-',
@@ -43,6 +45,17 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
     }
   });
   return 0;
+}
+
+/**
+ * How the service runs: `k8s` for an `up k8s` port-forward (recorded as such, or
+ * known by the forward's command in entries written before the run mode was
+ * recorded), otherwise `docker` while it has a container and `local` without.
+ */
+function modeLabel(info: PidServiceInfo): string {
+  const k8s = info.runMode === 'k8s' || info.command.startsWith(`${K8S_FORWARD_COMMAND} `);
+  const mode = k8s ? 'k8s' : info.dockerContainer ? 'docker' : 'local';
+  return `${mode}${info.prod ? ' (prod)' : ''}`;
 }
 
 /**

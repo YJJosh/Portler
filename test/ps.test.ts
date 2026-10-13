@@ -116,6 +116,8 @@ describe('portler ps', () => {
         'docker-running': entry(dead, { dockerContainer: 'c-running' }),
         'docker-exited': entry(dead, { dockerContainer: 'c-exited' }),
         'docker-unreachable': entry(dead, { dockerContainer: 'c-unreachable' }),
+        k8s: entry(live.pid!, { startToken: liveToken, runMode: 'k8s', command: 'portler __k8s-forward (kubectl port-forward service/app 1:2)' }),
+        'k8s-legacy': entry(live.pid!, { startToken: liveToken, command: 'portler __k8s-forward (kubectl port-forward service/app 1:2)' }),
       },
     });
 
@@ -127,11 +129,13 @@ describe('portler ps', () => {
     });
     assert.equal(result.status, 0, result.stderr);
 
-    const status = (service: string) => {
+    const column = (service: string, index: number) => {
       const row = result.stdout.split('\n').find((line) => line.startsWith(`${service} `));
       assert.ok(row, `a row for ${service}`);
-      return row.split(/ {2,}/)[3];
+      return row.split(/ {2,}/)[index];
     };
+    const status = (service: string) => column(service, 3);
+    const mode = (service: string) => column(service, 1);
     assert.equal(status('live'), 'running');
     assert.equal(status('exited'), 'dead (stale)');
     assert.equal(status('recycled'), 'dead (stale)', 'a pid now held by another process is not the service');
@@ -140,6 +144,11 @@ describe('portler ps', () => {
     assert.equal(status('docker-running'), 'running (container)', 'the container runs on after its shell');
     assert.equal(status('docker-exited'), 'dead (stale)');
     assert.equal(status('docker-unreachable'), 'unknown');
+    assert.equal(status('k8s'), 'running');
+    assert.equal(mode('live'), 'local');
+    assert.equal(mode('docker-running'), 'docker');
+    assert.equal(mode('k8s'), 'k8s', 'an up k8s port-forward is not a local process');
+    assert.equal(mode('k8s-legacy'), 'k8s', 'an entry written before runMode was recorded is known by its command');
     assert.match(result.stderr, /could not inspect container "c-unreachable" of docker-unreachable: Cannot connect to the Docker daemon/);
 
     const inspected = (await docker.calls()).map((call) => call.split(' ').at(-1));
