@@ -504,15 +504,17 @@ export async function stopServices(
   // signal rounds and counts as stopped.
   for (const target of settled) stopped.push(target.name);
   // The leader can also exit after the checks above and before this round, with
-  // the `docker run` client still in its group for a moment. Such a refusal is
-  // held back: below, the group gets the same confirm window as the settle wait.
+  // the `docker run` client still in its group for a moment, and its pid can be
+  // reused in the time it takes to look. So every refusal for a service whose
+  // running container Portler just removed is held back, whatever the leader
+  // looks like at this instant; below, its group gets the same confirm window as
+  // the settle wait and it is judged once, afterwards.
   const termRound = await signalRound(
     probes,
     targets.filter((target) => !settled.has(target)),
     'SIGTERM',
     true,
-    (target, verdict) =>
-      containerCleanup.removed.has(target.name) && verdict !== 'reused' && !probes.pidAlive(target.info.pid),
+    (target, verdict) => containerCleanup.removed.has(target.name) && verdict !== 'reused',
   );
   const termed: Target[] = [];
   const lateSettling: Target[] = [];
@@ -553,20 +555,24 @@ export async function stopServices(
     }
   }
 
-  // A held-back refusal: Portler removed this service's running container and
-  // its leader is no longer runnable, so the only thing left is whatever its
-  // group still holds. Wait for that group the same bounded time the settle wait
-  // gives, without signalling anything. Gone: stopped. A leader pid that a
-  // different process now holds is stopped too, for the reason given at the
-  // settle wait: the reuse proves the old group emptied, and a group alive under
-  // that number now is the stranger's. Still alive otherwise: the refusal stands,
-  // with the warning the round held back.
+  // A held-back refusal: Portler removed this service's running container, so
+  // the only thing left is whatever its group still holds. Wait for that group
+  // the same bounded time the settle wait gives, without signalling anything,
+  // then judge it once from a fresh look. A leader pid that a different process
+  // now holds means stopped, for the reason given at the settle wait: the reuse
+  // proves the old group emptied, and a group alive under that number now is the
+  // stranger's. A group that is gone with a leader that is not runnable means
+  // stopped too. Anything else (a live leader Portler cannot identify, or a
+  // group still alive under it): the refusal stands, with the warning the round
+  // held back.
   const lateDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < lateDeadline && lateSettling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
     await sleep(POLL_MS);
   }
   for (const target of lateSettling) {
-    if (probes.groupState(target.info.pid) === 'gone' || (await verifyPid(probes, target.info)) === 'reused') {
+    const verdict = await verifyPid(probes, target.info);
+    const groupGone = probes.groupState(target.info.pid) === 'gone';
+    if (verdict === 'reused' || (groupGone && !probes.pidAlive(target.info.pid))) {
       stopped.push(target.name);
       continue;
     }
