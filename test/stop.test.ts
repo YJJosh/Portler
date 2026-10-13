@@ -547,6 +547,34 @@ describe('stopServices: the SIGKILL round', () => {
     assert.equal(await readPids(projectDir), null, 'a confirmed teardown prunes the entry');
   });
 
+  it('confirms a zombie-only group after its own SIGKILL even when the check before it never settles', async () => {
+    // Under a PID 1 that does not reap, on a busy host, other processes exiting
+    // mid-scan can keep the strict check answering "alive" through the grace
+    // period. After this stop's SIGKILL no member can start another process, so
+    // the after-kill check decides, and the entry is dropped instead of kept.
+    const signals: NodeJS.Signals[] = [];
+    const result = await stopServices(
+      projectDir,
+      undefined,
+      {},
+      stubbornHooks({
+        pidRunning: () => true, // a zombie leader still answers kill(pid, 0)
+        pidAlive: () => false, // ...but it is a zombie
+        groupState: () => 'alive', // the check before SIGKILL never settles
+        groupStateAfterKill: () => 'gone',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      }),
+    );
+
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'], 'the after-kill check is only used once SIGKILL went out');
+    assert.deepEqual(result.stopped, ['api']);
+    assert.deepEqual(result.failures, []);
+    assert.equal(await readPids(projectDir), null, 'the entry is dropped');
+  });
+
   it('counts a group that vanished on its own (ESRCH) as stopped', async () => {
     // The service exited between the identity check and the kill. The signal
     // "failed" with ESRCH, but the thing we wanted gone IS gone.

@@ -210,14 +210,41 @@ export function processGroupAlive(pgid: number): boolean {
 }
 
 function linuxGroupHasLiveMember(pgid: number): boolean {
-  let mounts: string;
-  try {
-    mounts = readFileSync('/proc/self/mounts', 'utf8');
-  } catch {
-    return true;
-  }
-  if (procHidesProcesses(mounts)) return true;
+  if (!procShowsEveryProcess()) return true;
   return !groupHoldsOnlyZombies(() => scanProcGroup(pgid));
+}
+
+/**
+ * Like processGroupAlive, for a group the caller has just sent SIGKILL. The kernel
+ * delivers a group signal to every member, a fork in progress included, so after it no
+ * member can start another process: one scan sees the whole group, and something that
+ * exits while the scan reads it is simply gone. Unlike processGroupAlive this needs no
+ * two matching scans, so other processes starting and exiting on a busy host cannot keep
+ * it from answering. A member SIGKILL has not finished yet still counts as alive.
+ */
+export function processGroupAliveAfterKill(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  if (process.platform !== 'linux') return true;
+  if (!procShowsEveryProcess()) return true;
+  return !groupDeadAfterKill(scanProcGroup(pgid));
+}
+
+/** The decision of processGroupAliveAfterKill for one scan: no member or thread read can run. */
+export function groupDeadAfterKill(scan: GroupScan): boolean {
+  return scan !== 'unknown' && !scan.live;
+}
+
+function procShowsEveryProcess(): boolean {
+  try {
+    return !procHidesProcesses(readFileSync('/proc/self/mounts', 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -326,7 +353,10 @@ function readThreads(taskDir: string): { tids: string[]; live: boolean; settled:
  * before the second listing, so none of them could start one the second listing
  * missed. Ids are not compared across a mid-read exit, since a new process or thread
  * can reuse the id. A live member, an unreadable one, or scans that keep changing or
- * stay unsettled for `attempts` scans keep the answer no.
+ * stay unsettled for `attempts` scans keep the answer no. On a busy host other
+ * processes exiting mid-read can keep every scan unsettled; the answer then stays no
+ * until the caller has sent the group SIGKILL, after which processGroupAliveAfterKill
+ * answers from one scan.
  */
 export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
   let previous = scan();

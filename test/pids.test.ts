@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { groupHoldsOnlyZombies, isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses, scanProcGroup, type GroupScan } from '../src/process/pids.ts';
+import { groupDeadAfterKill, groupHoldsOnlyZombies, isPidAlive, isPidRunning, processGroupAlive, procHidesProcesses, scanProcGroup, type GroupScan } from '../src/process/pids.ts';
 import { startZombieGroup, waitFor } from './zombie-group.ts';
 
 describe('isPidAlive', () => {
@@ -204,6 +204,18 @@ describe('processGroupAlive', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('after SIGKILL answers from one scan, so unrelated exits during it cannot keep the group alive', () => {
+    // Before SIGKILL a mid-read exit anywhere on the host leaves a scan unsettled,
+    // and on a busy host every scan can be. After the group's SIGKILL no member
+    // can start another process, so such a scan is enough.
+    const unsettledZombies: GroupScan = { members: ['100', '100/100'], live: false, settled: false };
+    assert.equal(groupHoldsOnlyZombies(() => unsettledZombies), false, 'before SIGKILL it never matches');
+    assert.equal(groupDeadAfterKill(unsettledZombies), true, 'after SIGKILL it is enough');
+    assert.equal(groupDeadAfterKill({ members: [], live: false, settled: true }), true);
+    assert.equal(groupDeadAfterKill({ members: ['100'], live: true, settled: false }), false, 'a member SIGKILL has not finished yet');
+    assert.equal(groupDeadAfterKill('unknown'), false);
   });
 
   it('counts a group holding only a zombie as gone', { skip: process.platform !== 'linux' }, async () => {
