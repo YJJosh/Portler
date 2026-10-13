@@ -76,4 +76,30 @@ describe('a service whose cwd is missing', () => {
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /cwd "file" resolves to .*\/app\/file, which is not a directory/);
   });
+
+  it('is checked for every selected service before the project setup or any other step runs', async () => {
+    // web has no setup steps of its own, and the project's and api's steps come first:
+    // the missing folder must still be reported before any of them runs.
+    const projectDir = await project(
+      [
+        'setup: node -e "require(\'fs\').writeFileSync(\'project-setup-ran\', \'x\')"',
+        'services:',
+        '  api:',
+        '    command: node -e ""',
+        '    setup: node -e "require(\'fs\').writeFileSync(\'api-setup-ran\', \'x\')"',
+        '  web:',
+        '    cwd: does-not-exist',
+        '    command: node -e ""',
+        '    depends_on: [api]',
+        '',
+      ].join('\n'),
+    );
+    for (const args of [['setup'], ['up', '-d']]) {
+      const result = portler(projectDir, ...args);
+      assert.equal(result.status, 1, `${args.join(' ')}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, /service "web": cwd "does-not-exist" resolves to .*\/app\/does-not-exist, which does not exist/, args.join(' '));
+      await assert.rejects(fs.access(path.join(projectDir, 'project-setup-ran')), args.join(' '));
+      await assert.rejects(fs.access(path.join(projectDir, 'api-setup-ran')), args.join(' '));
+    }
+  });
 });
