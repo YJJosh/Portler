@@ -5,6 +5,7 @@ import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
+import { shellQuote } from '../../process/docker.ts';
 import {
   isPidAlive,
   liveServiceNames,
@@ -170,6 +171,34 @@ export interface StartOptions {
    * StartSetChangedError before anything is started, so the caller can plan again.
    */
   expectStart?: readonly string[];
+  /**
+   * up: builds the `restart` a refusal over already-running services suggests, from the
+   * services it should start, so the suggestion carries this invocation's options.
+   */
+  restartHint?: (serviceNames: string[]) => string;
+}
+
+/**
+ * The `restart` that does what a refused `up` asked for: it starts the named services and
+ * keeps what is running. It carries this invocation's mode, config file and launch options,
+ * because a service with no PID entry has nothing for restart to replay: without them a
+ * pinned image or another portler.yml would quietly be lost.
+ */
+export function restartSuggestion(
+  args: Pick<ParsedArgs, 'file' | 'prod' | 'setup' | 'images' | 'volumeSet'>,
+  mode: RunMode,
+  serviceNames: readonly string[],
+): string {
+  const parts = ['portler', 'restart'];
+  if (mode === 'docker') parts.push('docker');
+  parts.push(...serviceNames.map(shellQuote));
+  if (args.file) parts.push('--file', shellQuote(args.file));
+  if (args.prod) parts.push('--prod');
+  if (args.setup === true) parts.push('--setup');
+  if (args.setup === false) parts.push('--no-setup');
+  for (const [service, image] of Object.entries(args.images ?? {})) parts.push('--image', shellQuote(`${service}=${image}`));
+  if (args.volumeSet !== undefined) parts.push('--volume-set', shellQuote(args.volumeSet));
+  return parts.join(' ');
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -312,8 +341,17 @@ export async function startPhase(
     selectedNames = orderedNames.filter((serviceName) => !runningNames.has(serviceName));
   } else {
     // `up worker` with redis running usually means "bring worker back": restart does that and
-    // keeps the running dependencies, so it is the first thing the refusal suggests.
-    ensureNoOverlap(runningNames, orderedNames, ['portler restart', ...requestedRootNames].join(' '));
+    // keeps the running dependencies, so it is the first thing the refusal suggests. It names
+    // only the requested services that are not running (naming a running one would restart
+    // it), unless every one of them runs, and it runs them in the background.
+    const notRunning = requestedRootNames.filter((serviceName) => !runningNames.has(serviceName));
+    const restartNames = notRunning.length > 0 ? notRunning : requestedRootNames;
+    ensureNoOverlap(
+      runningNames,
+      orderedNames,
+      options.restartHint ? options.restartHint(restartNames) : ['portler restart', ...restartNames].join(' '),
+      options.detach ? undefined : 'restart starts them in the background',
+    );
     selectedNames = orderedNames;
   }
   if (options.expectStart !== undefined) {
@@ -726,5 +764,11 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
 
   const rawConfig = productionServices(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod, requested);
   const requestedRootNames = selectServiceNames(rawConfig, requested);
-  return startServices(rawConfig, mode, requestedRootNames, { detach: args.detach, prod: args.prod, setup: args.setup, images: args.images });
+  return startServices(rawConfig, mode, requestedRootNames, {
+    detach: args.detach,
+    prod: args.prod,
+    setup: args.setup,
+    images: args.images,
+    restartHint: (serviceNames) => restartSuggestion(args, mode, serviceNames),
+  });
 }

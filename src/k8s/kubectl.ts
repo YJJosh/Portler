@@ -398,14 +398,15 @@ export function deleteResourceKinds(deleteVolumes: boolean): string {
  * any PersistentVolumeClaims in place, so `portler down k8s && portler up k8s`
  * keeps a database's data. `deleteVolumes` opts into the destructive path
  * (`down k8s --volumes`), which for a full teardown deletes the whole
- * project-owned namespace.
+ * project-owned namespace. Returns false when the namespace does not exist, so
+ * there was nothing to delete.
  */
 export async function deleteK8sResources(
   cluster: ClusterInfo,
   config: PortlerConfig,
   options: DeleteK8sOptions = {},
   run: CommandRunner = runCommand,
-): Promise<void> {
+): Promise<boolean> {
   const { serviceNames, deleteVolumes = false, awaitNamespace = false } = options;
   const namespace = config.k8sNamespace;
 
@@ -414,7 +415,7 @@ export async function deleteK8sResources(
   // would go on to release the ports and forget the state.
   const read = await readNamespace(cluster, namespace, run);
   if (read.status === 'error') throw namespaceReadError(namespace, read.message);
-  if (read.status === 'absent') return;
+  if (read.status === 'absent') return false;
 
   const ownership = namespaceOwnership(read.labels, config);
   if (ownership === 'foreign') throw foreignNamespaceError(namespace);
@@ -440,7 +441,7 @@ export async function deleteK8sResources(
         );
       }
     }
-    return;
+    return true;
   }
 
   const deleted = await run(
@@ -471,6 +472,7 @@ export async function deleteK8sResources(
   if (!deleteVolumes) {
     process.stdout.write('[portler] kept PersistentVolumeClaims; pass --volumes to delete stored data too\n');
   }
+  return true;
 }
 
 /**

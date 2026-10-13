@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { upSuggestion } from '../src/cli/commands/down.ts';
+import { restartSuggestion } from '../src/cli/commands/up.ts';
 import { ensureNoOverlap } from '../src/cli/services.ts';
 import { assertRequiredEnv } from '../src/env/index.ts';
+import { readProcessStartToken, writePids } from '../src/process/index.ts';
+import type { PidServiceInfo } from '../src/types/index.ts';
+import { projectHash } from '../src/util/hash.ts';
 
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 const projects: string[] = [];
@@ -29,7 +34,11 @@ async function project(yaml: string, files: Record<string, string> = {}): Promis
 }
 
 function portler(projectDir: string, ...args: string[]) {
-  const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_GLOBAL_DIR: path.join(path.dirname(projectDir), 'global') };
+  return portlerWith(projectDir, {}, ...args);
+}
+
+function portlerWith(projectDir: string, extraEnv: NodeJS.ProcessEnv, ...args: string[]) {
+  const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_GLOBAL_DIR: path.join(path.dirname(projectDir), 'global'), ...extraEnv };
   delete env.PORT;
   delete env.PUBLIC_URL;
   delete env.ADMIN_TOKEN;
@@ -70,6 +79,58 @@ describe('up for a service that is partly running', () => {
     // Without an alternative (Kubernetes mode, which restart does not cover) only down is offered.
     assert.throws(() => ensureNoOverlap(new Set(['redis']), ['redis'], undefined), /^Error: already running: redis\. Use "portler down redis" first\.$/);
   });
+
+  it('builds the suggested restart from the refused invocation', () => {
+    assert.equal(restartSuggestion({}, 'local', ['worker']), 'portler restart worker');
+    // A service with no PID entry has nothing for restart to replay, so the pin, the mode,
+    // the config file and the volume set must travel in the command itself.
+    assert.equal(
+      restartSuggestion(
+        { file: 'deploy/portler.yml', prod: true, setup: false, images: { worker: 'registry/worker@sha256:abc' }, volumeSet: 'feat x' },
+        'docker',
+        ['worker'],
+      ),
+      "portler restart docker worker --file deploy/portler.yml --prod --no-setup --image worker=registry/worker@sha256:abc --volume-set 'feat x'",
+    );
+  });
+
+  it('names only what is not running, keeps the options, and the suggestion works', async () => {
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    command: node server.js',
+        '    port: 4200',
+        '    port_env: PORT',
+        '  api:',
+        '    command: node server.js',
+        '    port: 4201',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
+
+    // Foreground: refused before anything starts, and told restart runs in the background.
+    const refused = portler(projectDir, 'up', '--file', 'portler.yml', '--no-setup', 'api');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(
+      refused.stderr,
+      /use "portler restart api --file portler\.yml --no-setup" \(restart starts them in the background\); to start over, use "portler down db" first\./,
+    );
+
+    // Everything requested: the suggestion names api only, since restarting db would stop it.
+    const all = portler(projectDir, 'up', '-d');
+    assert.equal(all.status, 1, all.stdout + all.stderr);
+    assert.match(all.stderr, /use "portler restart api"; to start over/);
+
+    // Run exactly what the refusal suggested.
+    const restart = portler(projectDir, 'restart', 'api', '--file', 'portler.yml', '--no-setup');
+    assert.equal(restart.status, 0, restart.stdout + restart.stderr);
+    assert.match(portler(projectDir, 'ps').stdout, /^api\s.*running/m);
+  });
 });
 
 describe('down for one service', () => {
@@ -102,5 +163,120 @@ describe('down for one service', () => {
     const downApi = portler(projectDir, 'down', 'api');
     assert.equal(downApi.status, 0, downApi.stdout + downApi.stderr);
     assert.doesNotMatch(downApi.stderr, /warning/);
+  });
+});
+
+function entry(fields: Partial<PidServiceInfo>): PidServiceInfo {
+  return { pid: 1, command: 'x', cwd: '/', startedAt: new Date(0).toISOString(), ...fields };
+}
+
+describe('the up a dependents warning suggests', () => {
+  it('starts the services again the way they were started', () => {
+    assert.equal(upSuggestion(['db'], [entry({ runMode: 'local' })], 'local', undefined), 'portler up -d db');
+    assert.equal(
+      upSuggestion(['db'], [entry({ runMode: 'docker', prod: true, setup: false, image: 'registry/pg@sha256:abc' })], 'local', 'deploy/portler.yml'),
+      'portler up docker -d db --file deploy/portler.yml --prod --no-setup --image db=registry/pg@sha256:abc',
+    );
+    // An older entry records no mode: the mode down ran in stands in for it.
+    assert.equal(upSuggestion(['db'], [entry({})], 'docker', undefined), 'portler up docker -d db');
+    // down k8s deletes from the cluster, so the way back is up k8s, record or not.
+    assert.equal(upSuggestion(['db'], [undefined], 'k8s', undefined), 'portler up k8s -d db');
+  });
+
+  it('offers no single command for services started in different ways', () => {
+    assert.equal(upSuggestion(['db', 'cache'], [entry({ runMode: 'docker' }), entry({ runMode: 'local' })], 'local', undefined), undefined);
+    assert.equal(upSuggestion(['db', 'cache'], [entry({ prod: true }), entry({})], 'local', undefined), undefined);
+  });
+});
+
+describe('down warns from what is running, not from an edited portler.yml', () => {
+  it('uses the dependencies each running service recorded when it started', async () => {
+    const service = (name: string, port: number, deps?: string) =>
+      [`  ${name}:`, '    command: node server.js', `    port: ${port}`, '    port_env: PORT', ...(deps ? [`    depends_on: [${deps}]`] : [])];
+    const projectDir = await project(
+      ['services:', ...service('db', 4300), ...service('api', 4301, 'db'), ...service('other', 4302), ''].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d').status, 0);
+
+    // The file now says the opposite of what is running.
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', ...service('db', 4300), ...service('api', 4301), ...service('other', 4302, 'db'), ''].join('\n'),
+    );
+    const down = portler(projectDir, 'down', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up -d db"\./);
+    assert.doesNotMatch(down.stderr, /other/);
+
+    // Run exactly what the warning suggested.
+    const back = portler(projectDir, 'up', '-d', 'db');
+    assert.equal(back.status, 0, back.stdout + back.stderr);
+  });
+
+  it('warns when down k8s deletes a service that has no port-forward', async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as kubectl');
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    image: postgres:16-alpine',
+        '    k8s: true',
+        '  api:',
+        '    image: example/api:latest',
+        '    port: 8080',
+        '    k8s: true',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+    );
+    const bin = path.join(path.dirname(projectDir), 'bin');
+    await fs.mkdir(bin);
+    const labels = JSON.stringify({ metadata: { labels: { 'app.kubernetes.io/managed-by': 'portler', 'portler.dev/project': projectHash(projectDir) } } });
+    await fs.writeFile(
+      path.join(bin, 'kubectl'),
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  "config current-context") echo docker-desktop ;;',
+        '  "config view"*) echo https://127.0.0.1:6443 ;;',
+        `  *"get namespace"*) printf '%s\\n' '${labels}' ;;`,
+        'esac',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    // api's port-forward is running (a stand-in process); db has no port, so no forward.
+    const forward = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    t.after(() => {
+      try {
+        process.kill(forward.pid!, 'SIGKILL');
+      } catch {}
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt: new Date().toISOString(),
+      services: {
+        api: {
+          pid: forward.pid!,
+          command: 'portler __k8s-forward (kubectl port-forward service/api 55001:8080)',
+          cwd: projectDir,
+          port: 55001,
+          startToken: (await readProcessStartToken(forward.pid!)) ?? undefined,
+          startedAt: new Date().toISOString(),
+          runMode: 'k8s',
+        },
+      },
+    });
+
+    const down = portlerWith(projectDir, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` }, 'down', 'k8s', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    assert.match(down.stdout, /deleted Kubernetes resources for: db/);
+    assert.doesNotMatch(down.stdout, /no running services found/);
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up k8s -d db"\./);
   });
 });

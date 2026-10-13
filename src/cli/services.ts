@@ -35,14 +35,19 @@ export function validateDockerMode(config: PortlerConfig, selectedNames: string[
  * command that does what the user most likely wanted instead (restart for local and
  * Docker stacks), offered before the `down` that clears the way for a fresh `up`.
  */
-export function ensureNoOverlap(runningNames: ReadonlySet<string>, selectedNames: string[], alternative?: string): void {
+export function ensureNoOverlap(
+  runningNames: ReadonlySet<string>,
+  selectedNames: string[],
+  alternative?: string,
+  alternativeNote?: string,
+): void {
   const running = selectedNames.filter((serviceName) => runningNames.has(serviceName));
 
   if (running.length > 0) {
     const down = `"portler down ${running.join(' ')}"`;
     throw new Error(
       alternative
-        ? `already running: ${running.join(', ')}. To (re)start services next to what is running, use "${alternative}"; to start over, use ${down} first.`
+        ? `already running: ${running.join(', ')}. To (re)start services next to what is running, use "${alternative}"${alternativeNote ? ` (${alternativeNote})` : ''}; to start over, use ${down} first.`
         : `already running: ${running.join(', ')}. Use ${down} first.`,
     );
   }
