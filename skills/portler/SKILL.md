@@ -36,9 +36,9 @@ portler volumes list|fork|remove          # manage Portler-managed "@name" Docke
 
 ## portler.yml essentials
 
-Per service: `command` + `cwd` (local) or `image`/`build` (Docker), `port`, `port_env`, `env`, `depends_on` (start order), `healthcheck` (`tcp`/`http`/`command`), `volumes` (`@name:` prefix = Portler-managed, project-scoped), `setup`. Top level: `use_env: .env` (listed files must exist or `up` fails), `setup`, an optional `proxy:` block (`port: auto`, `routes: {/api: backend, /: frontend}`, longest prefix wins) serving the whole stack behind one URL, and `prod` overrides used with `--prod`. `docker` and `k8s` are reserved service names; so is `proxy` when a `proxy:` block exists.
+Per service: `command` + `cwd` (local) or `image`/`build` (Docker), `port`, `port_env`, `env`, `depends_on` (start order), `healthcheck` (`tcp`/`http`/`command`), `volumes` (`@name:` prefix = Portler-managed, project-scoped), `setup`. Top level: `use_env: .env` (a missing listed file fails a development `up`; `--prod` allows it, so a platform can supply the env), `setup`, an optional `proxy:` block (`port: auto`, `routes: {/api: backend, /: frontend}`, longest prefix wins) serving the whole stack behind one URL, and `prod` overrides used with `--prod`. `docker` and `k8s` are reserved service names; so is `proxy` when a `proxy:` block exists.
 
-`setup` steps run on `up` before their service starts. A plain command runs once per checkout (again when the command changes), `{run: npm install, if_missing: node_modules}` only while that path is missing, `{run: ..., watch: [prisma/schema.prisma]}` again when a listed file changes, and `{run: ..., always: true}` on every `up`. `up --no-setup` skips them.
+`setup` steps run on `up` before their service starts. A plain command runs once per checkout and mode (again when the command changes; local and Docker, dev and `--prod` each keep their own record, so switching mode runs it again), `{run: npm install, if_missing: node_modules}` only while that path is missing, `{run: ..., watch: [prisma/schema.prisma]}` again when a listed file changes, and `{run: ..., always: true}` on every `up`. `portler setup` and `up --setup` rerun every plain step regardless; `up --no-setup` skips them. Keep setup commands idempotent, such as migrations that can run twice.
 
 ## Database volumes: prefer isolated forks
 
