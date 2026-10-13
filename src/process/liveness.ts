@@ -1,4 +1,4 @@
-import type { PidServiceInfo } from '../types/index.ts';
+import type { PidServiceInfo, PidsFile } from '../types/index.ts';
 import { runCommand } from '../util/exec.ts';
 import type { CommandRunner } from '../util/exec.ts';
 import { identityVerdict, readProcessStartToken } from './identity.ts';
@@ -34,4 +34,29 @@ export async function serviceLiveness(projectDir: string, info: PidServiceInfo, 
   if (container.status === 'running') return { status: 'running', via: 'container' };
   if (container.status === 'error') return { status: 'unknown', message: container.message };
   return { status: 'dead' };
+}
+
+/**
+ * The services in pids.json that are running by serviceLiveness: by pid, or by the
+ * Docker container a gone `docker run` shell left running. One whose container cannot
+ * be inspected counts as running too: starting it again would remove that container if
+ * it is up. `onUnknown` hears about each of those.
+ */
+export async function liveServiceNames(
+  projectDir: string,
+  pids: PidsFile | null,
+  onUnknown?: (serviceName: string, message: string) => void,
+  run: CommandRunner = runCommand,
+): Promise<string[]> {
+  if (!pids) return [];
+  const entries = Object.entries(pids.services);
+  const liveness = await Promise.all(entries.map(([, info]) => serviceLiveness(projectDir, info, run)));
+  const names: string[] = [];
+  entries.forEach(([serviceName], index) => {
+    const result = liveness[index];
+    if (result.status === 'dead') return;
+    if (result.status === 'unknown') onUnknown?.(serviceName, result.message);
+    names.push(serviceName);
+  });
+  return names;
 }

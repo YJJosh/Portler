@@ -1,7 +1,7 @@
 export { identityVerdict, maySignal, readProcessStartToken } from './identity.ts';
 export type { IdentityVerdict } from './identity.ts';
 export { createLinePrinter, logsDir, prefixStream, serviceLogPath } from './logs.ts';
-export { serviceLiveness } from './liveness.ts';
+export { liveServiceNames, serviceLiveness } from './liveness.ts';
 export type { ServiceLiveness } from './liveness.ts';
 export {
   dockerLabelArgs,

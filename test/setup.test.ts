@@ -12,7 +12,7 @@ import { commandDown } from '../src/cli/commands/down.ts';
 import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
-import { readPids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
 import { applyProduction } from '../src/config/production.ts';
 import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
@@ -838,6 +838,96 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     );
     assert.equal((await readPids(dir))?.services.db, undefined, 'nothing was started');
     await assert.rejects(fs.access(path.join(dir, 'steps')), 'no service ran');
+  });
+
+  it('startPhase leaves alone a dependency whose container runs on after its docker run shell', async () => {
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    image: postgres:16-alpine
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    // A docker on PATH that reports c-db running under this project's label: the shell
+    // `docker run db` ran in is gone, the container is not.
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // Planning nothing makes startPhase report what it would start, before it starts anything.
+      await assert.rejects(
+        startPhase(loaded, 'docker', ['api'], { detach: true, skipRunning: true, expectStart: [] }),
+        (error: unknown) => error instanceof StartSetChangedError && /planned none, found api\)/.test(error.message),
+      );
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+  });
+
+  it('startPhase does not call a kept dependency dead while its container runs on', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // db is kept (its container runs), api starts; the check that a kept dependency is
+      // still alive after api's level must ask about the container, not the gone shell.
+      await startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] });
+      const after = await readPids(loaded.projectDir);
+      assert.deepEqual(after?.services.db, dbEntry, 'db was not touched');
+      assert.ok(after?.services.api, 'api was started');
+    } finally {
+      process.env.PATH = savedPath;
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
   });
 
   it('a restart without names replays the mode of recorded services that left the config', async () => {

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { readProcessStartToken } from '../src/process/identity.ts';
+import { liveServiceNames } from '../src/process/liveness.ts';
 import { isPidAlive, isPidRunning, writePids } from '../src/process/pids.ts';
 import type { PidServiceInfo } from '../src/types/index.ts';
 
@@ -143,5 +144,39 @@ describe('portler ps', () => {
 
     const inspected = (await docker.calls()).map((call) => call.split(' ').at(-1));
     assert.deepEqual(inspected.sort(), ['c-exited', 'c-running', 'c-unreachable'], 'only the entries whose pid is gone are inspected');
+  });
+
+  it('liveServiceNames counts a container that outlives its shell, and one it cannot inspect', { timeout: 15_000 }, async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-live-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const live = sleeper();
+    const liveToken = (await readProcessStartToken(live.pid!)) ?? undefined;
+    const dead = await exitedPid();
+    const entry = (pid: number, extra: Partial<PidServiceInfo> = {}): PidServiceInfo => ({ pid, command: 'x', cwd: dir, startedAt: new Date().toISOString(), ...extra });
+    const pids = {
+      version: 1 as const,
+      project: dir,
+      startedAt: new Date().toISOString(),
+      services: {
+        live: entry(live.pid!, { startToken: liveToken }),
+        exited: entry(dead),
+        'docker-running': entry(dead, { dockerContainer: 'c-running' }),
+        'docker-exited': entry(dead, { dockerContainer: 'c-exited' }),
+        'docker-unreachable': entry(dead, { dockerContainer: 'c-unreachable' }),
+      },
+    };
+    const docker = await fakeDocker(dir, dir);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${docker.bin}${path.delimiter}${savedPath ?? ''}`;
+    const unknown: string[] = [];
+    try {
+      const names = await liveServiceNames(dir, pids, (serviceName, message) => unknown.push(`${serviceName}: ${message}`));
+      assert.deepEqual(names.sort(), ['docker-running', 'docker-unreachable', 'live']);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.equal(unknown.length, 1);
+    assert.match(unknown[0], /^docker-unreachable: .*Cannot connect to the Docker daemon/);
+    assert.deepEqual(await liveServiceNames(dir, null), []);
   });
 });

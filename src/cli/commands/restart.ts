@@ -3,7 +3,7 @@ import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
-import { readPids, runningServices, stopServices } from '../../process/index.ts';
+import { liveServiceNames, readPids, stopServices } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
@@ -242,7 +242,9 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // launch is decided from that, and from the flags, before anything is stopped.
     const before = await readPids(loadedConfig.projectDir);
     const running = before?.services ?? {};
-    const runningNow = new Set(runningServices(before));
+    // Running as startPhase will see it (liveServiceNames): a dependency whose container runs
+    // on after its `docker run` shell is gone is running and left alone, not started again.
+    const runningNow = new Set(await liveServiceNames(loadedConfig.projectDir, before));
     const scope = (config: PortlerConfig) => {
       const requestedRootNames = selectServiceNames(config, requested);
       // A restart without names stops every recorded service, including ones no longer in
@@ -372,7 +374,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     const stoppedText = result.stopped.length > 0 ? list(result.stopped) : 'the requested services';
     const stoppedVerb = result.stopped.length === 1 ? 'is' : 'are';
     for (let attempt = 1; ; attempt += 1) {
-      const liveNow = new Set(runningServices(await readPids(rawConfig.projectDir)));
+      const liveNow = new Set(await liveServiceNames(rawConfig.projectDir, await readPids(rawConfig.projectDir)));
       const startingNow = startingFor(rawConfig, liveNow).starting;
       const planned = new Set(starting);
       const exited = startingNow.filter((name) => !planned.has(name));

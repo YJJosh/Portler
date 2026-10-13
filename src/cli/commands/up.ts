@@ -6,10 +6,9 @@ import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resol
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
-  isPidAlive,
+  liveServiceNames,
   pidInfoFor,
   readPids,
-  runningServices,
   serviceLogPath,
   serviceLiveness,
   spawnService,
@@ -293,7 +292,14 @@ export async function startPhase(
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
   const images = options.images ?? {};
   const pidsBefore = await readPids(config.projectDir);
-  const runningNames = new Set(runningServices(pidsBefore));
+  // Running by serviceLiveness, as `ps` reports it: a Docker service whose `docker run`
+  // shell is gone but whose container runs on is running, and starting it would remove
+  // that container. One that cannot be inspected is taken as running too.
+  const runningNames = new Set(
+    await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
+      process.stderr.write(`[portler] warning: could not inspect ${serviceName}'s container (${message}); treating it as running\n`);
+    }),
+  );
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -499,19 +505,24 @@ export async function startPhase(
     // would notice and `up` would report a started stack with a dead member.
     // The proxy's own exit is reported by its readiness wait.
     // Dependencies this run leaves running (restart's skipRunning) are not in
-    // `children`, so their recorded pids are rechecked instead. For a Docker
-    // service that pid is the `docker run` client, which exits with the container.
-    // A zombie counts as dead: under a PID 1 that does not reap orphans, an
-    // exited leader keeps its pid, and kill(pid, 0) alone would call it alive.
+    // `children`, so their recorded entries are rechecked instead, by the same
+    // measure that counted them as running: serviceLiveness. Their pid alone is not
+    // enough: a Docker service's container can outlive the `docker run` shell whose
+    // pid was recorded, and a zombie (under a PID 1 that does not reap orphans)
+    // keeps a pid that kill(pid, 0) would call alive. One whose container cannot be
+    // inspected is not reported as dead: this run could not confirm it either way.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
-    const assertMembersAlive = (): void => {
+    const assertMembersAlive = async (): Promise<void> => {
       const spawnedDied = [...children]
         .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
         .map(([name]) => name);
-      const retainedDied = retained.filter((name) => {
-        const pid = pidsBefore?.services[name]?.pid;
-        return pid !== undefined && !isPidAlive(pid);
-      });
+      const retainedLiveness = await Promise.all(
+        retained.map(async (name) => {
+          const info = pidsBefore?.services[name];
+          return info !== undefined && (await serviceLiveness(config.projectDir, info)).status === 'dead';
+        }),
+      );
+      const retainedDied = retained.filter((_, index) => retainedLiveness[index]);
       const died = [...spawnedDied, ...retainedDied];
       if (died.length === 0) return;
       // A retained service was started by an earlier run; its log file is the
@@ -574,7 +585,7 @@ export async function startPhase(
       await Promise.all(waits);
       // Catch a member of an earlier level that died while this one was
       // starting, before the next level, or the proxy, builds on it.
-      assertMembersAlive();
+      await assertMembersAlive();
     }
 
     // The proxy starts last so every routed service already listens; it
@@ -604,7 +615,7 @@ export async function startPhase(
       );
       // The proxy's wait took time too; a service that died meanwhile would
       // otherwise sit behind a printed project URL.
-      assertMembersAlive();
+      await assertMembersAlive();
     }
   } catch (error) {
     process.stderr.write('[portler] startup failed — stopping already-started services and releasing allocated ports\n');
