@@ -78,16 +78,20 @@ path in the PR description.
   When in doubt, treat it as not ours and still running. Only `down --force`
   and `clean --force` (both through the `force` option of `stopServices`)
   signal an unverifiable process, and never one whose pid was provably reused.
-- Only touch existing Docker containers, networks and volumes, or Kubernetes
-  resources, labelled as this project's (`src/process/ownership.ts`,
-  `namespaceOwnership` in `src/k8s/kubectl.ts`), and re-check ownership right
+- Docker: only touch existing containers, networks and volumes labelled as
+  this project's (`src/process/ownership.ts`), and re-check ownership right
   before a destructive call. Removing something owned can remove unlabelled
   things with it, on purpose: a container's own anonymous volumes
   (`docker rm -f -v`, so an image `VOLUME` does not leak;
-  `test/ownership.test.ts`), everything inside the project's own namespace on
-  a full `down k8s --volumes` (`deleteK8sResources`), and the short-lived
-  `--rm` copy container that `volumes fork` starts (`forkVolume` in
-  `src/volumes/manager.ts`).
+  `test/ownership.test.ts`) and the short-lived `--rm` copy container that
+  `volumes fork` starts (`forkVolume` in `src/volumes/manager.ts`).
+- Kubernetes: ownership is decided per namespace (`namespaceOwnership` in
+  `src/k8s/kubectl.ts`). `ensureNamespace` creates it with `kubectl create`,
+  never `apply`, and refuses a namespace that is not this project's. Inside an
+  owned namespace, `up k8s` applies its manifests and takes over same-named
+  objects. Deletes select by the project's labels (`deleteSelector`), except a
+  full `down k8s --volumes`, which deletes the whole namespace and everything
+  in it (`deleteK8sResources`).
 - `down` never deletes named volumes. Only `portler volumes remove` deletes
   existing ones, and only those this project owns. The one other deletion is
   `volumes fork` rolling back the target it just created when the copy fails,
