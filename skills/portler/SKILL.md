@@ -30,7 +30,7 @@ portler volumes list|fork|remove          # manage Portler-managed "@name" Docke
 - Never hardcode ports: they differ between checkouts and runs. Read them from `portler ps` or `portler env <service>`, or use the `PORTLER_*` variables.
 - `up` refuses services that are already running. To pick up a change in a running service, use `portler restart <service>`.
 - When something fails, check `portler ps` (`dead (stale)` means the process exited), then `portler logs <service>`. Fix the cause and `restart`.
-- Stop what you started with `portler down` when you are finished, and leave services the user started alone. `portler down <service>` warns when running services depend on it.
+- Stop only what you started. Before starting anything, note what `portler ps` already shows; when finished, run `portler down <service...>` for the services you started (`portler down k8s <service...>` for ones deployed with `up k8s`). A bare `portler down` stops every service in the checkout, so use it only when nothing was running before you. `portler down <service>` warns when running services depend on it.
 - Do not pass `--force` to `down` or `clean` unless the user asks: `down --force` can signal processes whose identity Portler cannot verify, and `clean --force` stops running services first.
 - `.portler/` holds runtime state and belongs in `.gitignore`.
 
@@ -73,7 +73,7 @@ portler down
 
 `--volume-set` (or `PORTLER_VOLUME_SET`) selects variants of **all managed `@name` Docker volumes**; it does not clone them automatically. Fork each required data volume into the same set before starting the stack, otherwise missing variants start empty. Stop the current stack before switching sets, and verify the selected set with `portler volumes list`. A fork target must be new; use a fresh name rather than deleting an existing dataset blindly.
 
-This does not isolate bind mounts, unmanaged Docker volumes, Kubernetes PVCs, or external databases. Use equivalent per-task copies/databases for those, and verify the app's connection settings actually target the isolated database. When finished, stop services with `portler down`; remove only disposable forks you created and no longer need (e.g. `portler volumes remove postgres-data--repro-issue-123`). Preserve the baseline, reusable scenarios, and user-owned data; do not use force or broad volume pruning as routine cleanup.
+This does not isolate bind mounts, unmanaged Docker volumes, Kubernetes PVCs, or external databases. Use equivalent per-task copies/databases for those, and verify the app's connection settings actually target the isolated database. When finished, stop the services you started (see *Working in a checkout*); remove only disposable forks you created and no longer need (e.g. `portler volumes remove postgres-data--repro-issue-123`). Preserve the baseline, reusable scenarios, and user-owned data; do not use force or broad volume pruning as routine cleanup.
 
 ## Documentation
 
