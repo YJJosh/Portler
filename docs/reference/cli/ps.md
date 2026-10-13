@@ -8,6 +8,8 @@ portler ps [service...]
 
 ## Behavior
 
+With service names, filters the rows to those services. When the project has a top-level `proxy:` block, `proxy` is also accepted as a selection; otherwise it is an unknown service.
+
 Prints one row per running service with:
 
 - **mode** — `local`, `docker`, or `k8s` for a port-forward started by `up k8s`, with `(prod)` when the service was started with `--prod`

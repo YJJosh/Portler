@@ -59,6 +59,9 @@ identity cannot be proven (legacy entries, unreadable tokens) — never one that
 provably belongs to someone else. Inspect the pid first with
 "ps -o pid,ppid,lstart,command -p <pid>".
 
+With a "proxy:" block in portler.yml, "ps proxy" and "down proxy" select just
+the reverse proxy.
+
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 
 Documentation: https://yjjosh.github.io/Portler

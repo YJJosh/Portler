@@ -9,28 +9,8 @@ import type { StopResult } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { expandAndOrderServices, parseRunMode, servicesWithPorts } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, selectServiceTargets, servicesWithPorts } from '../services.ts';
 import { legacyMountCandidates, restartAccepts, type RestartRequest } from './restart.ts';
-
-/**
- * Like selectServiceNames, but also accepts "proxy" as a target when a proxy
- * block exists (the proxy is not a service, yet `portler down proxy` should
- * stop it).
- */
-function selectDownTargets(config: PortlerConfig, requested: string[]): string[] {
-  const names: string[] = [];
-
-  for (const name of requested) {
-    if (name === PROXY_SERVICE_NAME && config.proxy) {
-      names.push(name);
-      continue;
-    }
-    if (!config.services[name]) throw new Error(`unknown service "${name}"`);
-    names.push(name);
-  }
-
-  return names;
-}
 
 /** The selected targets that hold a port reservation worth releasing. */
 function releaseTargets(config: PortlerConfig, selectedNames: string[]): string[] {
@@ -304,7 +284,7 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     throw new Error('--volumes only applies to "portler down k8s" (it deletes the cluster\'s PersistentVolumeClaims).');
   }
 
-  const selectedNames = requested.length > 0 ? selectDownTargets(config, requested) : undefined;
+  const selectedNames = requested.length > 0 ? selectServiceTargets(config, requested) : undefined;
 
   // The lifecycle lock makes this whole decision exclusive against a concurrent
   // up/restart in the same project: without it, `up` can read "api is not
