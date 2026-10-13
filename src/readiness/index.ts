@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
@@ -177,10 +178,40 @@ export function logLocationHint(serviceName: string, logFile: string | undefined
     : `Check ${logFile} (or "portler logs ${serviceName}") for the cause`;
 }
 
+const PORTLER_ERROR_PREFIX = '[portler] error: ';
+
+/**
+ * Portler's own refusals from a detached service's log: the launch shell
+ * writes them (a foreign container, network or volume under the name it needs)
+ * and exits before the service starts. The log is truncated on every start,
+ * so these lines belong to this run. A foreground run already shows them above.
+ */
+export function portlerErrorsInLog(logFile: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(logFile, 'utf8');
+  } catch {
+    return [];
+  }
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(PORTLER_ERROR_PREFIX))
+    .map((line) => line.slice(PORTLER_ERROR_PREFIX.length).trim())
+    .filter((line) => line !== '')
+    .slice(0, 3);
+}
+
 function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
   const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
+  const reasons = logFile === undefined ? [] : portlerErrorsInLog(logFile);
   // "The same command": a bare `up <name>` would drop the mode and flags the
   // stack was started with.
+  if (reasons.length > 0) {
+    return new Error(
+      `service "${service.name}" exited before it became ready: ${reasons.join(' ')} ` +
+        `The full output is in ${logFile} (or "portler logs ${service.name}"); fix that, then run the same command again.`,
+    );
+  }
   return new Error(
     `service "${service.name}" exited before it became ready. ${logLocationHint(service.name, logFile)}${buildHint}, then run the same command again.`,
   );

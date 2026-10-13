@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { normalizeHealthcheck } from '../src/config/healthcheck.ts';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../src/constants.ts';
@@ -268,6 +270,42 @@ describe('waitForServiceReady', () => {
       waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, '/proj/.portler/logs/api.log'),
       (error: Error) => /Check \/proj\/\.portler\/logs\/api\.log \(or "portler logs api"\) for the cause/.test(error.message) && !/above/.test(error.message),
     );
+  });
+
+  it("puts Portler's own refusal from a detached log into the error", async () => {
+    // The launch shell refuses a container name another project owns and
+    // exits before Docker starts anything; in a detached run that line is
+    // only in the log, so the terminal used to say just "exited".
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-log-'));
+    try {
+      const logFile = path.join(dir, 'db.log');
+      writeFileSync(
+        logFile,
+        'Unable to find image locally\n' +
+          '[portler] error: container "portler-shop--db" exists but is not managed by this project; refusing to remove it. ' +
+          'Rename it, remove it yourself, or set container_name.\n',
+      );
+      const port = await findFreePort();
+      const service = makeService({ port: 4000, healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 } });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
+        (error: Error) => {
+          assert.match(error.message, /^service "api" exited before it became ready: container "portler-shop--db" exists but is not managed by this project/);
+          assert.match(error.message, new RegExp(`The full output is in ${logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(or "portler logs api"\\)`));
+          assert.doesNotMatch(error.message, /\[portler\] error:/, 'the prefix is not repeated inside the message');
+          return true;
+        },
+      );
+
+      // A log without a refusal of Portler's keeps the plain hint.
+      writeFileSync(logFile, 'panic: listen tcp: address already in use\n');
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
+        /exited before it became ready\. Check .*db\.log \(or "portler logs api"\) for the cause/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('does not let the Docker hold run past the attempt deadline', async () => {
