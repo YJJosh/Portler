@@ -51,6 +51,8 @@ portler up --volume-set <name>
 
 Runs the stack against the `--<name>` variants of **all** `@` volumes. `PORTLER_VOLUME_SET=<name>` works as an environment fallback, which is handy as a per-worktree default (e.g. via direnv). Volume set names may contain `a-z0-9_.-` but not `--`.
 
+`portler restart` comes back on the set a service was started with (it records it), unless you give it another one with `--volume-set`.
+
 Starting with a set that was never forked creates a fresh **empty** variant. When the base volume or other sets already exist for that volume — usually a sign of a typo — `up` prints a warning first (with a did-you-mean suggestion) but still proceeds; fork an existing volume instead if you wanted its data.
 
 ### The worktree flow

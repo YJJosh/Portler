@@ -13,12 +13,12 @@ import { parseArgs } from '../src/cli/args.ts';
 import { main } from '../src/cli/index.ts';
 import { commandClean } from '../src/cli/commands/clean.ts';
 import { commandRestart, planRestart } from '../src/cli/commands/restart.ts';
-import { loadConfig } from '../src/config/index.ts';
+import { configForRunMode, loadConfig } from '../src/config/index.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { forkUpCommand } from '../src/cli/commands/volumes.ts';
 import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
-import { readPids, writePids } from '../src/process/pids.ts';
+import { pidInfoFor, readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
 import type { PidServiceInfo } from '../src/types/index.ts';
@@ -394,6 +394,7 @@ describe('restart', () => {
         prod: undefined,
         setup: undefined,
         images: undefined,
+        volumeSetGiven: false,
         ...over,
       });
 
@@ -469,6 +470,100 @@ describe('restart', () => {
     assert.equal(plan({ running: dev, prod: true, stopping: ['db', 'api'], starting: ['db', 'api'] }).prod, true);
     // A dead dependency entry is not "left running"; it is started again and does not block the switch.
     assert.equal(plan({ running: dev, prod: true, runningNow: new Set(['api']), starting: ['db', 'api'] }).prod, true);
+  });
+
+  it('replays the volume set the restarted containers were mounted from', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      [
+        'services:',
+        '  db:',
+        '    docker:',
+        '      image: example/db',
+        '      volumes:',
+        '        - "@data:/var/lib/data"',
+        '  cache:',
+        '    docker:',
+        '      image: example/cache',
+        '      volumes:',
+        '        - "@cache:/data"',
+        '  api:',
+        '    depends_on: [db]',
+        '    docker:',
+        '      image: example/api',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const rawConfig = await loadConfig(projectDir);
+    assert.equal(rawConfig.volumeSet, undefined, 'no set is given here');
+    const startedAt = new Date().toISOString();
+    const base = { pid: process.pid, command: 'x', cwd: projectDir, startedAt, runMode: 'docker' as const };
+    const running: Record<string, PidServiceInfo> = {
+      db: { ...base, dockerContainer: 'c-db', volumeSet: 'branch' },
+      cache: { ...base, dockerContainer: 'c-cache' },
+      api: { ...base, dockerContainer: 'c-api' },
+    };
+    const plan = (names: string[], over: Partial<Parameters<typeof planRestart>[0]> = {}) =>
+      planRestart({
+        rawConfig,
+        running,
+        runningNow: new Set(Object.keys(running)),
+        stopping: names,
+        involved: names,
+        starting: names,
+        requestedMode: 'local',
+        modeExplicit: false,
+        prod: undefined,
+        setup: undefined,
+        images: undefined,
+        volumeSetGiven: false,
+        ...over,
+      });
+
+    // db was mounted from "branch": a plain restart mounts that set again, not the base volumes.
+    const db = plan(['db']);
+    assert.equal(db.volumeSet, 'branch');
+    assert.ok(db.replayed.includes('--volume-set branch'), db.replayed.join(', '));
+    // cache was mounted from the base volumes, and api mounts no managed volume: nothing to replay.
+    assert.equal(plan(['cache']).volumeSet, undefined);
+    assert.equal(plan(['api']).volumeSet, undefined);
+    assert.ok(!plan(['api']).replayed.some((item) => item.startsWith('--volume-set')));
+    // api has no say next to db: db's set is replayed.
+    assert.equal(plan(['db', 'api']).volumeSet, 'branch');
+    // db and cache together were mounted from different sets: refused before anything is stopped.
+    assert.throws(() => plan(['db', 'cache']), /db on volume set "branch" and cache on the base volumes/);
+    // A given set chooses for all of them, and nothing is replayed.
+    const given = await loadConfig(projectDir, undefined, { volumeSet: 'other' });
+    const chosen = plan(['db', 'cache'], { rawConfig: given, volumeSetGiven: true });
+    assert.equal(chosen.volumeSet, 'other');
+    assert.ok(!chosen.replayed.some((item) => item.startsWith('--volume-set')));
+    // An entry without runMode predates the record and has no say either way.
+    const { runMode: _dropped, volumeSet: _set, ...legacyDb } = running.db!;
+    void _dropped;
+    void _set;
+    const legacy = plan(['db'], { running: { ...running, db: legacyDb }, requestedMode: 'docker', modeExplicit: true });
+    assert.equal(legacy.volumeSet, undefined);
+  });
+
+  it('records the volume set for a container that mounts a managed volume', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  db:', '    docker:', '      image: example/db', '      volumes:', '        - "@data:/var/lib/data"', '  api:', '    docker:', '      image: example/api', ''].join('\n'),
+      'utf8',
+    );
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    try {
+      const withSet = configForRunMode(await loadConfig(projectDir, undefined, { volumeSet: 'branch' }), 'docker');
+      const db = await pidInfoFor(withSet, withSet.services.db!, child, undefined, { runMode: 'docker' });
+      assert.equal(db.volumeSet, 'branch');
+      // api mounts no managed volume, and without a set nothing is recorded.
+      assert.equal((await pidInfoFor(withSet, withSet.services.api!, child, undefined, { runMode: 'docker' })).volumeSet, undefined);
+      const baseConfig = configForRunMode(await loadConfig(projectDir), 'docker');
+      assert.equal((await pidInfoFor(baseConfig, baseConfig.services.db!, child, undefined, { runMode: 'docker' })).volumeSet, undefined);
+    } finally {
+      child.kill('SIGKILL');
+    }
   });
 
   it('points the user at the down/up sequence that does work', async () => {

@@ -1,4 +1,4 @@
-import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { configForRunMode, loadBaseEnv, loadConfig, managedVolumeName, type RunMode } from '../../config/index.ts';
 import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
@@ -15,6 +15,8 @@ export interface RestartLaunch {
   mode: RunMode;
   images: Record<string, string>;
   setup: boolean | undefined;
+  /** The volume set the managed volumes are mounted from; undefined for the base volumes. */
+  volumeSet: string | undefined;
   /** What was taken from pids.json rather than from the command line, for the notice. */
   replayed: string[];
   /** Recorded pins that do not apply in the chosen run mode (the service is not a container there). */
@@ -38,6 +40,8 @@ export interface RestartPlanInput {
   prod: boolean | undefined;
   setup: boolean | undefined;
   images: Readonly<Record<string, string>> | undefined;
+  /** Whether --volume-set or PORTLER_VOLUME_SET chose the set (rawConfig.volumeSet); then nothing is replayed. */
+  volumeSetGiven: boolean;
 }
 
 const KUBERNETES_RESTART_HINT =
@@ -50,6 +54,11 @@ function list(names: readonly string[]): string {
 
 function verb(names: readonly string[], singular: string, plural: string): string {
   return names.length === 1 ? singular : plural;
+}
+
+/** The config with the volume set the launch mounts (replayed from pids.json or given). */
+function withVolumeSet(config: PortlerConfig, launch: RestartLaunch): PortlerConfig {
+  return launch.volumeSet === config.volumeSet ? config : { ...config, volumeSet: launch.volumeSet };
 }
 
 /**
@@ -208,7 +217,38 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     }
   }
 
-  return { prod, mode, images, setup, replayed, droppedPins };
+  // The volume set is one choice for the whole start too (it is part of the config
+  // startPhase runs on). A restart that put a database back on the base volumes after
+  // `up docker --volume-set branch` would bring it back with other data, so the set the
+  // services this restart starts again were mounted from is replayed. Only a recorded
+  // container that mounts a managed `@` volume in the chosen mode has a say; entries
+  // without runMode predate the record and say nothing. A given set chooses for all.
+  let volumeSet = rawConfig.volumeSet;
+  if (!input.volumeSetGiven) {
+    const voters = starting.filter((name) => {
+      if (!Object.hasOwn(running, name)) return false;
+      const info = entry(name);
+      if (info.runMode === undefined || info.dockerContainer === undefined) return false;
+      return (modeConfig.services[name]?.docker?.volumes ?? []).some((volume) => managedVolumeName(volume) !== undefined);
+    });
+    const sets = [...new Set(voters.map((name) => entry(name).volumeSet ?? ''))];
+    if (sets.length > 1) {
+      const groups = sets.map((set) => {
+        const names = voters.filter((name) => (entry(name).volumeSet ?? '') === set);
+        return `${list(names)} on ${set ? `volume set "${set}"` : 'the base volumes'}`;
+      });
+      throw new Error(
+        `this restart would start ${groups.join(' and ')} again, so there is no one volume set to replay. ` +
+          'Pass --volume-set to mount one set for all of them, or restart them in separate commands.',
+      );
+    }
+    if (sets[0]) {
+      volumeSet = sets[0];
+      replayed.push(`--volume-set ${volumeSet}`);
+    }
+  }
+
+  return { prod, mode, images, setup, volumeSet, replayed, droppedPins };
 }
 
 /**
@@ -290,6 +330,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         prod,
         setup: args.setup,
         images: args.images,
+        volumeSetGiven: loadedConfig.volumeSet !== undefined,
       });
       return { requestedRootNames, starting, launch };
     };
@@ -340,7 +381,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // leaves running would keep its old image), and prod.require (a deployment value that
     // has gone missing).
     const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
-      const { config: runConfig } = launchConfig(rawConfig, plan.mode, { prod: plan.prod, images: plan.images });
+      const { config: runConfig } = launchConfig(withVolumeSet(rawConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
       checkLaunch(runConfig, plan.mode, names);
       if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
       if (plan.prod) {
@@ -409,7 +450,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         ({ starting, launch } = next);
       }
       try {
-        await startPhase(rawConfig, launch.mode, requestedRootNames, {
+        await startPhase(withVolumeSet(rawConfig, launch), launch.mode, requestedRootNames, {
           detach: true,
           skipRunning: true,
           prod: launch.prod,
