@@ -1,4 +1,4 @@
-export { loadBaseEnv, loadConfig, resolveServiceCwd } from './loader.ts';
+export { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from './loader.ts';
 export type { LoadConfigOptions } from './loader.ts';
 export { applyDockerMode, applyImageOverrides, configForRunMode } from './docker.ts';
 export { applyK8sMode } from './k8s.ts';

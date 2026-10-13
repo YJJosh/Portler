@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { resolveServiceCwd } from '../config/index.ts';
+import { assertServiceCwd, resolveServiceCwd } from '../config/index.ts';
 import { requiredEnvKeys } from '../env/index.ts';
 import { resolveEnvMap } from '../env/resolve.ts';
 import { runShell } from '../process/shell.ts';
@@ -200,6 +200,7 @@ export async function runSetupStep(
     }
     return;
   }
+  if (service) assertServiceCwd(config, service);
   const cwd = service ? resolveServiceCwd(config, service) : config.projectDir;
   const state: SetupState & { version: 2; steps: Record<string, string[]> } =
     previous?.project === config.projectDir && previous.version === 2

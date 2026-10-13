@@ -1,4 +1,4 @@
-import { configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
+import { assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { assertProductionRequirements, buildServiceEnv } from '../../env/index.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
@@ -15,6 +15,10 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
   const config = applyProduction(configForRunMode(rawConfig, mode), args.prod);
   const names = expandAndOrderServices(config, requested);
   if (mode === 'docker') validateDockerMode(config, names);
+  // Every selected service's folder is checked before anything runs, including services
+  // with no setup steps: a missing cwd is reported before the project's own steps have
+  // had any side effects, the same as `up` does.
+  for (const name of names) assertServiceCwd(config, config.services[name]!);
   return withLifecycleLock(config.projectDir, async () => {
     const { assignments, generatedEnv } = await ensureAssignments(config);
     // A missing env file is skipped in every mode here: on a fresh checkout the file is
