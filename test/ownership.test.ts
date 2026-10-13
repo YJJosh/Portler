@@ -151,7 +151,7 @@ describe('removeOwnedContainer', () => {
 
     return removeOwnedContainer('portler-api', PROJECT, docker.run).then((outcome) => {
       assert.deepEqual(outcome, { status: 'removed', id: 'sha256:deadbeef' });
-      assert.deepEqual(docker.calls[1], ['docker', 'rm', '-f', 'sha256:deadbeef']);
+      assert.deepEqual(docker.calls[1], ['docker', 'rm', '-f', '-v', 'sha256:deadbeef'], '-v drops the anonymous volumes with it');
       assert.ok(!docker.calls[1]!.includes('portler-api'), 'the rm must not reference the name at all');
     });
   });
