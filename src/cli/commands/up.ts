@@ -201,6 +201,20 @@ export function restartSuggestion(
   return parts.join(' ');
 }
 
+/**
+ * Whether the restart a refused `up` suggests can do what was asked. Restart replays how the
+ * running services were started and refuses to mix modes or `--prod`, so it only fits when every
+ * running service the refusal names was recorded with this mode and this `--prod`. An entry that
+ * records no mode (an older Portler) cannot show that, so it gets no suggestion either.
+ */
+export function restartHintFits(
+  overlapping: ReadonlyArray<PidServiceInfo | undefined>,
+  mode: RunMode,
+  prod: boolean,
+): boolean {
+  return overlapping.every((info) => info?.runMode === mode && (info.prod === true) === prod);
+}
+
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
 export interface StartedStack {
   children: Map<string, ReturnType<typeof spawnService>>;
@@ -344,14 +358,18 @@ export async function startPhase(
     // keeps the running dependencies, so it is the first thing the refusal suggests. It names
     // only the requested services that are not running (naming a running one would restart
     // it), unless every one of them runs, and it runs them in the background.
+    // When what runs was started in another mode or with another --prod, restart would refuse,
+    // so only the down that clears the way is offered.
     const notRunning = requestedRootNames.filter((serviceName) => !runningNames.has(serviceName));
     const restartNames = notRunning.length > 0 ? notRunning : requestedRootNames;
-    ensureNoOverlap(
-      runningNames,
-      orderedNames,
-      options.restartHint ? options.restartHint(restartNames) : ['portler restart', ...restartNames].join(' '),
-      options.detach ? undefined : 'restart starts them in the background',
-    );
+    const overlapping = orderedNames.filter((serviceName) => runningNames.has(serviceName));
+    const fits = restartHintFits(overlapping.map((serviceName) => pidsBefore?.services[serviceName]), mode, options.prod === true);
+    const restart = !fits
+      ? undefined
+      : options.restartHint
+        ? options.restartHint(restartNames)
+        : ['portler restart', ...restartNames].join(' ');
+    ensureNoOverlap(runningNames, orderedNames, restart, restart && !options.detach ? 'restart starts them in the background' : undefined);
     selectedNames = orderedNames;
   }
   if (options.expectStart !== undefined) {

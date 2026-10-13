@@ -83,8 +83,10 @@ interface RecordedLaunch {
  * The single way the stopped services were started: the mode, `--prod`, `--no-setup`,
  * image pins and volume set their PID entries recorded (Kubernetes mode when this down
  * deleted them from the cluster). Undefined when there is no single way: they were started
- * differently, an entry does not say which volume set it was on, or they were on the base
- * volumes while PORTLER_VOLUME_SET would make a plain command pick another set.
+ * differently, an entry does not say which volume set it was on, they were on the base
+ * volumes while PORTLER_VOLUME_SET would make a plain command pick another set, or they ran
+ * in Kubernetes, whose port-forward entries record no `--image` pin (and a service without a
+ * port has no entry at all), so a command could quietly deploy another image.
  */
 function recordedLaunch(
   serviceNames: readonly string[],
@@ -111,6 +113,7 @@ function recordedLaunch(
   const [volumeSet] = sets;
   if (volumeSet === '' && (envVolumeSet ?? '').trim() !== '') return undefined;
   const [runMode] = modes;
+  if (runMode === 'k8s') return undefined;
   return { runMode: runMode!, prod: prods.has(true), noSetup: setups.has(false), images, volumeSet: volumeSet || undefined };
 }
 
@@ -148,9 +151,9 @@ export function upSuggestion(
  * The command that brings the stopped services back. `up` refuses when something the
  * services depend on is still running (it would start that too), so while a prerequisite
  * runs this is a `restart`, which starts what is stopped and leaves what runs alone.
- * Undefined when no command would do it: no single recorded launch (see recordedLaunch),
- * Kubernetes mode (which has no restart) with a prerequisite still running, or a running
- * prerequisite started in another mode or with another `--prod`, which restart refuses.
+ * Undefined when no command would do it: no single recorded launch (see recordedLaunch,
+ * which also covers Kubernetes), or a running prerequisite started in another mode or with
+ * another `--prod`, which restart refuses.
  */
 export function recoveryCommand(
   serviceNames: readonly string[],
@@ -163,7 +166,7 @@ export function recoveryCommand(
 ): string | undefined {
   if (runningPrerequisites.length === 0) return upSuggestion(serviceNames, launches, mode, file, volumeSets, envVolumeSet);
   const launch = recordedLaunch(serviceNames, launches, mode, volumeSets, envVolumeSet);
-  if (!launch || launch.runMode === 'k8s') return undefined;
+  if (!launch) return undefined;
   const compatible = runningPrerequisites.every(
     (prerequisite) => prerequisite?.runMode === launch.runMode && (prerequisite.prod === true) === launch.prod,
   );

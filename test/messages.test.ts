@@ -6,7 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { recordedVolumeSet, recoveryCommand, upSuggestion } from '../src/cli/commands/down.ts';
-import { restartSuggestion } from '../src/cli/commands/up.ts';
+import { restartHintFits, restartSuggestion } from '../src/cli/commands/up.ts';
 import { ensureNoOverlap } from '../src/cli/services.ts';
 import { assertRequiredEnv } from '../src/env/index.ts';
 import { readProcessStartToken, writePids } from '../src/process/index.ts';
@@ -94,6 +94,49 @@ describe('up for a service that is partly running', () => {
     );
   });
 
+  it('offers restart only when what runs was started with this mode and --prod', () => {
+    const dev = entry({ runMode: 'local' });
+    assert.equal(restartHintFits([dev], 'local', false), true);
+    assert.equal(restartHintFits([dev, entry({ runMode: 'local', prod: false })], 'local', false), true);
+    assert.equal(restartHintFits([dev], 'local', true), false);
+    assert.equal(restartHintFits([entry({ runMode: 'local', prod: true })], 'local', false), false);
+    assert.equal(restartHintFits([dev], 'docker', false), false);
+    assert.equal(restartHintFits([entry({ runMode: 'docker', prod: true })], 'docker', true), true);
+    // An entry from an older Portler records no mode, so it cannot show that restart would fit.
+    assert.equal(restartHintFits([entry({})], 'local', false), false);
+    assert.equal(restartHintFits([undefined], 'local', false), false);
+  });
+
+  it('suggests only down when a running prerequisite was started without --prod', async () => {
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    command: node server.js',
+        '    port: 4210',
+        '    port_env: PORT',
+        '  api:',
+        '    command: node server.js',
+        '    port: 4211',
+        '    port_env: PORT',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
+
+    const refused = portler(projectDir, 'up', '-d', '--prod', 'api');
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
+    assert.doesNotMatch(refused.stderr, /portler restart/);
+
+    // The restart the old message offered is refused too, and nothing was started.
+    const restart = portler(projectDir, 'restart', 'api', '--prod');
+    assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
+    assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s/m);
+  });
+
   it('names only what is not running, keeps the options, and the suggestion works', async () => {
     const projectDir = await project(
       [
@@ -179,8 +222,10 @@ describe('the up a dependents warning suggests', () => {
     );
     // An older entry records no mode: the mode down ran in stands in for it.
     assert.equal(upSuggestion(['db'], [entry({})], 'docker', undefined), 'portler up docker -d db');
-    // down k8s deletes from the cluster, so the way back is up k8s, record or not.
-    assert.equal(upSuggestion(['db'], [undefined], 'k8s', undefined), 'portler up k8s -d db');
+    // Kubernetes entries record no --image pin (a portless service has no entry at all), so
+    // a bare up k8s could deploy another image than the one that ran: no command.
+    assert.equal(upSuggestion(['db'], [undefined], 'k8s', undefined), undefined);
+    assert.equal(upSuggestion(['db'], [entry({ runMode: 'k8s' })], 'local', undefined), undefined);
   });
 
   it('offers no single command for services started in different ways', () => {
@@ -429,6 +474,7 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.equal(down.status, 0, down.stdout + down.stderr);
     assert.match(down.stdout, /deleted Kubernetes resources for: db/);
     assert.doesNotMatch(down.stdout, /no running services found/);
-    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up k8s -d db"\./);
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or start db again the way it was started\./);
+    assert.doesNotMatch(down.stderr, /portler up|portler restart/);
   });
 });
