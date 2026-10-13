@@ -5,7 +5,7 @@ description: Run a project's services on conflict-free ports with the portler CL
 
 # Portler
 
-Portler allocates non-conflicting ports per checkout (default range 51000–59999) and runs the services defined in `portler.yml` as local commands, Docker containers, or on a local Kubernetes cluster. Assigned ports are injected as env vars (`$PORTLER_<SERVICE>_PORT`, plus whatever `port_env` names, e.g. `PORT`). Env values can reference other services: `${postgres.port}`, `backend.url` (also `host`, `protocol`, `container`, `image`).
+Portler allocates non-conflicting ports per checkout (default range 51000–59999) and runs the services defined in `portler.yml` as local commands, Docker containers, or on a local Kubernetes cluster. Assigned ports are injected as env vars: `$PORTLER_<SERVICE>_PORT` (like URLs and references) is the assigned host port, and each `port_env` name (e.g. `PORT`) is the port the service itself should listen on: the assigned port for a local command, but the declared `port:` for Docker and Kubernetes services, whose host port Portler forwards to it. Env values can reference other services: `${postgres.port}`, `backend.url` (also `host`, `protocol`, `container`, `image`).
 
 Only use Portler if the checkout has a `portler.yml` (or `portler.yaml`); otherwise use the project's default ports.
 
