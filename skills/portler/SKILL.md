@@ -42,7 +42,7 @@ Per service: `command` + `cwd` (local) or `image`/`build` (Docker), `port`, `por
 
 ## Database volumes: prefer isolated forks
 
-When an app uses a database, **prefer a separate volume set per checkout/task or test run**, rather than pointing everything at the same writable volume. Port isolation is not data isolation: linked Git worktrees share Portler's project-scoped volumes unless you select different sets. A separate clone (a Workler workspace, say) is its own project, so its volumes start empty.
+When an app uses a database, **prefer a separate volume set per checkout/task or test run**, rather than pointing everything at the same writable volume. Port isolation is not data isolation: linked Git worktrees share Portler's project-scoped volumes unless you select different sets. In development a separate clone (a Workler workspace, say) is its own project, so its volumes start empty. Under `--prod`, a project with a top-level `name:` scopes its volumes by that name instead, so every checkout and clone of it shares the same production volumes: give each run its own `--volume-set` before migrating or running tests that change data.
 
 - Keep a known-good, seeded **baseline** (the default volume or a named `baseline` set) as the source for forks. Treat it as a reusable template, not an everyday working database; do not run experimental migrations or destructive tests against it. Only refresh it intentionally.
 - Fork that baseline for normal development, using a descriptive, unique set name such as `work-issue-123`. Concurrent checkouts/agents must not reuse the same writable set.
