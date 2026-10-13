@@ -4,16 +4,13 @@ Coding agents can learn Portler from a skill: one `SKILL.md` file that tells the
 
 ## Install
 
-Download <a href="/Portler/skills/portler/SKILL.md" download>SKILL.md</a> into a `portler` folder in your agent's skills directory. For Claude Code:
-
 ```bash
-mkdir -p ~/.claude/skills/portler
-curl -fsSL https://yjjosh.github.io/Portler/skills/portler/SKILL.md -o ~/.claude/skills/portler/SKILL.md
+npx skills add YJJosh/Portler
 ```
 
-Put it in `.claude/skills/portler/` inside a repository instead to share it with everyone who works on that project. Other agents that support `SKILL.md` skills load it from their own skills directory; for an agent without skills, add the file's contents to its instructions.
+The [`skills`](https://github.com/vercel-labs/skills) installer works with Claude Code, Codex, Cursor, OpenCode and most other coding agents. It asks which of your agents should get the skill and whether to install it into the current project or for your user; `npx skills update` refreshes it later. To pin the skill to a release, use its tag: `npx skills add https://github.com/YJJosh/Portler/tree/v<version>/skills/portler`.
 
-The file on this site belongs to the latest release. Download it again after upgrading Portler.
+To install it by hand, copy [`skills/portler/SKILL.md`](https://github.com/YJJosh/Portler/blob/main/skills/portler/SKILL.md) into a `portler` folder in your agent's skills directory. For an agent without skills, add the file's contents to its instructions.
 
 ## Docs that match the installed version
 
@@ -34,6 +31,6 @@ The tag is the commit the release was built from, so an agent working with an ol
 
 ::: details Show SKILL.md
 
-<<< @/public/skills/portler/SKILL.md{md}
+<<< @/../skills/portler/SKILL.md{md}
 
 :::
