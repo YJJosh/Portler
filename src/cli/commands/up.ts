@@ -6,6 +6,7 @@ import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resol
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
+  isPidAlive,
   liveServiceNames,
   pidInfoFor,
   readPids,
@@ -16,7 +17,7 @@ import {
   updatePids,
   waitForForegroundServices,
 } from '../../process/index.ts';
-import type { ForegroundTeardownOptions, StopResult } from '../../process/index.ts';
+import type { ForegroundTeardownOptions, ServiceLiveness, StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
@@ -513,13 +514,38 @@ export async function startPhase(
     // inspected is not reported as dead: this run could not confirm it either way.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = async (): Promise<void> => {
-      const retainedLiveness = await Promise.all(
-        retained.map(async (name) => {
-          const info = pidsBefore?.services[name];
-          return info !== undefined && (await serviceLiveness(config.projectDir, info)).status === 'dead';
-        }),
-      );
-      const retainedDied = retained.filter((_, index) => retainedLiveness[index]);
+      const retainedInfo = retained.map((name) => pidsBefore?.services[name]);
+      const probe = (index: number): Promise<ServiceLiveness | undefined> => {
+        const info = retainedInfo[index];
+        return info === undefined ? Promise.resolve(undefined) : serviceLiveness(config.projectDir, info);
+      };
+      const retainedLiveness = await Promise.all(retained.map((_, index) => probe(index)));
+      // A verdict reached by the pid alone goes stale if that process exits while another
+      // service's container is still being inspected. Check those pids again, with no wait
+      // between this check and the reading of the children below; one whose pid is gone is
+      // asked about again (its container may run on), which can take another inspect, so
+      // repeat until a pass finds nothing stale. Each service is asked again at most once.
+      const reprobed = new Set<number>();
+      for (;;) {
+        const stale = retained
+          .map((_, index) => index)
+          .filter((index) => {
+            const result = retainedLiveness[index];
+            return result?.status === 'running' && result.via === 'pid' && !isPidAlive(retainedInfo[index]!.pid);
+          });
+        if (stale.length === 0) break;
+        const again = stale.filter((index) => !reprobed.has(index));
+        for (const index of stale) {
+          if (reprobed.has(index)) retainedLiveness[index] = { status: 'dead' };
+        }
+        if (again.length === 0) continue;
+        again.forEach((index) => reprobed.add(index));
+        const answers = await Promise.all(again.map((index) => probe(index)));
+        again.forEach((index, k) => {
+          retainedLiveness[index] = answers[k];
+        });
+      }
+      const retainedDied = retained.filter((_, index) => retainedLiveness[index]?.status === 'dead');
       // Read the children after the probes above: a docker inspect can take a while,
       // and a child that exited during it must not slip past the last check of the run.
       const spawnedDied = [...children]

@@ -13,6 +13,7 @@ import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
+import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
 import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
@@ -976,6 +977,83 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
       assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
     } finally {
       process.env.PATH = savedPath;
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  });
+
+  it('startPhase notices a kept pid-backed dependency that exits while another is still being inspected', async () => {
+    // api writes a marker once its readiness check connects; from then on the fake
+    // docker below kills cache partway through its inspect of db.
+    const marker = path.join(dir, 'api-ready');
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+const server = http.createServer((req, res) => res.end('ok'));
+server.once('connection', () => fs.writeFileSync(${JSON.stringify(marker)}, ''));
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  cache:
+    command: node server.mjs
+    port: 4002
+    port_env: PORT
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [cache, db]
+`);
+    // cache: a live process an earlier run started, kept by its pid.
+    const cache = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { stdio: 'ignore' });
+    const cachePid = cache.pid!;
+    const cacheToken = (await readProcessStartToken(cachePid)) ?? undefined;
+    await fs.writeFile(path.join(dir, 'cache.pid'), String(cachePid));
+    const cacheEntry = { pid: cachePid, command: 'node server.mjs', cwd: loaded.projectDir, startedAt: new Date().toISOString(), runMode: 'local' as const, ...(cacheToken !== undefined ? { startToken: cacheToken } : {}) };
+    // db: its docker run shell is gone, its container runs on.
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { cache: cacheEntry, db: dbEntry } });
+
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        'eval last=\\${$#}',
+        `if [ "$last" = c-db ]; then`,
+        `  if [ -f '${marker}' ]; then sleep 0.3; kill -9 "$(cat '${path.join(dir, 'cache.pid')}')"; sleep 0.7; fi`,
+        `  printf '%s\\n' '${inspected}'; exit 0`,
+        'fi',
+        'echo "Error: No such object: $last" >&2; exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // cache passes its own check by its pid at once, then dies while db is still being
+      // inspected; api's level is the last and there is no proxy, so only this check can see it.
+      await assert.rejects(
+        startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+        /service cache exited while the stack was still starting/,
+      );
+      assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+    } finally {
+      process.env.PATH = savedPath;
+      cache.kill('SIGKILL');
       const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
       if (apiPid !== undefined) {
         try {
