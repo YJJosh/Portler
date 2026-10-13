@@ -1,4 +1,4 @@
-import { configForRunMode, loadBaseEnv, loadConfig, managedVolumeName, type RunMode } from '../../config/index.ts';
+import { configForRunMode, loadBaseEnv, loadConfig, managedVolumeMount, managedVolumeName, type RunMode } from '../../config/index.ts';
 import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
@@ -321,16 +321,18 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // base volumes. Only asked when no set is given and the service mounts a managed volume.
     const mountedVolumeSets: Record<string, string | null> = {};
     if (loadedConfig.volumeSet === undefined) {
-      const mountsManaged = (serviceName: string) => {
+      const managedMounts = (serviceName: string) => {
         const service = loadedConfig.services[serviceName];
-        return [...(service?.docker?.volumes ?? []), ...(service?.dockerModeOverride?.volumes ?? [])].some(
-          (volume) => managedVolumeName(volume) !== undefined,
-        );
+        return [...(service?.docker?.volumes ?? []), ...(service?.dockerModeOverride?.volumes ?? [])].flatMap((volume) => {
+          const mount = managedVolumeMount(volume);
+          return mount === undefined ? [] : [mount];
+        });
       };
       await Promise.all(
         Object.entries(running).map(async ([serviceName, info]) => {
-          if (info.volumeSet !== undefined || info.dockerContainer === undefined || !mountsManaged(serviceName)) return;
-          const found = await mountedVolumeSet(info.dockerContainer, loadedConfig.projectDir);
+          const expected = managedMounts(serviceName);
+          if (info.volumeSet !== undefined || info.dockerContainer === undefined || expected.length === 0) return;
+          const found = await mountedVolumeSet(info.dockerContainer, loadedConfig.projectDir, expected);
           if (found.status === 'set') mountedVolumeSets[serviceName] = found.set;
           else if (found.status === 'unknown') mountedVolumeSets[serviceName] = null;
         }),

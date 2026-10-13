@@ -14,6 +14,13 @@ export function managedVolumeName(volumeEntry: string): string | undefined {
   return parts[0]!.slice(1);
 }
 
+/** The short name and container path of a Portler-managed `@name:/path` entry. */
+export function managedVolumeMount(volumeEntry: string): { name: string; destination: string } | undefined {
+  const name = managedVolumeName(volumeEntry);
+  if (name === undefined) return undefined;
+  return { name, destination: volumeEntry.split(':')[1]! };
+}
+
 /**
  * Validate and normalize a short volume name or volume set name. Both become
  * segments of a Docker volume name, so they are slugged like every other

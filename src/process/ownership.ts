@@ -217,8 +217,9 @@ export type MountedVolumeSet =
 
 /**
  * The volume set a container of this project was started on, read from the
- * volumes it mounts: Portler labels every managed volume `portler.volume`, and
- * one made for a set also `portler.volume-set`. Entries in pids.json written
+ * volumes mounted at its `@name` paths (`expected`): Portler labels every managed
+ * volume `portler.volume`, and one made for a set also `portler.volume-set`. Other
+ * volumes the container mounts do not follow the set and are not read. Entries in pids.json written
  * before the set was recorded have nothing else to go on, and guessing the base
  * volumes would bring a database back with other data. Anything short of a
  * clear answer is reported as unknown, never guessed.
@@ -226,6 +227,7 @@ export type MountedVolumeSet =
 export async function mountedVolumeSet(
   name: string,
   projectDir: string,
+  expected: ReadonlyArray<{ name: string; destination: string }>,
   run: CommandRunner = runCommand,
 ): Promise<MountedVolumeSet> {
   const container = await run('docker', [
@@ -240,19 +242,26 @@ export async function mountedVolumeSet(
     if (isNotFoundError(container.stderr)) return { status: 'unknown', reason: 'its container is gone' };
     return { status: 'unknown', reason: container.stderr.trim().split('\n')[0] || `docker inspect exited ${container.code}` };
   }
-  let volumes: string[];
+  // Only the service's `@name` entries follow the volume set, so only the volumes mounted at
+  // their paths count; any other volume, Portler-labelled or not, says nothing about the set.
+  const expectedAt = new Map(expected.map((mount) => [mount.destination, mount.name]));
+  let volumes: Array<{ volume: string; managedName: string }>;
   try {
     const parsed = JSON.parse(container.stdout.trim()) as { labels?: unknown; mounts?: unknown };
     const labels = parsed.labels === null || parsed.labels === undefined ? {} : parseInspectLabels(JSON.stringify(parsed.labels));
     if (ownershipVerdict(labels, projectDir) !== 'owned') return { status: 'unknown', reason: 'the container under its name is not this project\'s' };
-    const mounts = Array.isArray(parsed.mounts) ? (parsed.mounts as Array<{ Type?: unknown; Name?: unknown }>) : [];
-    volumes = mounts.filter((mount) => mount.Type === 'volume' && typeof mount.Name === 'string' && mount.Name !== '').map((mount) => mount.Name as string);
+    const mounts = Array.isArray(parsed.mounts) ? (parsed.mounts as Array<{ Type?: unknown; Name?: unknown; Destination?: unknown }>) : [];
+    volumes = mounts.flatMap((mount) => {
+      if (mount.Type !== 'volume' || typeof mount.Name !== 'string' || mount.Name === '' || typeof mount.Destination !== 'string') return [];
+      const managedName = expectedAt.get(mount.Destination);
+      return managedName === undefined ? [] : [{ volume: mount.Name, managedName }];
+    });
   } catch {
     return { status: 'unknown', reason: 'could not parse docker inspect output' };
   }
   if (volumes.length === 0) return { status: 'none' };
 
-  const inspected = await run('docker', ['volume', 'inspect', '--format', '{{json .Labels}}', ...volumes]);
+  const inspected = await run('docker', ['volume', 'inspect', '--format', '{{json .Labels}}', ...volumes.map((entry) => entry.volume)]);
   if (inspected.code !== 0) {
     return { status: 'unknown', reason: inspected.stderr.trim().split('\n')[0] || `docker volume inspect exited ${inspected.code}` };
   }
@@ -260,11 +269,13 @@ export async function mountedVolumeSet(
   if (lines.length !== volumes.length) return { status: 'unknown', reason: 'docker volume inspect returned an unexpected answer' };
   const sets = new Set<string>();
   try {
-    for (const line of lines) {
+    lines.forEach((line, index) => {
       const labels = parseInspectLabels(line);
-      if (labels['portler.volume'] === undefined) continue;
+      // The volume at a managed path must be that managed volume; anything else there (a
+      // config change, a hand-made volume) does not vote.
+      if (labels['portler.volume'] !== volumes[index]!.managedName) return;
       sets.add(labels['portler.volume-set'] ?? '');
-    }
+    });
   } catch {
     return { status: 'unknown', reason: 'could not parse docker volume inspect output' };
   }
