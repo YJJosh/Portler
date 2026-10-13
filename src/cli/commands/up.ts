@@ -7,9 +7,9 @@ import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import {
   isPidAlive,
+  liveServiceNames,
   pidInfoFor,
   readPids,
-  runningServices,
   serviceLogPath,
   serviceLiveness,
   spawnService,
@@ -17,7 +17,7 @@ import {
   updatePids,
   waitForForegroundServices,
 } from '../../process/index.ts';
-import type { ForegroundTeardownOptions, StopResult } from '../../process/index.ts';
+import type { ForegroundTeardownOptions, ServiceLiveness, StopResult } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
@@ -142,6 +142,15 @@ export class IncompleteTeardownError extends Error {
   }
 }
 
+/** startPhase found other services to start than its caller planned for; nothing was started. */
+export class StartSetChangedError extends Error {
+  constructor(planned: readonly string[], found: readonly string[]) {
+    const names = (list: readonly string[]): string => (list.length > 0 ? list.join(', ') : 'none');
+    super(`the services to start changed after they were planned (planned ${names(planned)}, found ${names(found)})`);
+    this.name = 'StartSetChangedError';
+  }
+}
+
 export interface StartOptions {
   prod?: boolean;
   setup?: boolean;
@@ -151,6 +160,12 @@ export interface StartOptions {
   skipRunning?: boolean;
   /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
   images?: Readonly<Record<string, string>>;
+  /**
+   * restart: the services its plan covers. When what is not running differs by the time
+   * startPhase reads pids.json (a dependency exited after the plan was made), it throws
+   * StartSetChangedError before anything is started, so the caller can plan again.
+   */
+  expectStart?: readonly string[];
 }
 
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
@@ -240,6 +255,33 @@ async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, 
  * `restart` can hold one lock across its stop and its start instead of dropping
  * it in between (where a concurrent `up` could slip in).
  */
+/**
+ * The configuration a start in `mode` runs with: prod.services, the run mode, pinned
+ * images and the production overrides applied, in that order. `raw` is the stack narrowed
+ * to prod.services and `modeConfig` the run mode's view of it, before images are pinned.
+ */
+export function launchConfig(
+  rawConfig: PortlerConfig,
+  mode: RunMode,
+  options: { prod?: boolean; images?: Readonly<Record<string, string>> },
+): { raw: PortlerConfig; modeConfig: PortlerConfig; config: PortlerConfig } {
+  const raw = productionServices(rawConfig, options.prod);
+  const modeConfig = configForRunMode(raw, mode);
+  const config = applyProduction(applyImageOverrides(modeConfig, options.images ?? {}), options.prod);
+  return { raw, modeConfig, config };
+}
+
+/**
+ * What startPhase checks about the services it is about to start, before it allocates a
+ * port or spawns anything. restart makes the same checks before it stops anything, so a
+ * launch that could not start is refused while the services are still up.
+ */
+export function checkLaunch(config: PortlerConfig, mode: RunMode, selectedNames: string[]): void {
+  if (mode === 'docker') validateDockerMode(config, selectedNames);
+  validateCommands(config, selectedNames);
+  validateDockerContainerNames(config);
+}
+
 export async function startPhase(
   rawConfig: PortlerConfig,
   mode: RunMode,
@@ -247,13 +289,18 @@ export async function startPhase(
   options: StartOptions,
 ): Promise<StartedStack> {
   // Under --prod only prod.services run; dependencies on left-out services are dropped.
-  const raw = productionServices(rawConfig, options.prod);
+  const { raw, modeConfig, config } = launchConfig(rawConfig, mode, { prod: options.prod, images: options.images });
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
-  const modeConfig = configForRunMode(raw, mode);
   const images = options.images ?? {};
-  const config = applyProduction(applyImageOverrides(modeConfig, images), options.prod);
   const pidsBefore = await readPids(config.projectDir);
-  const runningNames = new Set(runningServices(pidsBefore));
+  // Running by serviceLiveness, as `ps` reports it: a Docker service whose `docker run`
+  // shell is gone but whose container runs on is running, and starting it would remove
+  // that container. One that cannot be inspected is taken as running too.
+  const runningNames = new Set(
+    await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
+      process.stderr.write(`[portler] warning: could not inspect ${serviceName}'s container (${message}); treating it as running\n`);
+    }),
+  );
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -262,14 +309,18 @@ export async function startPhase(
     ensureNoOverlap(runningNames, orderedNames);
     selectedNames = orderedNames;
   }
+  if (options.expectStart !== undefined) {
+    const planned = new Set(options.expectStart);
+    if (selectedNames.length !== planned.size || selectedNames.some((name) => !planned.has(name))) {
+      throw new StartSetChangedError(options.expectStart, selectedNames);
+    }
+  }
   // Only now is it known which services this run starts; a pinned image for any other
   // service would be accepted and never used.
   validateImageOverrideTargets(images, selectedNames, runningNames);
   reportImageOverrides(modeConfig, images);
 
-  if (mode === 'docker') validateDockerMode(config, selectedNames);
-  validateCommands(config, selectedNames);
-  validateDockerContainerNames(config);
+  checkLaunch(config, mode, selectedNames);
 
   // A proxy that is already running keeps its port and old routing targets;
   // only start (and later stop) it when it is not up yet.
@@ -455,19 +506,51 @@ export async function startPhase(
     // would notice and `up` would report a started stack with a dead member.
     // The proxy's own exit is reported by its readiness wait.
     // Dependencies this run leaves running (restart's skipRunning) are not in
-    // `children`, so their recorded pids are rechecked instead. For a Docker
-    // service that pid is the `docker run` client, which exits with the container.
-    // A zombie counts as dead: under a PID 1 that does not reap orphans, an
-    // exited leader keeps its pid, and kill(pid, 0) alone would call it alive.
+    // `children`, so their recorded entries are rechecked instead, by the same
+    // measure that counted them as running: serviceLiveness. Their pid alone is not
+    // enough: a Docker service's container can outlive the `docker run` shell whose
+    // pid was recorded, and a zombie (under a PID 1 that does not reap orphans)
+    // keeps a pid that kill(pid, 0) would call alive. One whose container cannot be
+    // inspected is not reported as dead: this run could not confirm it either way.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
-    const assertMembersAlive = (): void => {
+    const assertMembersAlive = async (): Promise<void> => {
+      const retainedInfo = retained.map((name) => pidsBefore?.services[name]);
+      const probe = (index: number): Promise<ServiceLiveness | undefined> => {
+        const info = retainedInfo[index];
+        return info === undefined ? Promise.resolve(undefined) : serviceLiveness(config.projectDir, info);
+      };
+      const retainedLiveness = await Promise.all(retained.map((_, index) => probe(index)));
+      // A verdict reached by the pid alone goes stale if that process exits while another
+      // service's container is still being inspected. Check those pids again, with no wait
+      // between this check and the reading of the children below; one whose pid is gone is
+      // asked about again (its container may run on), which can take another inspect, so
+      // repeat until a pass finds nothing stale. Each service is asked again at most once.
+      const reprobed = new Set<number>();
+      for (;;) {
+        const stale = retained
+          .map((_, index) => index)
+          .filter((index) => {
+            const result = retainedLiveness[index];
+            return result?.status === 'running' && result.via === 'pid' && !isPidAlive(retainedInfo[index]!.pid);
+          });
+        if (stale.length === 0) break;
+        const again = stale.filter((index) => !reprobed.has(index));
+        for (const index of stale) {
+          if (reprobed.has(index)) retainedLiveness[index] = { status: 'dead' };
+        }
+        if (again.length === 0) continue;
+        again.forEach((index) => reprobed.add(index));
+        const answers = await Promise.all(again.map((index) => probe(index)));
+        again.forEach((index, k) => {
+          retainedLiveness[index] = answers[k];
+        });
+      }
+      const retainedDied = retained.filter((_, index) => retainedLiveness[index]?.status === 'dead');
+      // Read the children after the probes above: a docker inspect can take a while,
+      // and a child that exited during it must not slip past the last check of the run.
       const spawnedDied = [...children]
         .filter(([name, child]) => name !== PROXY_SERVICE_NAME && (child.exitCode !== null || child.signalCode !== null))
         .map(([name]) => name);
-      const retainedDied = retained.filter((name) => {
-        const pid = pidsBefore?.services[name]?.pid;
-        return pid !== undefined && !isPidAlive(pid);
-      });
       const died = [...spawnedDied, ...retainedDied];
       if (died.length === 0) return;
       // A retained service was started by an earlier run; its log file is the
@@ -498,7 +581,11 @@ export async function startPhase(
         children.set(serviceName, child);
         if (options.detach) child.unref();
 
-        const info = await pidInfoFor(config, service, child, assignments[serviceName]);
+        const info = await pidInfoFor(config, service, child, assignments[serviceName], {
+          runMode: mode,
+          ...(options.images?.[serviceName] !== undefined ? { image: options.images[serviceName] } : {}),
+          ...(options.setup === false ? { setup: false } : {}),
+        });
         startedEntries.set(serviceName, info);
         await recordPidEntry(config, serviceName, info);
         if (readinessNames.has(serviceName)) {
@@ -526,7 +613,7 @@ export async function startPhase(
       await Promise.all(waits);
       // Catch a member of an earlier level that died while this one was
       // starting, before the next level, or the proxy, builds on it.
-      assertMembersAlive();
+      await assertMembersAlive();
     }
 
     // The proxy starts last so every routed service already listens; it
@@ -556,7 +643,7 @@ export async function startPhase(
       );
       // The proxy's wait took time too; a service that died meanwhile would
       // otherwise sit behind a printed project URL.
-      assertMembersAlive();
+      await assertMembersAlive();
     }
   } catch (error) {
     process.stderr.write('[portler] startup failed — stopping already-started services and releasing allocated ports\n');

@@ -10,11 +10,12 @@ portler ps [service...]
 
 Prints one row per running service with:
 
-- **mode** — `local` or `docker`
+- **mode** — `local` or `docker`, with `(prod)` when the service was started with `--prod`
 - **pid** — the process id
 - **status** — whether the service is still alive (below)
 - **port / URL** — the assigned port and generated URL
 - **container** — the Docker container name (Docker services)
+- **image** — the `--image` pin the service runs from (shown when any service has one)
 
 The status comes from the recorded process and, for a Docker service, its container:
 
@@ -29,7 +30,7 @@ The status comes from the recorded process and, for a Docker service, its contai
 
 ```bash
 $ portler ps
-SERVICE   MODE    PID   STATUS   PORT   URL                     CONTAINER
-postgres  docker  4321  running  51234  http://localhost:51234  portler-myapp-ab12cd-postgres
-backend   local   4322  running  51235  http://localhost:51235  -
+SERVICE   MODE           PID   STATUS   PORT   URL                     CONTAINER
+postgres  docker (prod)  4321  running  51234  http://localhost:51234  portler-myapp-ab12cd-postgres
+backend   local (prod)   4322  running  51235  http://localhost:51235  -
 ```

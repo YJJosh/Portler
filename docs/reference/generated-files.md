@@ -8,7 +8,7 @@ Portler writes runtime files to `.portler/` in the project directory:
 .portler/setup.json          receipts of the plain setup steps that succeeded, per owner and mode
 .portler/state.json          last assignments and run metadata
 .portler/runtime.env         resolved env snapshot
-.portler/pids.json           pids of detached services and the proxy
+.portler/pids.json           pids of detached services and the proxy, and how each was launched
 .portler/logs/<service>.log  captured output of detached local services
 .portler/k8s/                generated Kubernetes manifests
 ```

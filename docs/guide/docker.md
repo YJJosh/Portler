@@ -123,7 +123,7 @@ portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…
 
 This is how a server runs exactly what CI built, with no toolchain on the host: check out the commit the images were built from, so `portler.yml` matches, then start the stack from the pinned references. A digest reference is immutable, so the same command starts the same bytes every time. Docker pulls with the login of the user running Portler, so `docker login` to a private registry first. Under `up k8s` a pinned image is not loaded into the cluster; the cluster pulls it, so it must be reachable from there.
 
-A pin lasts for that invocation. `restart` applies only the `--image` flags it is given: a `restart` without them rebuilds the service from its Dockerfile, or pulls its `image:`, and replaces the pinned one, and `ps` does not show which image a service runs. On a deployed stack pass the same `--image` flags to `restart`, or run `down` and start again from the pinned references.
+A pin is recorded in `pids.json` and replayed: a `restart` of that service without `--image` runs it from the same pinned reference, `ps` shows the pin in an IMAGE column, a new `--image` for the service replaces it, and `down` clears it. A pin that does not apply in the run mode a restart is given (the service is not a container there) is dropped with a notice.
 
 `up --prod` still runs the `setup:` steps of `portler.yml` on the host, so a server with no toolchain adds `--no-setup`. That skips every setup step, including a migration declared there, so keep such steps in the image or run them separately.
 

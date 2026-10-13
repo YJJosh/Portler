@@ -23,6 +23,7 @@ export {
   getNamespacePhase,
   isAlreadyExistsError,
   isNamespaceNotFound,
+  K8S_FORWARD_COMMAND,
   namespaceCreateArgs,
   namespaceOwnership,
   namespaceReadArgs,

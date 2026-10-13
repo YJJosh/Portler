@@ -11,7 +11,7 @@ portler up k8s [service...] [--detach] [--image <service>=<image>]
 ## Behavior
 
 - Runs setup automatically: root setup before any starts, service setup just before its service starts, after dependency readiness. A plain step runs when it has never succeeded in this checkout or its definition changed (receipts live in `.portler/setup.json`, separately for dev/prod and local/Docker modes); an `if_missing` step runs while its path is absent; an `always` step runs every time. See [Setup & production](/guide/setup-and-production).
-- Existing running-service overlaps are rejected. Use `down` before another `up`, including when switching dev/prod; Portler does not implicitly restart existing processes.
+- Existing running-service overlaps are rejected, running as [`portler ps`](/reference/cli/ps) reports it: a Docker service whose container runs on after its `docker run` process has gone counts, so `up` does not replace that container. Use `down` before another `up`, including when switching dev/prod; Portler does not implicitly restart existing processes.
 - Assigns a free port to every service that declares one (see [Ports](/guide/ports)) and prints the `SERVICE / PORT / URL` table.
 - Starts services in [dependency order](/guide/dependencies), waiting for each dependency's healthcheck.
 - With service names, starts only those services **plus their dependencies**.

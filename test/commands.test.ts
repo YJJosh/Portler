@@ -12,7 +12,8 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { parseArgs } from '../src/cli/args.ts';
 import { main } from '../src/cli/index.ts';
 import { commandClean } from '../src/cli/commands/clean.ts';
-import { commandRestart } from '../src/cli/commands/restart.ts';
+import { commandRestart, planRestart } from '../src/cli/commands/restart.ts';
+import { loadConfig } from '../src/config/index.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandUp } from '../src/cli/commands/up.ts';
 import { forkUpCommand } from '../src/cli/commands/volumes.ts';
@@ -20,6 +21,7 @@ import { readRegistry, writeRegistry } from '../src/ports/registry.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { pathExists } from '../src/util/fs.ts';
 import { CorruptStateFileError } from '../src/util/json-file.ts';
+import type { PidServiceInfo } from '../src/types/index.ts';
 
 const CONFIG = ['services:', '  api:', '    command: node -e ""', '    port: 3000'].join('\n');
 
@@ -209,22 +211,17 @@ describe('restart', () => {
     );
   });
 
-  it('refuses a plain restart of a service started with --prod, before stopping anything', async () => {
+  it('replays --prod for a service started with it, so a plain restart reaches the stop step', async () => {
     const startedAt = new Date().toISOString();
     await writePids(projectDir, {
       version: 1,
       project: projectDir,
       startedAt,
-      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
-      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: true, startedAt } },
+      // Live pid, no token: the stop step must refuse this entry, which proves the launch was accepted.
+      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: true, runMode: 'local', startedAt } },
     });
-
-    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api was started with --prod/);
-    await assert.rejects(commandRestart(parseArgs([], 'restart')), /api was started with --prod/);
-    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
-
-    // With the flag the guard passes and restart reaches the stop step, which refuses
-    // the unverified entry. Going through main proves the scope check accepts --prod.
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /restart could not stop/);
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), /restart could not stop/);
     await assert.rejects(main(['restart', 'api', '--prod']), /restart could not stop/);
   });
 
@@ -241,7 +238,7 @@ describe('restart', () => {
     await assert.rejects(main(['restart', 'api', '--setup']), /restart could not stop/);
   });
 
-  it('refuses a plain restart of a service running in Docker, and restart docker of a local process', async () => {
+  it('replays the run mode, infers it for entries that predate the field, and lets "docker" override', async () => {
     // api runs as a local process under plain `up` and as a container under `up docker`.
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),
@@ -249,30 +246,69 @@ describe('restart', () => {
       'utf8',
     );
     const startedAt = new Date().toISOString();
-    const seed = (dockerContainer?: string) =>
+    const seed = (extra: Partial<PidServiceInfo>) =>
       writePids(projectDir, {
         version: 1,
         project: projectDir,
         startedAt,
-        services: {
-          api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt, ...(dockerContainer ? { dockerContainer } : {}) },
-        },
+        services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt, ...extra } },
       });
+    const notAMismatch = (error: Error) => /restart could not stop/.test(error.message);
 
-    await seed('portler-test-api');
-    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /api is running in Docker[^]*restart docker api/);
-    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
-    // With `docker` the guard passes and restart reaches the stop step, which refuses the unverified entry.
-    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), (error: Error) => !/running in Docker/.test(error.message));
+    // Recorded Docker mode: a plain restart replays it and reaches the stop step.
+    await seed({ dockerContainer: 'portler-test-api', runMode: 'docker' });
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), notAMismatch);
+    // A container of a docker:-block service without the field came from docker mode.
+    await seed({ dockerContainer: 'portler-test-api' });
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), notAMismatch);
+    // An explicit "docker" on a service started as a local process: nothing is left
+    // behind, so the restarted service may switch.
+    await seed({ runMode: 'local' });
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), notAMismatch);
+  });
 
-    await seed(undefined);
-    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), /api is running as a local process[^]*without "docker"/);
-    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
+  it('does not read a removed service\'s legacy container entry as Docker mode', async () => {
+    // api has no Docker config. old is no longer in the config, and its entry predates runMode and
+    // names a container, which plain `up` also makes for a top-level image:.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), ['services:', '  api:', '    command: node -e ""', '    port: 3000'].join('\n'), 'utf8');
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: { old: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52347, prod: false, startedAt, dockerContainer: 'portler-test-old' } },
+    });
+    // Read as Docker, the restart would refuse in its pre-start checks ("has no Docker config");
+    // read as no evidence, it plans plain mode and gets as far as the stop.
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), (error: Error) => /restart could not stop/.test(error.message));
+  });
+
+  it('refuses a mode change that would leave a dependency in the other mode, before stopping anything', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  db:', '    command: node -e ""', '    port: 3001', '    docker:', '      image: node:22-alpine', '  api:', '    command: node -e ""', '    port: 3000', '    depends_on: [db]', '    docker:', '      image: node:22-alpine', ''].join('\n'),
+      'utf8',
+    );
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        // db is alive (this process stands in for it) and left running by `restart api`.
+        db: { pid: process.pid, command: 'db', cwd: projectDir, port: 52346, prod: false, runMode: 'local', startedAt },
+        // api is a stale entry; a restart that got as far as stopping would have pruned it.
+        api: { pid: 4_194_303, command: 'api', cwd: projectDir, port: 52345, prod: false, runMode: 'local', startedAt },
+      },
+    });
+    await assert.rejects(commandRestart(parseArgs(['docker', 'api'], 'restart')), /db is running as a local process[^]*portler restart docker/);
+    await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db is running in development mode[^]*portler restart --prod/);
+    assert.ok((await readPids(projectDir))?.services.api, 'the rejections came before the stop: the stale api entry is still there');
   });
 
   it('does not mistake an Object.prototype member for a recorded service', async () => {
     // With no pids.json, `running` is an empty object, and `running.constructor` is still Object.
-    // The guard must not report a service named constructor as a running development service.
+    // The launch must not report a service named constructor as a running development service.
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),
       ['services:', '  constructor:', '    command: node -e ""', '    port: 3000'].join('\n'),
@@ -280,24 +316,6 @@ describe('restart', () => {
     );
     // The guard passes and restart goes on to start the service, whose command exits at once.
     await assert.rejects(commandRestart(parseArgs(['constructor', '--prod'], 'restart')), (error: Error) => !/development mode/.test(error.message));
-  });
-
-  it('refuses restart --prod of a service running in development mode, before stopping anything', async () => {
-    const startedAt = new Date().toISOString();
-    await writePids(projectDir, {
-      version: 1,
-      project: projectDir,
-      startedAt,
-      // Live pid, no token: if restart gets past the guard it must refuse to stop this entry.
-      services: { api: { pid: process.pid, command: 'test runner', cwd: projectDir, port: 52345, prod: false, startedAt } },
-    });
-
-    await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /api was started in development mode/);
-    await assert.rejects(commandRestart(parseArgs(['--prod'], 'restart')), /api was started in development mode/);
-    assert.ok((await readPids(projectDir))?.services.api, 'nothing was stopped');
-
-    // Same mode: the guard passes and restart reaches the stop step, which refuses the unverified entry.
-    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /restart could not stop/);
   });
 
   it('rejects --image for a dependency the restart leaves running, before stopping anything', async () => {
@@ -314,9 +332,9 @@ describe('restart', () => {
       services: {
         // db is alive (this process stands in for it) and not named, so `restart api` leaves it running.
         // A top-level `image:` service always runs in Docker, so its entry carries the container name.
-        db: { pid: process.pid, command: 'db', cwd: projectDir, startedAt, dockerContainer: 'portler-test-db' },
+        db: { pid: process.pid, command: 'db', cwd: projectDir, startedAt, dockerContainer: 'portler-test-db', runMode: 'local' },
         // api is a stale entry; a restart that got as far as stopping would have pruned it.
-        api: { pid: 4_194_303, command: 'api', cwd: projectDir, startedAt },
+        api: { pid: 4_194_303, command: 'api', cwd: projectDir, startedAt, runMode: 'local' },
       },
     });
 
@@ -326,6 +344,131 @@ describe('restart', () => {
     );
     const pids = await readPids(projectDir);
     assert.ok(pids?.services.api, 'the rejection came before the stop: the stale api entry is still there');
+  });
+
+  it('refuses a replayed Docker mode the config no longer supports, before stopping anything', async () => {
+    // api was started with `up docker`; its docker: block has since been removed, so the
+    // replayed mode cannot start it. That must be found while api is still up.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), ['services:', '  api:', '    command: node -e ""', '    port: 3000', ''].join('\n'), 'utf8');
+    const startedAt = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt,
+      services: {
+        // A stale entry: a restart that got as far as stopping would have pruned it.
+        api: { pid: 4_194_303, command: 'api', cwd: projectDir, port: 52345, startedAt, dockerContainer: 'portler-test-api', runMode: 'docker' },
+      },
+    });
+
+    await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service "api" has no Docker config/);
+    assert.ok((await readPids(projectDir))?.services.api, 'the rejection came before the stop: the stale api entry is still there');
+    await assert.rejects(commandRestart(parseArgs([], 'restart')), /service "api" has no Docker config/);
+    assert.ok((await readPids(projectDir))?.services.api, 'so did the nameless restart\'s');
+  });
+
+  it('plans the launch from pids.json and lets flags override it', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      ['services:', '  db:', '    command: node -e ""', '    port: 3001', '    docker:', '      image: example/db', '  api:', '    command: node -e ""', '    port: 3000', '    depends_on: [db]', '    docker:', '      image: example/api', ''].join('\n'),
+      'utf8',
+    );
+    const rawConfig = await loadConfig(projectDir);
+    const startedAt = new Date().toISOString();
+    const base = { pid: process.pid, command: 'x', cwd: projectDir, startedAt };
+    const running: Record<string, PidServiceInfo> = {
+      db: { ...base, prod: true, runMode: 'docker', dockerContainer: 'c-db', image: 'example/db@sha256:aaa' },
+      api: { ...base, prod: true, runMode: 'docker', dockerContainer: 'c-api', setup: false },
+    };
+    const live = new Set(['db', 'api']);
+    const plan = (over: Partial<Parameters<typeof planRestart>[0]>) =>
+      planRestart({
+        rawConfig,
+        running,
+        runningNow: live,
+        stopping: ['api'],
+        involved: ['db', 'api'],
+        starting: ['api'],
+        requestedMode: 'local',
+        modeExplicit: false,
+        prod: undefined,
+        setup: undefined,
+        images: undefined,
+        ...over,
+      });
+
+    // restart api, nothing explicit: production, Docker and --no-setup are replayed; db's pin stays with db.
+    const replay = plan({});
+    assert.deepEqual({ prod: replay.prod, mode: replay.mode, setup: replay.setup, images: replay.images }, { prod: true, mode: 'docker', setup: false, images: {} });
+    assert.deepEqual(replay.replayed, ['--prod', 'docker', '--no-setup']);
+
+    // restart everything: db ran its setup steps and api did not, so there is no one setup choice to replay.
+    assert.throws(() => plan({ stopping: ['db', 'api'], starting: ['db', 'api'] }), /db with its setup steps.*no one setup choice/s);
+    // A dead dependency that comes back counts too: db recorded with setup steps, api with --no-setup.
+    assert.throws(() => plan({ runningNow: new Set(['api']), starting: ['db', 'api'] }), /no one setup choice/);
+    // Both started with --no-setup: replayed, and db's recorded pin comes back too.
+    const bothSkipped = { ...running, db: { ...running.db!, setup: false } };
+    const all = plan({ running: bothSkipped, stopping: ['db', 'api'], starting: ['db', 'api'] });
+    assert.deepEqual(all.images, { db: 'example/db@sha256:aaa' });
+    assert.deepEqual(all.replayed, ['--prod', 'docker', '--image db=example/db@sha256:aaa', '--no-setup']);
+    // A flag decides when the records disagree.
+    assert.equal(plan({ stopping: ['db', 'api'], starting: ['db', 'api'], setup: false }).setup, false);
+
+    // A new --image replaces the recorded pin, and --setup overrides --no-setup.
+    const over = plan({ stopping: ['db', 'api'], starting: ['db', 'api'], setup: true, images: { db: 'example/db@sha256:bbb' } });
+    assert.deepEqual(over.images, { db: 'example/db@sha256:bbb' });
+    assert.equal(over.setup, true);
+    assert.deepEqual(over.replayed, ['--prod', 'docker']);
+
+    // An explicit plain mode with db left running as a container: refused.
+    assert.throws(() => plan({ modeExplicit: true }), /db is running in Docker mode/);
+    // An explicit plain mode restarting everything: allowed; db is not a container there, so its pin is dropped.
+    const flip = plan({ stopping: ['db', 'api'], starting: ['db', 'api'], modeExplicit: true, setup: true });
+    assert.equal(flip.mode, 'local');
+    assert.deepEqual(flip.images, {});
+    assert.deepEqual(flip.droppedPins, ['db']);
+
+    // Entries that predate runMode: a container of a docker:-block service came from Docker mode.
+    const { runMode: _dropped, ...legacyDb } = running.db!;
+    assert.equal(plan({ running: { ...running, db: legacyDb } }).mode, 'docker');
+    // A container of a service no longer in the config proves neither mode (plain `up` runs a
+    // top-level image: in one too), so that legacy entry has no say; a legacy entry without a
+    // container was a local process wherever it came from.
+    const gone = { ...base, prod: false, dockerContainer: 'c-gone' };
+    const nameless = { stopping: ['gone', 'api'], involved: ['gone', 'api'], starting: ['db', 'api'], runningNow: new Set(['gone', 'api']) };
+    const alone = plan({ running: { gone }, stopping: ['gone'], involved: ['gone'], starting: ['db', 'api'], runningNow: new Set(['gone']) });
+    assert.equal(alone.mode, 'local');
+    assert.deepEqual(alone.replayed, []);
+    assert.equal(plan({ running: { gone, api: { ...base, prod: false } }, ...nameless }).mode, 'local');
+    assert.equal(plan({ running: { gone, api: { ...base, prod: false, dockerContainer: 'c-api' } }, ...nameless }).mode, 'docker');
+    assert.throws(
+      () => plan({ running: { gone: { ...base, prod: false }, api: { ...base, prod: false, dockerContainer: 'c-api' } }, ...nameless }),
+      /api was started in Docker mode and gone as a local process/,
+    );
+
+    // Entries `up k8s` wrote are refused, whether they record runMode or (older ones) only
+    // name the forward process, whatever the flags say; the stop never runs.
+    const forward = { ...base, command: 'portler __k8s-forward (kubectl port-forward service/x 1:2)' };
+    const k8sStack = { db: { ...forward }, api: { ...forward, runMode: 'k8s' as const } };
+    assert.throws(() => plan({ running: k8sStack }), /db, api were started with "portler up k8s".*portler down k8s/s);
+    assert.throws(() => plan({ running: k8sStack, modeExplicit: true, requestedMode: 'docker', prod: true, setup: true }), /started with "portler up k8s"/);
+    assert.throws(() => plan({ running: { ...running, db: forward } }), /^Error: db was started with "portler up k8s"/);
+
+    // Recorded modes that disagree cannot be replayed; the flag decides.
+    const mixed = { ...running, api: { ...running.api!, prod: false } };
+    assert.throws(() => plan({ running: mixed }), /no one mode to replay/);
+    assert.equal(plan({ running: mixed, prod: true, stopping: ['db', 'api'], starting: ['db', 'api'], setup: true }).prod, true);
+
+    // An explicit --prod with a development dependency left running: refused.
+    const dev: Record<string, PidServiceInfo> = {
+      db: { ...base, prod: false, runMode: 'local' },
+      api: { ...base, prod: false, runMode: 'local' },
+    };
+    assert.throws(() => plan({ running: dev, prod: true }), /db is running in development mode/);
+    // The same with nothing left behind: the whole stack switches.
+    assert.equal(plan({ running: dev, prod: true, stopping: ['db', 'api'], starting: ['db', 'api'] }).prod, true);
+    // A dead dependency entry is not "left running"; it is started again and does not block the switch.
+    assert.equal(plan({ running: dev, prod: true, runningNow: new Set(['api']), starting: ['db', 'api'] }).prod, true);
   });
 
   it('points the user at the down/up sequence that does work', async () => {

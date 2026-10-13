@@ -7,12 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { parseArgs } from '../src/cli/args.ts';
-import { commandUp } from '../src/cli/commands/up.ts';
+import { commandUp, StartSetChangedError, startPhase } from '../src/cli/commands/up.ts';
 import { commandDown } from '../src/cli/commands/down.ts';
 import { commandRestart } from '../src/cli/commands/restart.ts';
 import { commandSetup } from '../src/cli/commands/setup.ts';
 import { loadConfig } from '../src/config/loader.ts';
-import { readPids } from '../src/process/pids.ts';
+import { readPids, writePids } from '../src/process/pids.ts';
+import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
 import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
 
@@ -414,7 +415,7 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
-  it('restart --prod keeps a production stack in production mode', async () => {
+  it('a plain restart keeps a production stack in production mode', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -435,13 +436,14 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       assert.deepEqual(await lines(), ['prod']);
       assert.equal((await readPids(dir))?.services.api?.prod, true, 'the run mode is recorded');
 
-      // A routine restart must not flip the stack to development.
-      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /started with --prod/);
-      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+      // A routine restart replays the recorded launch: the stack stays in production.
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.api?.prod, true, 'replayed and recorded again');
+      assert.equal((await readPids(dir))?.services.api?.runMode, 'local', 'the run mode is recorded');
 
       await commandRestart(parseArgs(['api', '--prod'], 'restart'));
-      assert.deepEqual(await lines(), ['prod', 'prod']);
-      assert.equal((await readPids(dir))?.services.api?.prod, true);
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
     } finally {
       await commandDown(parseArgs([], 'down'));
     }
@@ -482,6 +484,190 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     }
   });
 
+  it('a restart that replays --prod checks prod.require first and leaves out what prod.services does', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    // db is the deployment's under --prod; its own requirement is never supplied here.
+    await config(`prod:
+  services: [api]
+services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      require: [DB_HOST_ONLY]
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+      require: [DEPLOY_SECRET]
+`);
+    const oldSecret = process.env.DEPLOY_SECRET;
+    const oldDbHost = process.env.DB_HOST_ONLY;
+    process.env.DEPLOY_SECRET = 's';
+    delete process.env.DB_HOST_ONLY;
+    try {
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      const pid = (await readPids(dir))?.services.api?.pid;
+      assert.ok(pid);
+      assert.deepEqual(await lines(), ['prod']);
+
+      // No --prod on the command line: the replayed one still checks prod.require
+      // while api is up.
+      delete process.env.DEPLOY_SECRET;
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service api requires DEPLOY_SECRET in production/);
+      assert.equal((await readPids(dir))?.services.api?.pid, pid, 'api was not stopped');
+      assert.doesNotThrow(() => process.kill(pid, 0), 'api is still running');
+      assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
+
+      // And it narrows to prod.services like a typed --prod: db is neither checked nor started.
+      process.env.DEPLOY_SECRET = 's';
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod']);
+      const after = await readPids(dir);
+      assert.equal(after?.services.api?.prod, true, 'replayed and recorded again');
+      assert.equal(after?.services.db, undefined, 'db stays the deployment\'s');
+
+      // Without names too: every service in the config would include db, which the
+      // replayed --prod leaves to the deployment.
+      await commandRestart(parseArgs([], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
+      assert.deepEqual(Object.keys((await readPids(dir))?.services ?? {}), ['api']);
+    } finally {
+      if (oldSecret === undefined) delete process.env.DEPLOY_SECRET;
+      else process.env.DEPLOY_SECRET = oldSecret;
+      if (oldDbHost === undefined) delete process.env.DB_HOST_ONLY;
+      else process.env.DB_HOST_ONLY = oldDbHost;
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('a dev copy of a service prod.services leaves out does not stop a plain restart replaying --prod', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    // Under --prod, db is the deployment's; a development db happens to run next to api.
+    await config(`prod:
+  services: [api]
+services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`);
+    try {
+      await commandUp(parseArgs(['db', '-d'], 'up'));
+      await commandUp(parseArgs(['api', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['dev', 'prod']);
+      const dbPid = (await readPids(dir))?.services.db?.pid;
+      assert.ok(dbPid);
+
+      // The same as `restart api --prod`: db has no say in the replayed mode.
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'prod', 'prod']);
+      const after = await readPids(dir);
+      assert.equal(after?.services.api?.prod, true);
+      assert.equal(after?.services.db?.pid, dbPid, 'db was left alone');
+      assert.notEqual(after?.services.db?.prod, true);
+
+      // db itself still restarts as what it is.
+      await commandRestart(parseArgs(['db'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'prod', 'prod', 'dev']);
+
+      // Restarting everything takes in both, and there is no one mode for that.
+      const before = await readPids(dir);
+      await assert.rejects(commandRestart(parseArgs([], 'restart')), /no one mode to replay/);
+      assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
+  it('a restart replaying --prod plans on prod.services as they are now', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', (process.env.MODE ?? 'unset') + '\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const services = `services:
+  db:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+  api:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+  web:
+    command: node server.mjs
+    port: 4002
+    port_env: PORT
+    depends_on: [db]
+    env: {MODE: dev}
+    prod:
+      env: {MODE: prod}
+`;
+    await config(`prod:\n  services: [db, api, web]\n${services}`);
+    try {
+      await commandUp(parseArgs(['api', 'web', '-d', '--prod'], 'up'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
+
+      // api has since been dropped from prod.services: its record still says --prod, and a
+      // plain restart is refused the way `restart api --prod` is, with api still running.
+      await config(`prod:\n  services: [db, web]\n${services}`);
+      const before = await readPids(dir);
+      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service "api" is not in prod\.services/);
+      assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
+
+      // web is not running and db, which it depends on, has died and been dropped too: the
+      // only record the restart sees is db's, which replays --prod, and web starts in
+      // production without db (the deployment's under --prod).
+      await commandDown(parseArgs(['web'], 'down'));
+      const dbPid = before?.services.db?.pid;
+      assert.ok(dbPid);
+      process.kill(-dbPid, 'SIGKILL');
+      for (let i = 0; i < 100; i++) {
+        try { process.kill(dbPid, 0); } catch { break; }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await config(`prod:\n  services: [web]\n${services}`);
+      await commandRestart(parseArgs(['web'], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'prod', 'prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.web?.prod, true);
+    } finally {
+      await commandDown(parseArgs([], 'down'));
+    }
+  });
+
   it('restart --prod refuses to put a production service on top of development dependencies', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
@@ -513,18 +699,24 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
 
       // restart skips the running db, so db would stay in development while api
       // came back in production: refused before anything is stopped.
-      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db, api were started in development mode/);
+      await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db is running in development mode/);
       assert.deepEqual(await lines(), ['dev', 'dev'], 'nothing was restarted');
 
       // Same mode: api restarts and db is left running.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
+
+      // Restarting everything may switch the whole stack: nothing is left behind in the other mode.
+      await commandRestart(parseArgs(['--prod'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev', 'dev', 'prod', 'prod']);
+      assert.equal((await readPids(dir))?.services.db?.prod, true);
+      assert.equal((await readPids(dir))?.services.api?.prod, true);
     } finally {
       await commandDown(parseArgs([], 'down'));
     }
   });
 
-  it('restart --no-setup restarts without running setup steps, which a server without the toolchain needs', async () => {
+  it('a restart replays --no-setup, which a server without the toolchain needs', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -542,17 +734,336 @@ services:
     try {
       await commandUp(parseArgs(['api', '-d', '--no-setup'], 'up'));
       assert.deepEqual(await lines(), ['dev']);
-      await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
+      assert.equal((await readPids(dir))?.services.api?.setup, false, '--no-setup is recorded');
+      // Without the flag, restart replays --no-setup.
+      await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev']);
-      assert.notEqual((await readPids(dir))?.services.api, undefined, 'api is running again');
-      // Without the flag, restart runs setup like up does: here that fails after api was stopped.
-      await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /failed \(exit code 17\)/);
+      assert.equal((await readPids(dir))?.services.api?.setup, false, 'and records it again');
+      await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
+      assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
+      // --setup overrides the recorded policy: the failing step runs, after api was stopped.
+      await assert.rejects(commandRestart(parseArgs(['api', '--setup'], 'restart')), /failed \(exit code 17\)/);
     } finally {
       await commandDown(parseArgs([], 'down')).catch(() => {});
     }
   });
 
-  it('a restart without names checks the mode of recorded services that left the config', async () => {
+  it('a dependency that exits while restart stops its root comes back with its own recorded launch', async () => {
+    // db records its pid; api, on SIGTERM, kills db and lingers a moment, so db is gone by the
+    // time the stop returns: a dependency that exits on its own between the plan and the start.
+    await fs.writeFile(path.join(dir, 'db.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.writeFileSync('db.pid', String(process.pid));
+fs.appendFileSync('steps', 'db\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await fs.writeFile(path.join(dir, 'api.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', 'api\\n');
+process.on('SIGTERM', () => {
+  try { process.kill(Number(fs.readFileSync('db.pid', 'utf8')), 'SIGKILL'); } catch {}
+  setTimeout(() => process.exit(0), 300);
+});
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await config(`setup: node -e "require('fs').appendFileSync('setups', 'x')"
+services:
+  db:
+    command: node db.mjs
+    port: 4000
+    port_env: PORT
+  api:
+    command: node api.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const setups = async () => fs.readFile(path.join(dir, 'setups'), 'utf8').catch(() => '');
+    try {
+      await commandUp(parseArgs(['-d'], 'up'));
+      await commandRestart(parseArgs(['db', '--no-setup'], 'restart'));
+      assert.equal((await readPids(dir))?.services.db?.setup, false, 'db now records --no-setup');
+      assert.deepEqual(await lines(), ['db', 'api', 'db']);
+      assert.equal(await setups(), 'x');
+
+      // api ran its setup and db skipped it. db dies during api's stop and would come back
+      // too, so its record takes part in the setup choice: the two disagree, and restart says
+      // so instead of starting db with api's setup steps.
+      await assert.rejects(
+        commandRestart(parseArgs(['api'], 'restart')),
+        /db exited on its own while restart was stopping api, and starting again is refused: db was started with --no-setup and api with its setup steps.*Nothing was started, so api is stopped/s,
+      );
+      assert.deepEqual(await lines(), ['db', 'api', 'db'], 'nothing was started');
+      assert.equal(await setups(), 'x', 'no setup ran');
+
+      // With both recorded --no-setup, db comes back with api, both without setup.
+      await commandRestart(parseArgs(['--no-setup'], 'restart'));
+      assert.deepEqual(await lines(), ['db', 'api', 'db', 'db', 'api']);
+      const dbBefore = (await readPids(dir))?.services.db?.pid;
+      await commandRestart(parseArgs(['api'], 'restart'));
+      assert.deepEqual(await lines(), ['db', 'api', 'db', 'db', 'api', 'db', 'api']);
+      const after = await readPids(dir);
+      assert.notEqual(after?.services.db?.pid, dbBefore, 'db was started again');
+      assert.equal(after?.services.db?.setup, false);
+      assert.equal(after?.services.api?.setup, false);
+      assert.equal(await setups(), 'x', 'still no setup ran');
+    } finally {
+      await commandDown(parseArgs([], 'down')).catch(() => {});
+    }
+  });
+
+  it('startPhase refuses to start anything its caller did not plan for', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+fs.appendFileSync('steps', 'started\\n');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    command: node server.mjs
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    // The caller planned api alone, but db is not running, so starting api would start db too.
+    await assert.rejects(
+      startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+      (error: unknown) => error instanceof StartSetChangedError && /planned api, found db, api/.test(error.message),
+    );
+    assert.equal((await readPids(dir))?.services.db, undefined, 'nothing was started');
+    await assert.rejects(fs.access(path.join(dir, 'steps')), 'no service ran');
+  });
+
+  it('startPhase leaves alone a dependency whose container runs on after its docker run shell', async () => {
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    image: postgres:16-alpine
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    // A docker on PATH that reports c-db running under this project's label: the shell
+    // `docker run db` ran in is gone, the container is not.
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // Planning nothing makes startPhase report what it would start, before it starts anything.
+      await assert.rejects(
+        startPhase(loaded, 'docker', ['api'], { detach: true, skipRunning: true, expectStart: [] }),
+        (error: unknown) => error instanceof StartSetChangedError && /planned none, found api\)/.test(error.message),
+      );
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+  });
+
+  it('startPhase does not call a kept dependency dead while its container runs on', async () => {
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // db is kept (its container runs), api starts; the check that a kept dependency is
+      // still alive after api's level must ask about the container, not the gone shell.
+      await startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] });
+      const after = await readPids(loaded.projectDir);
+      assert.deepEqual(after?.services.db, dbEntry, 'db was not touched');
+      assert.ok(after?.services.api, 'api was started');
+    } finally {
+      process.env.PATH = savedPath;
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  });
+
+  it('startPhase notices a started service that exits while a kept container is still being inspected', async () => {
+    // api answers the readiness connection, then exits 200 ms later: while the
+    // fake docker below is still answering about db.
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import http from 'node:http';
+const server = http.createServer((req, res) => res.end('ok'));
+server.once('connection', () => setTimeout(() => process.exit(1), 200));
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [db]
+`);
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { db: dbEntry } });
+
+    // A docker that takes a second to report c-db running.
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'eval last=\\${$#}', `[ "$last" = c-db ] && { sleep 1; printf '%s\\n' '${inspected}'; exit 0; }`, 'echo "Error: No such object: $last" >&2; exit 1', ''].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // api's level is the last one and there is no proxy, so the check after it is
+      // the only one that can see api die.
+      await assert.rejects(
+        startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+        /service api exited while the stack was still starting/,
+      );
+      assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+    } finally {
+      process.env.PATH = savedPath;
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  });
+
+  it('startPhase notices a kept pid-backed dependency that exits while another is still being inspected', async () => {
+    // api writes a marker once its readiness check connects; from then on the fake
+    // docker below kills cache partway through its inspect of db.
+    const marker = path.join(dir, 'api-ready');
+    await fs.writeFile(path.join(dir, 'server.mjs'), `
+import fs from 'node:fs';
+import http from 'node:http';
+const server = http.createServer((req, res) => res.end('ok'));
+server.once('connection', () => fs.writeFileSync(${JSON.stringify(marker)}, ''));
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const loaded = await config(`services:
+  cache:
+    command: node server.mjs
+    port: 4002
+    port_env: PORT
+  db:
+    image: postgres:16-alpine
+    port: 4000
+    port_env: PORT
+  api:
+    command: node server.mjs
+    port: 4001
+    port_env: PORT
+    depends_on: [cache, db]
+`);
+    // cache: a live process an earlier run started, kept by its pid.
+    const cache = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { stdio: 'ignore' });
+    const cachePid = cache.pid!;
+    const cacheToken = (await readProcessStartToken(cachePid)) ?? undefined;
+    await fs.writeFile(path.join(dir, 'cache.pid'), String(cachePid));
+    const cacheEntry = { pid: cachePid, command: 'node server.mjs', cwd: loaded.projectDir, startedAt: new Date().toISOString(), runMode: 'local' as const, ...(cacheToken !== undefined ? { startToken: cacheToken } : {}) };
+    // db: its docker run shell is gone, its container runs on.
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await once(exited, 'exit');
+    const dbEntry = { pid: exited.pid!, command: 'docker run db', cwd: loaded.projectDir, startedAt: new Date().toISOString(), dockerContainer: 'c-db', runMode: 'docker' as const };
+    await writePids(loaded.projectDir, { version: 1, project: loaded.projectDir, startedAt: new Date().toISOString(), services: { cache: cacheEntry, db: dbEntry } });
+
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': loaded.projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        'eval last=\\${$#}',
+        `if [ "$last" = c-db ]; then`,
+        `  if [ -f '${marker}' ]; then sleep 0.3; kill -9 "$(cat '${path.join(dir, 'cache.pid')}')"; sleep 0.7; fi`,
+        `  printf '%s\\n' '${inspected}'; exit 0`,
+        'fi',
+        'echo "Error: No such object: $last" >&2; exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      // cache passes its own check by its pid at once, then dies while db is still being
+      // inspected; api's level is the last and there is no proxy, so only this check can see it.
+      await assert.rejects(
+        startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] }),
+        /service cache exited while the stack was still starting/,
+      );
+      assert.deepEqual((await readPids(loaded.projectDir))?.services.db, dbEntry, 'db was not touched');
+    } finally {
+      process.env.PATH = savedPath;
+      cache.kill('SIGKILL');
+      const apiPid = (await readPids(loaded.projectDir))?.services.api?.pid;
+      if (apiPid !== undefined) {
+        try {
+          process.kill(-apiPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  });
+
+  it('a restart without names replays the mode of recorded services that left the config', async () => {
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
@@ -578,10 +1089,12 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     port_env: PORT
     env: {MODE: dev}
 `);
-      // old is no longer in the config but is recorded in production mode, and this restart would stop it.
-      await assert.rejects(commandRestart(parseArgs([], 'restart')), /old was started with --prod/);
-      assert.deepEqual(await lines(), ['prod'], 'nothing was stopped or started');
-      assert.notEqual((await readPids(dir))?.services.old, undefined, 'old is still running');
+      // old is no longer in the config but is recorded in production mode: the stack was
+      // production, so the restart stops old and starts the current config in production.
+      await commandRestart(parseArgs([], 'restart'));
+      assert.deepEqual(await lines(), ['prod', 'dev'], 'new has no prod env, so its MODE stays dev');
+      assert.equal((await readPids(dir))?.services.old, undefined, 'old is gone');
+      assert.equal((await readPids(dir))?.services.new?.prod, true, 'new was started in production mode');
     } finally {
       await commandDown(parseArgs([], 'down'));
     }
