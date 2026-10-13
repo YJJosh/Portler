@@ -9,6 +9,7 @@ portler down [docker|k8s] [service...] [--volumes] [--force]
 ## Behavior
 
 - Stops the selected services (all by default): local processes are signalled, Docker containers stopped and removed.
+- With service names, stops only those. Services that depend on them are left running; `down` names the ones still running (`warning: still running and depending on what was stopped: api (on db)`) so you can stop them too or bring the dependency back with `portler up -d <name>`.
 - Releases reservations only for services whose teardown completed. A service whose PID entry or Docker resource is kept after a failure keeps its reservation too, so another Portler run cannot claim its port while it may still bind or listen.
 - `portler down k8s` additionally deletes the generated Kubernetes Deployments and Services (for the whole project, or just the selected services) and stops the port-forwards.
 - With a [proxy](/guide/proxy) configured, `portler down` stops it too; `portler down proxy` stops **just** the proxy.

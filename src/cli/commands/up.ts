@@ -311,7 +311,9 @@ export async function startPhase(
   if (options.skipRunning) {
     selectedNames = orderedNames.filter((serviceName) => !runningNames.has(serviceName));
   } else {
-    ensureNoOverlap(runningNames, orderedNames);
+    // `up worker` with redis running usually means "bring worker back": restart does that and
+    // keeps the running dependencies, so it is the first thing the refusal suggests.
+    ensureNoOverlap(runningNames, orderedNames, ['portler restart', ...requestedRootNames].join(' '));
     selectedNames = orderedNames;
   }
   if (options.expectStart !== undefined) {
@@ -651,7 +653,11 @@ export async function startPhase(
       await assertMembersAlive();
     }
   } catch (error) {
-    process.stderr.write('[portler] startup failed — stopping already-started services and releasing allocated ports\n');
+    process.stderr.write(
+      startedEntries.size > 0 || children.size > 0
+        ? '[portler] startup failed — stopping already-started services and releasing allocated ports\n'
+        : '[portler] startup failed before any service started — releasing allocated ports\n',
+    );
     // The rollback must not replace the startup error with a cleanup error: the
     // reason the start failed is what the user needs to see. Whatever the
     // teardown could not do it has already reported for itself.

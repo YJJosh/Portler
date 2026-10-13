@@ -1,7 +1,7 @@
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertRequiredEnv, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
+import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
 import { readPids, runningServices } from '../../process/index.ts';
@@ -73,7 +73,12 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     const baseEnv = await loadBaseEnv(config, { allowMissing: true });
     const effective = buildEffectiveEnv(config, service, baseEnv, generatedEnv, assignments);
     try {
-      assertRequiredEnv(service ? `service ${service.name}` : 'the project', service ? requiredEnvKeys(config, service) : requiredEnvKeys(config), deploymentEnv(baseEnv));
+      assertRequiredEnv(
+        service ? `service ${service.name}` : 'the project',
+        service ? requiredEnvKeys(config, service) : requiredEnvKeys(config),
+        deploymentEnv(baseEnv),
+        blankRequiredKeys(config, service ?? undefined),
+      );
     } catch (error) {
       process.stderr.write(`[portler] ${(error as Error).message}\n`);
     }

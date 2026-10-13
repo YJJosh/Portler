@@ -2,7 +2,7 @@ import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { deleteK8sResources, detectCluster } from '../../k8s/index.ts';
 import { releasePorts } from '../../ports/index.ts';
-import { stopServices } from '../../process/index.ts';
+import { liveServiceNames, readPids, stopServices } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { PortlerConfig } from '../../types/index.ts';
@@ -54,6 +54,27 @@ function releasableTargets(config: PortlerConfig, selectedNames: string[] | unde
   return [...new Set([...configured, ...result.completed])].filter((name) => !remaining.has(name));
 }
 
+/**
+ * `down redis` stops only redis. Services that depend on it keep running and start failing
+ * against it, so name them: the user can stop them too, or bring the dependency back.
+ */
+async function warnAboutDependents(config: PortlerConfig, stoppedNames: string[]): Promise<void> {
+  const stopped = new Set(stoppedNames);
+  const live = new Set(await liveServiceNames(config.projectDir, await readPids(config.projectDir)));
+  const dependents: string[] = [];
+  for (const [name, service] of Object.entries(config.services)) {
+    if (stopped.has(name) || !live.has(name)) continue;
+    const on = service.dependsOn.map((dependency) => dependency.service).filter((dependency) => stopped.has(dependency));
+    if (on.length > 0) dependents.push(`${name} (on ${on.join(', ')})`);
+  }
+  if (dependents.length === 0) return;
+  const back = stoppedNames.filter((name) => name !== PROXY_SERVICE_NAME);
+  process.stderr.write(
+    `[portler] warning: still running and depending on what was stopped: ${dependents.join(', ')}. ` +
+      (back.length > 0 ? `Stop them too, or bring it back with "portler up -d ${back.join(' ')}".\n` : 'Stop them too.\n'),
+  );
+}
+
 export async function commandDown(args: ParsedArgs): Promise<number> {
   const config = await loadConfig(process.cwd(), args.file);
   const { mode, requested } = parseRunMode(args.positionals);
@@ -94,6 +115,7 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     const incomplete = result.unverified.length > 0 || result.failures.length > 0;
     if (result.stopped.length > 0) {
       process.stdout.write(`[portler] stopped: ${result.stopped.join(', ')}\n`);
+      if (selectedNames) await warnAboutDependents(config, result.stopped);
     } else if (!incomplete) {
       process.stdout.write('[portler] no running services found\n');
     }
