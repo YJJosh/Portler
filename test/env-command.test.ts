@@ -83,6 +83,15 @@ describe('env for a running service', () => {
     assert.match(result.stderr, /backend was started with "portler up docker"; this shows the environment it got/);
   });
 
+  it('rebuilds missing state with the --image pin the running container was started from', async () => {
+    // No state.json: env allocates the assignments again, and the pin recorded in
+    // pids.json, not the image in portler.yml, is what the container runs.
+    await record({ runMode: 'docker', dockerContainer: 'c-backend', image: 'example/backend@sha256:pinned' });
+    const result = run('backend');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend@sha256:pinned');
+  });
+
   it('infers Docker mode for an entry written before runMode was recorded', async () => {
     await record({ dockerContainer: 'c-backend' });
     const result = run('backend');

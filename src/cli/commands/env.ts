@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
 import { deployedK8sServices, detectCluster, k8sManifestDir, k8sServiceNames, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
@@ -10,7 +10,7 @@ import { allocateAssignments } from '../../ports/index.ts';
 import { readPids, runningServices, serviceLiveness } from '../../process/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
-import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
 import { validateK8sMode } from './up-k8s.ts';
@@ -49,6 +49,31 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
   const assignments = await allocateAssignments(config, state, reserveServices, running);
   await writeState(config.projectDir, assignments);
   return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
+}
+
+/**
+ * The `--image` pins of the containers that still run in `mode`. state.json normally
+ * carries the pinned image from that `up`, but when it is missing or incomplete the
+ * assignments are rebuilt from the config, and without the pins `PORTLER_<SERVICE>_IMAGE`
+ * and `${service.image}` would name the image in portler.yml instead of the one the
+ * container runs. A pin from a launch in another run mode, or of a service that is no
+ * longer a container in this view, describes nothing shown here and is left out.
+ */
+async function runningImagePins(
+  loadedConfig: PortlerConfig,
+  modeConfig: PortlerConfig,
+  mode: RunMode,
+  recordedServices: Readonly<Record<string, PidServiceInfo>>,
+): Promise<Record<string, string>> {
+  const localConfig = configForRunMode(loadedConfig, 'local');
+  const pins: Record<string, string> = {};
+  for (const [name, info] of Object.entries(recordedServices)) {
+    if (info.image === undefined || modeConfig.services[name]?.docker === undefined) continue;
+    if (!loadedConfig.services[name] || recordedRunMode(localConfig, name, info) !== mode) continue;
+    if ((await serviceLiveness(loadedConfig.projectDir, info)).status === 'dead') continue;
+    pins[name] = info.image;
+  }
+  return pins;
 }
 
 /** The `up` command line for a launch, as the env notices name it. */
@@ -93,7 +118,8 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     // A service with a pids.json entry, live or stale, is shown as it was started: in its
     // run mode and, if it was started with --prod, in production. A typed mode token or
     // --prod wins over the record, as it does for restart, and a notice says so.
-    const recorded = serviceName ? (await readPids(loadedConfig.projectDir))?.services[serviceName] : undefined;
+    const recordedServices = (await readPids(loadedConfig.projectDir))?.services ?? {};
+    const recorded = serviceName ? recordedServices[serviceName] : undefined;
     let recordedMode = recorded && recordedRunMode(configForRunMode(loadedConfig, 'local'), serviceName!, recorded);
     let recordedProd = recorded?.prod === true;
     // Only an entry that still runs settles it. With none, or one that has stopped, the
@@ -129,7 +155,9 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
       }
     }
 
-    const config = applyProduction(configForRunMode(productionServices(loadedConfig, prod, requested), mode), prod);
+    const modeConfig = configForRunMode(productionServices(loadedConfig, prod, requested), mode);
+    const pins = await runningImagePins(loadedConfig, modeConfig, mode, recordedServices);
+    const config = applyProduction(applyImageOverrides(modeConfig, pins), prod);
     const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
     if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
     // A typed mode token must describe a launch that could happen: refuse what `up docker`
