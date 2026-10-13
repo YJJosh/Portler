@@ -385,7 +385,10 @@ export async function startPhase(
   // Ctrl-C may end the wait for another project's hold on the port registry: nothing
   // is reserved or started yet. Later waits are not cancellable on purpose: the pid
   // entry written after each spawn is how the rollback finds what to stop.
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { signal: options.signal });
+  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, {
+    signal: options.signal,
+    recorded: pidsBefore?.services,
+  });
   const generatedEnv = buildGeneratedEnv(assignments);
   const baseEnv = await loadBaseEnv(config, { allowMissing: options.prod });
 

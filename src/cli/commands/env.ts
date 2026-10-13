@@ -62,10 +62,11 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 
   // Never re-reserve currently-running services: allocateAssignments would
   // re-probe their busy ports and move them away from where they listen.
-  const running = new Set(await liveServiceNames(config.projectDir, await readPids(config.projectDir)));
+  const pids = await readPids(config.projectDir);
+  const running = new Set(await liveServiceNames(config.projectDir, pids));
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 
-  const assignments = await allocateAssignments(config, state, reserveServices, running);
+  const assignments = await allocateAssignments(config, state, reserveServices, running, { recorded: pids?.services });
   await writeState(config.projectDir, assignments);
   return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
 }

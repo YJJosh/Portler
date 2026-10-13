@@ -231,6 +231,26 @@ describe('allocateAssignments', () => {
     }
   });
 
+  it('falls back to the pids.json port of a running service when registry and state have none', async () => {
+    const { port: busyPort, close } = await occupyPort();
+    try {
+      const config = makeConfig('/project-a', [makeService('api'), makeService('web', { port: 3000 })]);
+      const running = new Set(['api']);
+      const recorded = { api: { port: busyPort } };
+      const assignments = await allocateAssignments(config, null, ['web'], running, { recorded });
+
+      // api listens on busyPort; probing would move it and env would advertise the wrong port.
+      assert.equal(assignments.api!.port, busyPort);
+      assert.notEqual(assignments.web!.port, busyPort);
+
+      // Only running services take the recorded port; a stopped one is probed as before.
+      const stopped = await allocateAssignments(config, null, ['api'], NO_RUNNING, { recorded });
+      assert.notEqual(stopped.api!.port, busyPort);
+    } finally {
+      await close();
+    }
+  });
+
   it('prefers the declared port when prefer_declared_port is set', async () => {
     const declaredPort = await findFreePort();
     const config = makeConfig('/project-a', [

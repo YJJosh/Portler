@@ -145,14 +145,15 @@ async function startK8sPhase(
   cluster: ClusterInfo,
   selectedNames: string[],
 ): Promise<K8sStack> {
-  const runningNames = new Set(await liveServiceNames(config.projectDir, await readPids(config.projectDir)));
+  const pids = await readPids(config.projectDir);
+  const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
   ensureNoOverlap(runningNames, selectedNames);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
   const startProxy = config.proxy !== undefined && !runningNames.has(PROXY_SERVICE_NAME);
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames);
+  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services });
   const generatedEnv = buildGeneratedEnv(assignments);
 
   await writeState(config.projectDir, assignments);

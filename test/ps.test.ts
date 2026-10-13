@@ -288,6 +288,27 @@ for (const container of ['c-running', 'c-unreachable']) {
     assert.match(result.stdout, new RegExp(`PORTLER_WORKER_PORT=${port}\\b`));
   });
 
+  it(`env finds the port of ${container} in pids.json when state.json and the registry are gone`, async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-env-pidport-')));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as net.AddressInfo).port;
+    await fs.writeFile(path.join(dir, 'portler.yml'), 'services: {worker: {image: alpine:3.20, container_name: '+container+', port: 80}}\n');
+    await writePids(dir, {
+      version: 1, project: dir, startedAt: new Date().toISOString(),
+      services: { worker: { pid: await exitedPid(), command: 'docker run', cwd: dir, startedAt: new Date().toISOString(), dockerContainer: container, port } },
+    });
+    const docker = await fakeDocker(dir, dir);
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env'], {
+      cwd: dir, encoding: 'utf8',
+      env: { ...process.env, PATH: `${docker.bin}${path.delimiter}${process.env.PATH ?? ''}`, PORTLER_GLOBAL_DIR: path.join(dir, 'global') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`PORTLER_WORKER_PORT=${port}\\b`));
+  });
+
   it(`up k8s refuses overlap with ${container} without a supervisor`, async () => {
     const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-k8s-live-')));
     cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));

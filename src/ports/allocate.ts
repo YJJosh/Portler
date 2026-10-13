@@ -5,7 +5,7 @@ import { CorruptStateFileError } from '../util/json-file.ts';
 import { withRegistryLock } from './lock.ts';
 import { isPortFree } from './probe.ts';
 import { pruneRegistry, readRegistry, writeRegistry } from './registry.ts';
-import type { Assignments, PortlerConfig, RegistryFile, ServiceAssignment, ServiceConfig, StateFile } from '../types/index.ts';
+import type { Assignments, PidServiceInfo, PortlerConfig, RegistryFile, ServiceAssignment, ServiceConfig, StateFile } from '../types/index.ts';
 
 function formatHostForUrl(host: string): string {
   if (host.includes(':') && !host.startsWith('[')) return `[${host}]`;
@@ -106,14 +106,17 @@ async function choosePort(
  * their recorded port is reused verbatim (it is busy precisely because they
  * listen on it), never re-probed. Callers must NOT include them in
  * `reserveServices`, since reserving deletes the registry entry and
- * re-probes.
+ * re-probes. `options.recorded` is this project's pids.json services: a running
+ * service's port there is the last place to find it when neither the registry
+ * nor state.json still has it (a reset registry, a new PORTLER_GLOBAL_DIR, a
+ * deleted state.json).
  */
 export async function allocateAssignments(
   config: PortlerConfig,
   state: StateFile | null,
   reserveServices: string[],
   runningServiceNames: ReadonlySet<string>,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; recorded?: Readonly<Record<string, Pick<PidServiceInfo, 'port'>>> } = {},
 ): Promise<Assignments> {
   return withRegistryLock(async () => {
     const registry = await readRegistry();
@@ -158,7 +161,11 @@ export async function allocateAssignments(
       if (reserveSet.has(service.name) || !runningServiceNames.has(service.name)) continue;
 
       const statePort = state?.services?.[service.name]?.port;
-      const port = ownPorts.get(service.name) ?? (statePort !== undefined && isPort(statePort) ? statePort : undefined);
+      const recordedPort = options.recorded?.[service.name]?.port;
+      const port =
+        ownPorts.get(service.name) ??
+        (statePort !== undefined && isPort(statePort) ? statePort : undefined) ??
+        (recordedPort !== undefined && isPort(recordedPort) ? recordedPort : undefined);
       if (port === undefined) continue;
 
       assignments[service.name] = makeAssignment(service, port);
