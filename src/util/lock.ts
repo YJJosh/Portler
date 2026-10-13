@@ -27,6 +27,9 @@ import { sleep } from './sleep.ts';
 
 const OWNER_FILE = 'owner';
 const POLL_MS = 100;
+// Slack past a dead owner's stale time, for the lock's mtime and Date.now()
+// coming from different clocks.
+const DEAD_OWNER_MARGIN_MS = 1_000;
 
 /**
  * Liveness check for a lock's recorded owner. Deliberately local rather than
@@ -70,6 +73,14 @@ export interface LockOptions {
   waitMs: number;
   /** Used in the timeout message, e.g. "global port registry". */
   description: string;
+  /** Tests only: how the lock directory's metadata is read (defaults to fs.stat). */
+  stat?: (target: string) => Promise<LockDirStat>;
+}
+
+export interface LockDirStat {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
 }
 
 export interface LockOwner {
@@ -129,21 +140,38 @@ export function isTakeoverAllowed(owner: LockOwner | null, ageMs: number, staleM
   return !isProcessAlive(owner.pid);
 }
 
+/** An owner on this host whose process no longer exists. */
+function ownerProvablyDead(owner: LockOwner | null, thisHost: string): boolean {
+  return owner !== null && owner.host === thisHost && !isProcessAlive(owner.pid);
+}
+
+function sameOwner(a: LockOwner, b: LockOwner): boolean {
+  return a.pid === b.pid && a.host === b.host && a.at === b.at && a.token === b.token;
+}
+
 /**
  * Take over a stale lock. The rename makes the removal exclusive: if another
  * process renamed it first we get ENOENT and simply retry the mkdir, rather
  * than deleting a lock that has since been legitimately re-acquired.
  */
-async function takeOverStaleLock(lockDir: string): Promise<void> {
+/**
+ * Moves a stale lock out of the way. Returns null when the lock is gone (moved
+ * by us, or released or taken over by someone else meanwhile), so the caller
+ * can retry at once; otherwise the error that kept it in place, so the caller
+ * waits and eventually times out instead of retrying in a tight loop.
+ */
+async function takeOverStaleLock(lockDir: string): Promise<NodeJS.ErrnoException | null> {
   const abandoned = `${lockDir}.stale.${process.pid}.${randomToken()}`;
 
   try {
     await fs.rename(lockDir, abandoned);
-  } catch {
-    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return error as NodeJS.ErrnoException;
   }
 
   await fs.rm(abandoned, { recursive: true, force: true });
+  return null;
 }
 
 /**
@@ -185,7 +213,31 @@ async function pathMissing(target: string): Promise<boolean> {
   }
 }
 
-function timeoutError(lockDir: string, options: LockOptions, owner: LockOwner | null, thisHost: string): LockTimeoutError {
+/**
+ * The lock directory's mtime and owner, read as one generation. Another waiter
+ * can take the lock over between the two reads, which would pair the replaced
+ * directory's mtime with the new owner (or with no owner yet, mid-write). The
+ * directory is read again after the owner file, and a change in between means
+ * the snapshot is mixed: 'changed', try again.
+ */
+async function readLockSnapshot(
+  lockDir: string,
+  stat: (target: string) => Promise<LockDirStat>,
+): Promise<{ mtimeMs: number; owner: LockOwner | null } | 'changed'> {
+  const before = await stat(lockDir);
+  const owner = await readOwner(lockDir);
+  const after = await stat(lockDir);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs) return 'changed';
+  return { mtimeMs: after.mtimeMs, owner };
+}
+
+function timeoutError(
+  lockDir: string,
+  options: LockOptions,
+  owner: LockOwner | null,
+  thisHost: string,
+  takeoverError: NodeJS.ErrnoException | null = null,
+): LockTimeoutError {
   const held =
     owner === null
       ? ''
@@ -195,7 +247,13 @@ function timeoutError(lockDir: string, options: LockOptions, owner: LockOwner | 
           'cannot probe for liveness, so it is never taken over automatically. If that process is definitely gone, ' +
           `remove ${lockDir} by hand.`;
 
-  return new LockTimeoutError(`timed out waiting for the ${options.description} lock: ${lockDir}.${held}`, lockDir);
+  const stuck =
+    takeoverError === null
+      ? ''
+      : ` The lock is stale, but it could not be moved out of the way (${takeoverError.code ?? takeoverError.message}); ` +
+        `check the permissions of ${path.dirname(lockDir)}, or remove ${lockDir} by hand.`;
+
+  return new LockTimeoutError(`timed out waiting for the ${options.description} lock: ${lockDir}.${held}${stuck}`, lockDir);
 }
 
 async function acquire(lockDir: string, options: LockOptions): Promise<() => Promise<void>> {
@@ -203,7 +261,21 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   const startedAt = Date.now();
   const host = os.hostname();
   const token = randomToken();
+  const stat = options.stat ?? ((target: string) => fs.stat(target));
   let lastOwner: LockOwner | null = null;
+  // One deadline for the whole wait. It only ever moves later: once a dead
+  // owner's lock has been found, the wait it justified holds even after
+  // another waiter takes the lock over and becomes the (live) owner, and that
+  // replacement gets one ordinary waitMs window of its own (see below).
+  let deadline = startedAt + options.waitMs;
+  let deadOwner: LockOwner | null = null;
+  let replacementWindowGiven = false;
+  // When we first saw the current owner: the latest that owner can have taken
+  // the lock, whatever the directory's mtime says.
+  let seenOwner: LockOwner | null = null;
+  let seenAt = startedAt;
+  // Why the last stale-lock takeover failed, for the timeout message.
+  let takeoverError: NodeJS.ErrnoException | null = null;
 
   for (;;) {
     try {
@@ -212,22 +284,55 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
 
       // Someone else owns the existing directory; continue into the wait path.
-      if (Date.now() - startedAt > options.waitMs) throw timeoutError(lockDir, options, lastOwner, host);
-
       try {
-        const stat = await fs.stat(lockDir);
-        lastOwner = await readOwner(lockDir);
-
-        if (isTakeoverAllowed(lastOwner, Date.now() - stat.mtimeMs, options.staleMs, host)) {
-          await takeOverStaleLock(lockDir);
+        const snapshot = await readLockSnapshot(lockDir, stat);
+        if (snapshot === 'changed') {
+          if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host, takeoverError);
           continue;
+        }
+        lastOwner = snapshot.owner;
+        const now = Date.now();
+        if (lastOwner !== null && (seenOwner === null || !sameOwner(lastOwner, seenOwner))) {
+          seenOwner = lastOwner;
+          seenAt = now;
+        }
+        // The lock directory's clock may run ahead of ours. A future mtime only
+        // makes the lock look younger (never stale early); it must not push the
+        // deadline past what we observed, so it counts as the moment we first
+        // saw this owner (fixed, so the deadline cannot slide on every poll).
+        const mtime = Math.min(snapshot.mtimeMs, lastOwner === null ? now : seenAt);
+
+        if (isTakeoverAllowed(lastOwner, now - snapshot.mtimeMs, options.staleMs, host)) {
+          takeoverError = await takeOverStaleLock(lockDir);
+          // The lock is out of the way: try to create ours at once. If it could
+          // not be moved, fall through to the deadline and the poll sleep, so a
+          // takeover that keeps failing ends in a timeout, not a busy loop.
+          if (takeoverError === null) continue;
+        }
+
+        // A holder on this host that is provably dead (a command killed while
+        // inside the critical section) cannot release, and its lock becomes
+        // ours to take once it is staleMs old. Waiting for that is bounded and
+        // ends with the lock; giving up at waitMs instead makes every command
+        // started shortly after the crash fail outright.
+        if (ownerProvablyDead(lastOwner, host)) {
+          deadline = Math.max(deadline, mtime + options.staleMs + DEAD_OWNER_MARGIN_MS);
+          deadOwner = lastOwner;
+        } else if (deadOwner !== null && !replacementWindowGiven && lastOwner !== null && !sameOwner(lastOwner, deadOwner)) {
+          // Another waiter took the dead owner's lock over. We have been
+          // waiting all along, so treat its acquisition as the moment our wait
+          // started and allow its critical section the ordinary waitMs, once.
+          deadline = Math.max(deadline, mtime + options.waitMs);
+          replacementWindowGiven = true;
         }
       } catch (statError) {
         // ENOENT: the holder released the lock between our failed mkdir and the
-        // stat — retry immediately. Anything else (e.g. permissions) falls
+        // reads — retry immediately. Anything else (e.g. permissions) falls
         // through to the sleep so it cannot busy-spin.
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
       }
+
+      if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host, takeoverError);
 
       await sleep(POLL_MS);
       continue;
