@@ -763,6 +763,9 @@ export async function startServices(
     if (signalCode !== undefined) return;
     signalCode = signal === 'SIGINT' ? 130 : 143;
     process.stderr.write(`[portler] received ${signal}, stopping services...\n`);
+    // Like the running supervisor: a second Ctrl-C during the rollback gets the
+    // default handling, so a stuck rollback can still be interrupted.
+    unlisten();
     // Carry the original signal through to an active setup shell.
     cancellation!.abort(signal);
   };
