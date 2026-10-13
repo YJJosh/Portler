@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { closeSync, mkdirSync, openSync, renameSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { portlerDir } from '../state/index.ts';
 
@@ -9,6 +11,26 @@ export function logsDir(projectDir: string): string {
 /** The log file capturing one detached service's stdout/stderr. */
 export function serviceLogPath(projectDir: string, serviceName: string): string {
   return path.join(logsDir(projectDir), `${serviceName}.log`);
+}
+
+/**
+ * Start a fresh captured log generation. Create the new inode before replacing
+ * the old one so even a restart between follower polls is detectable, without
+ * an interval where the log path is missing (or immediate inode reuse).
+ * The caller owns the returned descriptor.
+ */
+export function openServiceLog(filePath: string): number {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  const fd = openSync(tempPath, 'wx');
+  try {
+    renameSync(tempPath, filePath);
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    unlinkSync(tempPath);
+    throw error;
+  }
 }
 
 export interface LinePrinter {

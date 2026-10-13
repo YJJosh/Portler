@@ -1,10 +1,9 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { closeSync, mkdirSync, openSync } from 'node:fs';
-import path from 'node:path';
+import { closeSync } from 'node:fs';
 import { resolveServiceCwd } from '../config/index.ts';
 import { dockerShellCommand } from './docker.ts';
-import { prefixStream } from './logs.ts';
+import { openServiceLog, prefixStream } from './logs.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
 /** Resolve the concrete shell command used to start a service. */
@@ -41,11 +40,10 @@ export function spawnService(
 
   // The child inherits the file descriptor directly, so log capture keeps
   // working after this process exits and unrefs the detached child. Each
-  // start truncates the previous run's log.
+  // start replaces the previous run's log with a detectable new generation.
   let logFd: number | undefined;
   if (!attachLogs && logFilePath) {
-    mkdirSync(path.dirname(logFilePath), { recursive: true });
-    logFd = openSync(logFilePath, 'w');
+    logFd = openServiceLog(logFilePath);
   }
 
   const child = spawn(command, {
