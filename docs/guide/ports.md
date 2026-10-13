@@ -64,7 +64,7 @@ port_range:
 
 ## The global registry
 
-Assignments are recorded in `~/.portler/ports.json`, shared by all projects on the machine, so two Portler projects never hand out the same port even when started concurrently (a lock file serializes allocation). Entries are pruned automatically when their port is free again and the reservation is old enough.
+Assignments are recorded in `~/.portler/ports.json`, shared by all projects on the machine, so two Portler projects never hand out the same port even when started concurrently (a lock file serializes allocation). Entries are pruned automatically when their port is free again and the reservation is more than five minutes old.
 
 Related commands:
 

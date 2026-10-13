@@ -36,7 +36,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 | `prod` | object | — | Production `setup`, `command` replacements, `env` overrides and `require` |
 | `command` | string | — | Shell command that starts the service (local mode) |
 | `cwd` | string | `.` | Working directory, relative to the project root: the folder Portler runs in, which `--file` does not change. A folder that does not exist stops `up`, `restart`, `setup` and `start` before anything runs |
-| `port` | integer | — | Preferred port (local) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
+| `port` | integer | — | Declared port (local; tried first only with `prefer_declared_port`, see [Ports](/guide/ports)) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
 | `port_env` | string \| list | `[]` | Env variable name(s) that receive the port |
 | `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development. Alias: `environment` |
 | `host` | string | top-level `host` | Bind/probe host override |
@@ -249,7 +249,7 @@ services:
     volumes:
       - '@postgres-data:/var/lib/postgresql/data'
     healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -U app -d app
+      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
     k8s:
       volume:
         size: 1Gi

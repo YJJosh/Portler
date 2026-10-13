@@ -10,7 +10,7 @@ portler up k8s [service...] [--detach] [--image <service>=<image>]
 
 ## Behavior
 
-- Runs setup automatically: root setup before any starts, service setup just before its service starts, after dependency readiness. A plain step runs when it has never succeeded in this checkout or its definition changed (receipts live in `.portler/setup.json`, separately for dev/prod and local/Docker modes); an `if_missing` step runs while its path is absent; an `always` step runs every time. See [Setup & production](/guide/setup-and-production).
+- Runs setup automatically: root setup before any starts, service setup just before its service starts, after dependency readiness. A plain step runs when it has never succeeded in this checkout or its definition changed, and a `watch` step also when one of its listed files changed (receipts live in `.portler/setup.json`, separately for dev/prod and local/Docker modes); an `if_missing` step runs while its path is absent; an `always` step runs every time. See [Setup & production](/guide/setup-and-production).
 - Existing running-service overlaps are rejected, running as [`portler ps`](/reference/cli/ps) reports it: a Docker service whose container runs on after its `docker run` process has gone counts, so `up` does not replace that container. Use `down` before another `up`, including when switching dev/prod; Portler does not implicitly restart existing processes.
 - Assigns a free port to every service that declares one (see [Ports](/guide/ports)) and prints the `SERVICE / PORT / URL` table.
 - Starts services in [dependency order](/guide/dependencies), waiting for each dependency's healthcheck.
@@ -49,4 +49,4 @@ portler up --volume-set my-branch   # forked data variants
 portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…   # CI-built image, nothing built
 ```
 
-Kubernetes mode ignores setup definitions and rejects `--prod`, `--setup` and `--no-setup`. Source files, lockfiles, ports and env values are not part of setup fingerprints: use `if_missing` or `always` steps for commands that must follow them, or force setup after changing these inputs.
+Kubernetes mode ignores setup definitions and rejects `--prod`, `--setup` and `--no-setup`. Source files, lockfiles, ports and env values are not part of setup fingerprints unless a step lists the files in `watch:`: use `watch`, `if_missing` or `always` steps for commands that must follow them, or force setup after changing these inputs.

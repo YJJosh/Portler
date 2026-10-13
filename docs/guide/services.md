@@ -7,7 +7,7 @@ services:
   backend:
     command: npm run dev   # how to start it
     cwd: backend           # working directory, relative to the project root
-    port: 4000             # preferred port (Portler may assign another one)
+    port: 4000             # declared port; the assigned one usually differs (see Ports)
     port_env: PORT         # env variable(s) that receive the assigned port
     env:
       DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
