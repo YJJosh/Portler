@@ -41,7 +41,7 @@ Clones a volume's data into a `<volume>--<new-set>` variant:
 portler volumes fork postgres-data migration
 ```
 
-The copy runs `cp -a` inside a throwaway `alpine:3` container, so the original is untouched. `<volume>` can be the short name from portler.yml, a `name--set` variant, or the full Docker volume name. Both the source and the newly-created target must carry this project's ownership label; a name match alone never authorizes reading, overwriting, or rollback-removing volume data.
+The copy runs `cp -a` inside a throwaway `alpine:3` container, so the original is untouched. `<volume>` can be the short name from portler.yml, a `name--set` variant, or the full Docker volume name. Both the source and the newly-created target must carry this project's ownership label; a name match alone never authorizes reading, overwriting, or rollback-removing volume data. The target also gets a random `portler.fork-attempt` label: when two forks into the same new set race, only the one that created the target copies into it, the other stops with "another fork created target volume … at the same time", and a failed copy only removes a target its own attempt created.
 
 ## Volume sets
 

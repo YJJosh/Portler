@@ -198,3 +198,136 @@ describe('managed volume destructive-operation ownership', () => {
     assert.deepEqual(removeCall, ['volume', 'rm', '-f', fullName]);
   });
 });
+
+describe('concurrent forks into the same target', () => {
+  let stateDir: string;
+
+  // A stateful fake: one JSON file of labels per volume. `volume create` keeps an
+  // existing volume and its labels and still succeeds, like Docker 29 (or fails
+  // with MOCK_CREATE_CONFLICT, like a Docker that refuses), and the absent-target
+  // check waits until two forks have both seen the target absent.
+  beforeEach(async () => {
+    stateDir = path.join(tempDir, 'state');
+    await fs.mkdir(path.join(stateDir, 'volumes'), { recursive: true });
+    await fs.mkdir(path.join(stateDir, 'barrier'), { recursive: true });
+    process.env.MOCK_DOCKER_STATE = stateDir;
+
+    const docker = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.MOCK_DOCKER_CALLS, JSON.stringify(args) + '\\n');
+const state = process.env.MOCK_DOCKER_STATE;
+const file = (name) => path.join(state, 'volumes', name + '.json');
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const absent = (name) => { console.error('Error response from daemon: get ' + name + ': no such volume'); process.exit(1); };
+if (args[0] === 'version') { console.log('29.0.0'); process.exit(0); }
+if (args[0] === 'ps') process.exit(0);
+if (args[0] === 'volume' && args[1] === 'inspect') {
+  const name = args.at(-1);
+  if (!fs.existsSync(file(name))) {
+    if (!args.includes('--format') && name.endsWith('--merged') && process.env.MOCK_BARRIER) {
+      const barrier = path.join(state, 'barrier');
+      fs.writeFileSync(path.join(barrier, String(process.pid)), '');
+      const deadline = Date.now() + 10000;
+      while (fs.readdirSync(barrier).length < 2 && Date.now() < deadline) sleep(20);
+    }
+    absent(name);
+  }
+  if (args.includes('--format')) console.log(fs.readFileSync(file(name), 'utf8'));
+  process.exit(0);
+}
+if (args[0] === 'volume' && args[1] === 'create') {
+  const name = args.at(-1);
+  const labels = {};
+  args.forEach((arg, index) => {
+    if (args[index - 1] === '--label') labels[arg.slice(0, arg.indexOf('='))] = arg.slice(arg.indexOf('=') + 1);
+  });
+  try {
+    fs.writeFileSync(file(name), JSON.stringify(labels), { flag: 'wx' });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    if (process.env.MOCK_CREATE_CONFLICT) { console.error('Error response from daemon: volume ' + name + ' already exists'); process.exit(1); }
+  }
+  console.log(name);
+  process.exit(0);
+}
+if (args[0] === 'volume' && args[1] === 'rm') { fs.rmSync(file(args.at(-1))); process.exit(0); }
+if (args[0] === 'run') {
+  if (process.env.MOCK_COPY_FAIL === 'replaced') {
+    // Our target is removed and a concurrent fork of the same project recreates the name.
+    const target = args.find((arg) => arg.endsWith(':/to')).slice(0, -':/to'.length);
+    const labels = JSON.parse(fs.readFileSync(file(target), 'utf8'));
+    fs.writeFileSync(file(target), JSON.stringify({ ...labels, 'portler.fork-attempt': 'another-attempt' }));
+  }
+  if (process.env.MOCK_COPY_FAIL) { console.error('cp: write error'); process.exit(1); }
+  process.exit(0);
+}
+process.exit(0);
+`;
+    await fs.writeFile(path.join(tempDir, 'bin', 'docker'), docker, { mode: 0o755 });
+  });
+
+  afterEach(() => {
+    delete process.env.MOCK_DOCKER_STATE;
+    delete process.env.MOCK_BARRIER;
+    delete process.env.MOCK_CREATE_CONFLICT;
+    delete process.env.MOCK_COPY_FAIL;
+  });
+
+  async function seedSource(volumeSet: string): Promise<string> {
+    const name = projectVolumeName(volumeRoot, 'data', volumeSet);
+    const labels = { 'portler.project': volumeRoot, 'portler.volume': 'data', 'portler.volume-set': volumeSet };
+    await fs.writeFile(path.join(stateDir, 'volumes', `${name}.json`), JSON.stringify(labels));
+    return name;
+  }
+
+  function copiesInto(invoked: string[][], target: string): string[][] {
+    return invoked.filter((args) => args[0] === 'run' && args.includes(`${target}:/to`));
+  }
+
+  for (const conflict of [false, true]) {
+    it(`lets only one of two racing forks copy into the target${conflict ? ' when create refuses an existing name' : ''}`, async () => {
+      process.env.MOCK_BARRIER = '1';
+      if (conflict) process.env.MOCK_CREATE_CONFLICT = '1';
+      const config = makeConfig();
+      await seedSource('one');
+      await seedSource('two');
+      const target = projectVolumeName(volumeRoot, 'data', 'merged');
+
+      const results = await Promise.allSettled([forkVolume(config, 'data--one', 'merged'), forkVolume(config, 'data--two', 'merged')]);
+
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      assert.equal(fulfilled.length, 1, 'exactly one fork may succeed');
+      assert.equal(rejected.length, 1);
+      assert.match(String(rejected[0]!.reason), /another fork created target volume .* at the same time/);
+      assert.equal(copiesInto(await calls(), target).length, 1, 'two datasets must never be copied into one target');
+      assert.equal((await calls()).some((args) => args[0] === 'volume' && args[1] === 'rm'), false);
+    });
+  }
+
+  it('rolls back a target this attempt created when the copy fails', async () => {
+    process.env.MOCK_COPY_FAIL = '1';
+    const config = makeConfig();
+    await seedSource('one');
+    const target = projectVolumeName(volumeRoot, 'data', 'merged');
+
+    await assert.rejects(forkVolume(config, 'data--one', 'merged'), /copying volume data failed/);
+
+    assert.ok((await calls()).some((args) => args[0] === 'volume' && args[1] === 'rm' && args.at(-1) === target));
+    await assert.rejects(fs.access(path.join(stateDir, 'volumes', `${target}.json`)));
+  });
+
+  it('never rolls back a same-project target that another fork created', async () => {
+    process.env.MOCK_COPY_FAIL = 'replaced';
+    const config = makeConfig();
+    await seedSource('one');
+    const target = projectVolumeName(volumeRoot, 'data', 'merged');
+
+    await assert.rejects(forkVolume(config, 'data--one', 'merged'), /copying volume data failed/);
+
+    assert.equal((await calls()).some((args) => args[0] === 'volume' && args[1] === 'rm'), false, "another fork's target must survive");
+    await fs.access(path.join(stateDir, 'volumes', `${target}.json`));
+  });
+});
