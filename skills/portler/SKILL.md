@@ -1,13 +1,13 @@
 ---
 name: portler
-description: Run a project's services on conflict-free ports with the portler CLI and portler.yml. Use in any checkout that has a portler.yml, to start or stop dev servers and Docker services, find their ports, URLs, env and logs, or edit portler.yml.
+description: Run a project's services on conflict-free ports with the portler CLI and portler.yml. Use in any checkout that has a portler.yml or portler.yaml, to start or stop dev servers and Docker services, find their ports, URLs, env and logs, or edit that file.
 ---
 
 # Portler
 
 Portler allocates non-conflicting ports per checkout (default range 51000–59999) and runs the services defined in `portler.yml` as local commands, Docker containers, or on a local Kubernetes cluster. Assigned ports are injected as env vars (`$PORTLER_<SERVICE>_PORT`, plus whatever `port_env` names, e.g. `PORT`). Env values can reference other services: `${postgres.port}`, `backend.url` (also `host`, `protocol`, `container`, `image`).
 
-Only use Portler if the checkout has a `portler.yml`; otherwise use the project's default ports.
+Only use Portler if the checkout has a `portler.yml` (or `portler.yaml`); otherwise use the project's default ports.
 
 ```
 portler init                              # write a starter portler.yml
