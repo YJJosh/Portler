@@ -1,12 +1,12 @@
-import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { configForRunMode, loadBaseEnv, loadConfig, managedVolumeMount, managedVolumeName, type RunMode } from '../../config/index.ts';
 import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements } from '../../env/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
-import { liveServiceNames, readPids, stopServices } from '../../process/index.ts';
+import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
+import type { PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
@@ -15,6 +15,8 @@ export interface RestartLaunch {
   mode: RunMode;
   images: Record<string, string>;
   setup: boolean | undefined;
+  /** The volume set the managed volumes are mounted from; undefined for the base volumes. */
+  volumeSet: string | undefined;
   /** What was taken from pids.json rather than from the command line, for the notice. */
   replayed: string[];
   /** Recorded pins that do not apply in the chosen run mode (the service is not a container there). */
@@ -38,6 +40,14 @@ export interface RestartPlanInput {
   prod: boolean | undefined;
   setup: boolean | undefined;
   images: Readonly<Record<string, string>> | undefined;
+  /** Whether --volume-set or PORTLER_VOLUME_SET chose the set (rawConfig.volumeSet); then nothing is replayed. */
+  volumeSetGiven: boolean;
+  /**
+   * For recorded containers without a recorded set (written by an older Portler): the set
+   * read from the volumes they mount ('' for the base volumes), or null when it could not
+   * be read. A name that is absent mounts no managed volume and has no say.
+   */
+  mountedVolumeSets?: Readonly<Record<string, string | null>>;
 }
 
 const KUBERNETES_RESTART_HINT =
@@ -50,6 +60,11 @@ function list(names: readonly string[]): string {
 
 function verb(names: readonly string[], singular: string, plural: string): string {
   return names.length === 1 ? singular : plural;
+}
+
+/** The config with the volume set the launch mounts (replayed from pids.json or given). */
+function withVolumeSet(config: PortlerConfig, launch: RestartLaunch): PortlerConfig {
+  return launch.volumeSet === config.volumeSet ? config : { ...config, volumeSet: launch.volumeSet };
 }
 
 /**
@@ -208,7 +223,54 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     }
   }
 
-  return { prod, mode, images, setup, replayed, droppedPins };
+  // The volume set is one choice for the whole start too (it is part of the config
+  // startPhase runs on). A restart that put a database back on the base volumes after
+  // `up docker --volume-set branch` would bring it back with other data, so the set the
+  // services this restart starts again were mounted from is replayed. Only a recorded
+  // container that mounts a managed `@` volume in the chosen mode has a say. An entry
+  // written before the set was recorded has no field: its set is read from the volumes
+  // its container mounts, and one that cannot be read is refused rather than taken for
+  // the base volumes. A given set chooses for all.
+  let volumeSet = rawConfig.volumeSet;
+  if (!input.volumeSetGiven) {
+    const mounted = input.mountedVolumeSets ?? {};
+    const voted = new Map<string, string>();
+    const unknown: string[] = [];
+    for (const name of starting) {
+      if (!Object.hasOwn(running, name)) continue;
+      const info = entry(name);
+      if (info.dockerContainer === undefined) continue;
+      if (!(modeConfig.services[name]?.docker?.volumes ?? []).some((volume) => managedVolumeName(volume) !== undefined)) continue;
+      const set = info.volumeSet !== undefined ? info.volumeSet : Object.hasOwn(mounted, name) ? mounted[name] : undefined;
+      if (set === null) unknown.push(name);
+      else if (set !== undefined) voted.set(name, set);
+    }
+    if (unknown.length > 0) {
+      throw new Error(
+        `${list(unknown)} ${verb(unknown, 'was', 'were')} started by an older Portler, which did not record the volume set, and ` +
+          `${verb(unknown, 'its container does', 'their containers do')} not show which set ${verb(unknown, 'it mounts', 'they mount')}. ` +
+          `Pass --volume-set <name> to start ${verb(unknown, 'it', 'them')} on that set, or run "portler down ${unknown.join(' ')}" ` +
+          `first to start ${verb(unknown, 'it', 'them')} on the base volumes.`,
+      );
+    }
+    const sets = [...new Set(voted.values())];
+    if (sets.length > 1) {
+      const groups = sets.map((set) => {
+        const names = [...voted.keys()].filter((name) => voted.get(name) === set);
+        return `${list(names)} on ${set ? `volume set "${set}"` : 'the base volumes'}`;
+      });
+      throw new Error(
+        `this restart would start ${groups.join(' and ')} again, so there is no one volume set to replay. ` +
+          'Pass --volume-set to mount one set for all of them, or restart them in separate commands.',
+      );
+    }
+    if (sets[0]) {
+      volumeSet = sets[0];
+      replayed.push(`--volume-set ${volumeSet}`);
+    }
+  }
+
+  return { prod, mode, images, setup, volumeSet, replayed, droppedPins };
 }
 
 /**
@@ -222,6 +284,54 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
  * recorded in pids.json; `--prod`, `docker`, `--image` and `--setup`/
  * `--no-setup` override that for the services it starts again. See planRestart.
  */
+type ManagedMount = { name: string; destination: string };
+
+function managedMounts(volumes: readonly string[] | undefined): ManagedMount[] {
+  return (volumes ?? []).flatMap((volume) => {
+    const mount = managedVolumeMount(volume);
+    return mount === undefined ? [] : [mount];
+  });
+}
+
+/**
+ * The `@` mounts a container recorded without a volume set may carry, one list per
+ * run mode it may have been started in. Plain `up` runs a top-level image: from
+ * `docker`, `up docker` runs the `docker:` override when there is one, so the two
+ * can mount different volumes at the same path and must not be merged. The recorded
+ * mode decides; an entry older than runMode gets every mode the service could have
+ * run a container in. Lists without an `@` mount are left out.
+ */
+export function legacyMountCandidates(service: ServiceConfig | undefined, info: PidServiceInfo): ManagedMount[][] {
+  if (service === undefined) return [];
+  const local = managedMounts(service.docker?.volumes);
+  const docker = managedMounts((service.dockerModeOverride ?? service.docker)?.volumes);
+  let lists: ManagedMount[][];
+  if (info.runMode === 'local') lists = [local];
+  else if (info.runMode === 'docker') lists = [docker];
+  else if (info.runMode !== undefined) lists = [];
+  else if (service.docker === undefined) lists = [docker];
+  else lists = service.dockerModeOverride === undefined ? [local] : [local, docker];
+  const seen = new Set<string>();
+  return lists.filter((list) => {
+    const key = JSON.stringify(list);
+    if (list.length === 0 || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * One answer from the per-mode inspections of a container: its set, null when it
+ * cannot be told (an inspection failed, or the modes point at different sets), or
+ * undefined when no mode finds a managed volume and the entry has no say.
+ */
+export function combineMountedSets(found: readonly MountedVolumeSet[]): string | null | undefined {
+  if (found.some((result) => result.status === 'unknown')) return null;
+  const sets = new Set(found.flatMap((result) => (result.status === 'set' ? [result.set] : [])));
+  if (sets.size === 0) return undefined;
+  return sets.size === 1 ? [...sets][0]! : null;
+}
+
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -254,6 +364,28 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // Running as startPhase will see it (liveServiceNames): a dependency whose container runs
     // on after its `docker run` shell is gone is running and left alone, not started again.
     const runningNow = new Set(await liveServiceNames(loadedConfig.projectDir, before));
+    // Containers recorded without a volume set were started by an older Portler: their
+    // set is read from the volumes they mount, so a restart does not take them for the
+    // base volumes. Only asked when no set is given and the service mounts a managed volume.
+    const mountedVolumeSets: Record<string, string | null> = {};
+    if (loadedConfig.volumeSet === undefined) {
+      await Promise.all(
+        Object.entries(running).map(async ([serviceName, info]) => {
+          if (info.volumeSet !== undefined || info.dockerContainer === undefined) return;
+          const candidates = legacyMountCandidates(loadedConfig.services[serviceName], info);
+          if (candidates.length === 0) return;
+          // Volumes are labelled with their scope's owner: the volume root, or the project's
+          // name for a named production stack. An older Portler without `name:` labelled
+          // production volumes with the volume root too, so that always counts.
+          const owners = [loadedConfig.volumeRoot, ...(info.prod === true && loadedConfig.name ? [loadedConfig.name] : [])];
+          const found = await Promise.all(
+            candidates.map((expected) => mountedVolumeSet(info.dockerContainer!, loadedConfig.projectDir, expected, owners)),
+          );
+          const set = combineMountedSets(found);
+          if (set !== undefined) mountedVolumeSets[serviceName] = set;
+        }),
+      );
+    }
     const scope = (config: PortlerConfig) => {
       const requestedRootNames = selectServiceNames(config, requested);
       // A restart without names stops every recorded service, including ones no longer in
@@ -290,6 +422,8 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         prod,
         setup: args.setup,
         images: args.images,
+        volumeSetGiven: loadedConfig.volumeSet !== undefined,
+        mountedVolumeSets,
       });
       return { requestedRootNames, starting, launch };
     };
@@ -340,7 +474,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
     // leaves running would keep its old image), and prod.require (a deployment value that
     // has gone missing).
     const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
-      const { config: runConfig } = launchConfig(rawConfig, plan.mode, { prod: plan.prod, images: plan.images });
+      const { config: runConfig } = launchConfig(withVolumeSet(rawConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
       checkLaunch(runConfig, plan.mode, names);
       if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
       if (plan.prod) {
@@ -409,7 +543,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
         ({ starting, launch } = next);
       }
       try {
-        await startPhase(rawConfig, launch.mode, requestedRootNames, {
+        await startPhase(withVolumeSet(rawConfig, launch), launch.mode, requestedRootNames, {
           detach: true,
           skipRunning: true,
           prod: launch.prod,

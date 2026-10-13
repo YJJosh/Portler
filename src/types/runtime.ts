@@ -45,6 +45,13 @@ export interface PidServiceInfo {
   /** `false` when the service was started with `--no-setup`; `restart` replays that unless given `--setup`. */
   setup?: boolean;
   /**
+   * The volume set (`--volume-set` or PORTLER_VOLUME_SET) a container's
+   * Portler-managed `@` volumes were mounted from; `restart` replays it unless
+   * given one. Recorded only for a container that mounts a managed volume; such
+   * an entry with runMode and without this field mounted the base volumes.
+   */
+  volumeSet?: string;
+  /**
    * Opaque OS start-time token for `pid`, captured at spawn. A pid can be
    * recycled onto an unrelated process; re-reading this token before signalling
    * proves the pid still refers to the process Portler started. Absent in PID

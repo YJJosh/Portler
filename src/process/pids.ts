@@ -2,7 +2,7 @@ import { spawnSync, type ChildProcess } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { resolveServiceCwd } from '../config/index.ts';
+import { managedVolumeName, resolveServiceCwd } from '../config/index.ts';
 import { portlerDir } from '../state/index.ts';
 import { withProjectLock } from '../state/lock.ts';
 import {
@@ -32,6 +32,7 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     (value.runMode === undefined || value.runMode === 'local' || value.runMode === 'docker' || value.runMode === 'k8s') &&
     isOptionalString(value.image) &&
     isOptionalBoolean(value.setup) &&
+    isOptionalString(value.volumeSet) &&
     isOptionalString(value.startToken) &&
     isOptionalStringArray(value.dependsOn) &&
     isString(value.startedAt)
@@ -439,6 +440,12 @@ export async function pidInfoFor(
     ...(launch ? { runMode: launch.runMode } : {}),
     ...(launch?.image !== undefined ? { image: launch.image } : {}),
     ...(launch?.setup === false ? { setup: false } : {}),
+    // Recorded whenever the container mounts a managed volume, '' for the base
+    // volumes: an entry without the field was written by an older Portler, which
+    // is a different fact from "the base volumes".
+    ...(service.docker?.volumes.some((volume) => managedVolumeName(volume) !== undefined)
+      ? { volumeSet: config.volumeSet ?? '' }
+      : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     // Always recorded, empty included: an entry without the field was written
     // by an older Portler, which is a different fact from "no dependencies".

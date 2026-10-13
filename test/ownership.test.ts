@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   dockerLabelArgs,
   inspectArgs,
+  mountedVolumeSet,
   ownedContainerLiveness,
   ownershipVerdict,
   parseInspection,
@@ -12,6 +13,7 @@ import {
   removeOwnedNetwork,
   SERVICE_LABEL,
 } from '../src/process/ownership.ts';
+import { managedVolumeMount } from '../src/config/volumes.ts';
 import type { CommandResult, CommandRunner } from '../src/util/exec.ts';
 
 const PROJECT = '/home/dev/myapp';
@@ -299,5 +301,175 @@ describe('ownedContainerLiveness', () => {
   it('does not guess when the daemon cannot be asked', async () => {
     const result = await ownedContainerLiveness('portler-api', PROJECT, fakeDocker([DAEMON_DOWN]).run);
     assert.equal(result.status, 'error');
+  });
+});
+
+describe('mountedVolumeSet', () => {
+  type Mount = { Type: string; Name?: string; Destination?: string };
+  function container(labels: Record<string, string> | null, mounts: Mount[]): CommandResult {
+    return { code: 0, stdout: `${JSON.stringify({ labels, mounts })}\n`, stderr: '' };
+  }
+  function volumes(...labels: Array<Record<string, string> | null>): CommandResult {
+    return { code: 0, stdout: labels.map((entry) => JSON.stringify(entry)).join('\n') + '\n', stderr: '' };
+  }
+  const OURS = { [PROJECT_LABEL]: PROJECT };
+  const DATA = { [PROJECT_LABEL]: PROJECT, 'portler.volume': 'data' };
+  const LOGS = { [PROJECT_LABEL]: PROJECT, 'portler.volume': 'logs' };
+  const EXPECTED = [{ name: 'data', destination: '/data' }];
+
+  it("reads the set from the labels of the service's @ volumes, by the paths they are mounted at", async () => {
+    const docker = fakeDocker([
+      container(OURS, [
+        { Type: 'volume', Name: 'portler-myapp-x-data--branch', Destination: '/data' },
+        { Type: 'bind', Destination: '/src' },
+        { Type: 'volume', Name: 'scratch', Destination: '/scratch' },
+      ]),
+      volumes({ ...DATA, 'portler.volume-set': 'branch' }),
+    ]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], docker.run), { status: 'set', set: 'branch' });
+    // Only the volume at the @ path is inspected.
+    assert.deepEqual(docker.calls[1], ['docker', 'volume', 'inspect', '--format', '{{json .Labels}}', 'portler-myapp-x-data--branch']);
+  });
+
+  it('matches an @ entry by the name Portler created its volume and label under', async () => {
+    // `@Data Store` is created as `data-store`; the raw name would match nothing and abstain.
+    const expected = [managedVolumeMount('@Data Store:/data/')!];
+    assert.deepEqual(expected, [{ name: 'data-store', destination: '/data' }]);
+    const docker = fakeDocker([
+      container(OURS, [{ Type: 'volume', Name: 'portler-myapp-x-data-store--branch', Destination: '/data' }]),
+      volumes({ [PROJECT_LABEL]: PROJECT, 'portler.volume': 'data-store', 'portler.volume-set': 'branch' }),
+    ]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, expected, [PROJECT], docker.run), { status: 'set', set: 'branch' });
+  });
+
+  it("lets only this project's volumes vote, and refuses to guess when another is at the @ path", async () => {
+    const at: Mount = { Type: 'volume', Name: 'portler-other-data--branch', Destination: '/data' };
+    // Another project's volume with the same short name, at the @ path: the container's data is
+    // not one of this project's sets, so neither its set nor "base" is a safe answer.
+    const foreign = fakeDocker([container(OURS, [at]), volumes({ [PROJECT_LABEL]: '/elsewhere', 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
+    const foreignResult = await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], foreign.run);
+    assert.equal(foreignResult.status, 'unknown');
+    assert.match(foreignResult.status === 'unknown' ? foreignResult.reason : '', /the volume at \/data \(portler-other-data--branch\) is not this project's @data volume/);
+    const unowned = fakeDocker([container(OURS, [at]), volumes({ 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], unowned.run)).status, 'unknown');
+    // A named production stack labels its volumes with the name, which the caller passes.
+    const named = fakeDocker([container(OURS, [at]), volumes({ [PROJECT_LABEL]: 'shop', 'portler.volume': 'data', 'portler.volume-set': 'branch' })]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT, 'shop'], named.run), { status: 'set', set: 'branch' });
+  });
+
+  it('ignores an explicitly named Portler volume next to the @ volume', async () => {
+    // `@data` on branch, plus the base `data` volume mounted by its full name elsewhere.
+    const docker = fakeDocker([
+      container(OURS, [
+        { Type: 'volume', Name: 'portler-myapp-x-data--branch', Destination: '/data' },
+        { Type: 'volume', Name: 'portler-myapp-x-data', Destination: '/seed' },
+      ]),
+      volumes({ ...DATA, 'portler.volume-set': 'branch' }),
+    ]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], docker.run), { status: 'set', set: 'branch' });
+  });
+
+  it("reports the base volumes as '', abstains when nothing is mounted at an @ path, and refuses a different volume there", async () => {
+    const at = (name: string): Mount => ({ Type: 'volume', Name: name, Destination: '/data' });
+    assert.deepEqual(
+      await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('base')]), volumes(DATA)]).run),
+      { status: 'set', set: '' },
+    );
+    assert.deepEqual(
+      await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [{ Type: 'bind', Destination: '/data' }])]).run),
+      { status: 'none' },
+    );
+    // A volume only at some other path that is not this project's @data says nothing about the set.
+    assert.deepEqual(
+      await mountedVolumeSet(
+        'portler-db',
+        PROJECT,
+        EXPECTED,
+        [PROJECT],
+        fakeDocker([container(OURS, [{ Type: 'volume', Name: 'v', Destination: '/other' }]), volumes(null)]).run,
+      ),
+      { status: 'none' },
+    );
+    // A different volume at the @ path (a config change, a hand-made volume, another managed
+    // volume) holds data Portler cannot name: unknown, so restart asks for --volume-set.
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('v')]), volumes({ ...LOGS, 'portler.volume-set': 'x' })]).run)).status,
+      'unknown',
+    );
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('scratch')]), volumes({ other: 'x' })]).run)).status,
+      'unknown',
+    );
+    assert.equal(
+      (await mountedVolumeSet('portler-db', PROJECT, EXPECTED, [PROJECT], fakeDocker([container(OURS, [at('scratch')]), volumes(null)]).run)).status,
+      'unknown',
+    );
+  });
+
+  it("refuses to guess when the config moved an @ path and the container still mounts that volume elsewhere", async () => {
+    // The container started with `@data:/old` on branch; the config now says `@data:/new`.
+    const moved = [{ name: 'data', destination: '/new' }];
+    const branchAtOld = fakeDocker([
+      container(OURS, [{ Type: 'volume', Name: 'portler-myapp-x-data--branch', Destination: '/old' }]),
+      volumes({ ...DATA, 'portler.volume-set': 'branch' }),
+    ]);
+    const result = await mountedVolumeSet('portler-db', PROJECT, moved, [PROJECT], branchAtOld.run);
+    assert.equal(result.status, 'unknown');
+    assert.match(
+      result.status === 'unknown' ? result.reason : '',
+      /this project's @data volume \(portler-myapp-x-data--branch\) is mounted at \/old, not at \/new where the config now puts it/,
+    );
+    // Moved on the base set: still not something to fall back to quietly.
+    const baseAtOld = fakeDocker([container(OURS, [{ Type: 'volume', Name: 'portler-myapp-x-data', Destination: '/old' }]), volumes(DATA)]);
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, moved, [PROJECT], baseAtOld.run)).status, 'unknown');
+    // A bind mount now at the @ path does not hide the managed volume found elsewhere.
+    const bindAtNew = fakeDocker([
+      container(OURS, [
+        { Type: 'bind', Destination: '/new' },
+        { Type: 'volume', Name: 'portler-myapp-x-data--branch', Destination: '/old' },
+      ]),
+      volumes({ ...DATA, 'portler.volume-set': 'branch' }),
+    ]);
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, moved, [PROJECT], bindAtNew.run)).status, 'unknown');
+    // One entry still matches at its path, the other moved: unknown, not the first entry's set.
+    const two = [{ name: 'data', destination: '/data' }, { name: 'logs', destination: '/logs' }];
+    const oneMoved = fakeDocker([
+      container(OURS, [
+        { Type: 'volume', Name: 'portler-myapp-x-data--branch', Destination: '/data' },
+        { Type: 'volume', Name: 'portler-myapp-x-logs--branch', Destination: '/var/log/app' },
+      ]),
+      volumes({ ...DATA, 'portler.volume-set': 'branch' }),
+      volumes({ ...LOGS, 'portler.volume-set': 'branch' }),
+    ]);
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, two, [PROJECT], oneMoved.run)).status, 'unknown');
+    // Another project's volume of that name elsewhere is not this service's moved volume.
+    const foreignElsewhere = fakeDocker([
+      container(OURS, [{ Type: 'volume', Name: 'portler-other-data', Destination: '/old' }]),
+      volumes({ [PROJECT_LABEL]: '/elsewhere', 'portler.volume': 'data' }),
+    ]);
+    assert.deepEqual(await mountedVolumeSet('portler-db', PROJECT, moved, [PROJECT], foreignElsewhere.run), { status: 'none' });
+    // A failed inspect of the other mounts is not read as "nothing moved".
+    const unreadable = fakeDocker([container(OURS, [{ Type: 'volume', Name: 'v', Destination: '/old' }]), DAEMON_DOWN]);
+    assert.equal((await mountedVolumeSet('portler-db', PROJECT, moved, [PROJECT], unreadable.run)).status, 'unknown');
+  });
+
+  it('does not guess when the container is gone, a stranger, unreadable, or its @ volumes are on two sets', async () => {
+    const two = [{ name: 'data', destination: '/data' }, { name: 'logs', destination: '/logs' }];
+    const both: Mount[] = [
+      { Type: 'volume', Name: 'a', Destination: '/data' },
+      { Type: 'volume', Name: 'b', Destination: '/logs' },
+    ];
+    const cases: Array<[CommandResult[], ReadonlyArray<{ name: string; destination: string }>]> = [
+      [[NOT_FOUND], EXPECTED],
+      [[DAEMON_DOWN], EXPECTED],
+      [[container({ [PROJECT_LABEL]: '/someone/else' }, [{ Type: 'volume', Name: 'v', Destination: '/data' }])], EXPECTED],
+      [[container(OURS, [{ Type: 'volume', Name: 'a', Destination: '/data' }]), DAEMON_DOWN], EXPECTED],
+      [[container(OURS, both), volumes(DATA, { ...LOGS, 'portler.volume-set': 'branch' })], two],
+      [[container(OURS, both), volumes(DATA)], two],
+    ];
+    for (const [outcomes, expected] of cases) {
+      const result = await mountedVolumeSet('portler-db', PROJECT, expected, [PROJECT], fakeDocker(outcomes).run);
+      assert.equal(result.status, 'unknown', JSON.stringify(outcomes));
+    }
   });
 });

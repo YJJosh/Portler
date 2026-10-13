@@ -15,6 +15,20 @@ export function managedVolumeName(volumeEntry: string): string | undefined {
 }
 
 /**
+ * The name and container path of a Portler-managed `@name:/path` entry as Docker
+ * sees them: the name normalized like the one the volume and its `portler.volume`
+ * label were created with (`@Data Store` is `data-store`), the path cleaned like
+ * Docker cleans a mount destination.
+ */
+export function managedVolumeMount(volumeEntry: string): { name: string; destination: string } | undefined {
+  const rawName = managedVolumeName(volumeEntry);
+  if (rawName === undefined) return undefined;
+  const name = normalizeVolumeToken(rawName, `volume name in "${volumeEntry}"`);
+  const destination = path.posix.normalize(volumeEntry.split(':')[1]!).replace(/(.)\/+$/, '$1');
+  return { name, destination };
+}
+
+/**
  * Validate and normalize a short volume name or volume set name. Both become
  * segments of a Docker volume name, so they are slugged like every other
  * Portler-derived name and must not contain the `--` set separator.
