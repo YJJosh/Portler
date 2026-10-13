@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DEFAULT_PORT_RANGE } from '../constants.ts';
@@ -300,4 +301,27 @@ export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing
 
 export function resolveServiceCwd(config: PortlerConfig, service: ServiceConfig): string {
   return path.resolve(config.projectDir, service.cwd);
+}
+
+/**
+ * Throws when a service's working directory is missing or is not a directory. Spawning in a
+ * missing cwd fails as `spawn /bin/sh ENOENT`, which names the shell rather than the folder.
+ */
+export function assertServiceCwd(config: PortlerConfig, service: ServiceConfig): void {
+  const cwd = resolveServiceCwd(config, service);
+  let isDirectory: boolean | undefined;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch {
+    isDirectory = undefined;
+  }
+  if (isDirectory) return;
+  // cwd is relative to the folder Portler runs in, which --file does not change.
+  const configElsewhere = path.dirname(config.filePath) !== config.projectDir;
+  throw new Error(
+    `service "${service.name}": cwd "${service.cwd}" resolves to ${cwd}, which ${isDirectory === false ? 'is not a directory' : 'does not exist'}. ` +
+      `cwd is relative to the project root (${config.projectDir})` +
+      (configElsewhere ? `, the folder Portler runs in, not to the folder of ${config.filePath}` : '') +
+      '.',
+  );
 }

@@ -1,4 +1,4 @@
-import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
@@ -62,6 +62,10 @@ function validateCommands(config: PortlerConfig, selectedNames: string[]): void 
       );
     }
   }
+}
+
+function validateServiceDirectories(config: PortlerConfig, selectedNames: string[]): void {
+  for (const serviceName of selectedNames) assertServiceCwd(config, config.services[serviceName]!);
 }
 
 function validateDockerContainerNames(config: PortlerConfig): void {
@@ -279,6 +283,7 @@ export function launchConfig(
 export function checkLaunch(config: PortlerConfig, mode: RunMode, selectedNames: string[]): void {
   if (mode === 'docker') validateDockerMode(config, selectedNames);
   validateCommands(config, selectedNames);
+  validateServiceDirectories(config, selectedNames);
   validateDockerContainerNames(config);
 }
 

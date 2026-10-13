@@ -35,7 +35,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 | `setup` | string \| list of commands and steps | — | Host shell commands in service cwd, with resolved service env; steps as at the top level |
 | `prod` | object | — | Production `setup`, `command` replacements, `env` overrides and `require` |
 | `command` | string | — | Shell command that starts the service (local mode) |
-| `cwd` | string | `.` | Working directory, relative to the project root |
+| `cwd` | string | `.` | Working directory, relative to the project root: the folder Portler runs in, which `--file` does not change. A folder that does not exist stops `up`, `restart`, `setup` and `start` before anything runs |
 | `port` | integer | — | Preferred port (local) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
 | `port_env` | string \| list | `[]` | Env variable name(s) that receive the port |
 | `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development. Alias: `environment` |
