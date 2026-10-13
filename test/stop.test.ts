@@ -742,6 +742,42 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('counts a removed container stopped when its leader pid now belongs to a stranger', { timeout: 15_000 }, async () => {
+    // The shell exited long ago and the OS gave its pid to an unrelated process,
+    // which here even leads a live group under that number. The token proves the
+    // pid is not ours, and the reuse proves our old group was empty, so removing
+    // the running container is the stop. The stranger is never signalled.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => true, // the stranger answers kill(pid, 0)
+        pidAlive: () => true, // and is runnable
+        groupState: () => 'alive', // and leads its own group under that number
+        readStartToken: async () => 'Tue Oct 13 09:00:00 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'the stranger is never signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });
