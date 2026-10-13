@@ -331,6 +331,34 @@ describe('withDirLock', () => {
     assert.ok(Date.now() - started < 600, 'a live owner is not waited for past waitMs');
     await fs.rm(lockDir, { recursive: true, force: true });
   });
+
+  it('times out instead of spinning when a stale lock cannot be moved out of the way', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+    // A dead owner's stale lock in a directory we may not write to: the
+    // takeover's rename fails with EACCES every time. The wait must still end
+    // at its deadline, and say why the lock stayed.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const parent = path.join(dir, 'read-only');
+    const lockDir = path.join(parent, 'stuck.lock');
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+    const past = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, past, past);
+    await fs.chmod(parent, 0o555);
+    try {
+      const started = Date.now();
+      await assert.rejects(
+        withDirLock(lockDir, { staleMs: 300, waitMs: 400, description: 'test' }, async () => undefined),
+        (error: unknown) => error instanceof LockTimeoutError && /could not be moved out of the way \(EACCES\)/.test(error.message),
+      );
+      assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started} ms to give up on a lock that cannot be taken over`);
+    } finally {
+      await fs.chmod(parent, 0o755);
+    }
+  });
 });
 
 describe('updatePids under the project lock', () => {

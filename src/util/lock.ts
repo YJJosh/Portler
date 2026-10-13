@@ -154,16 +154,24 @@ function sameOwner(a: LockOwner, b: LockOwner): boolean {
  * process renamed it first we get ENOENT and simply retry the mkdir, rather
  * than deleting a lock that has since been legitimately re-acquired.
  */
-async function takeOverStaleLock(lockDir: string): Promise<void> {
+/**
+ * Moves a stale lock out of the way. Returns null when the lock is gone (moved
+ * by us, or released or taken over by someone else meanwhile), so the caller
+ * can retry at once; otherwise the error that kept it in place, so the caller
+ * waits and eventually times out instead of retrying in a tight loop.
+ */
+async function takeOverStaleLock(lockDir: string): Promise<NodeJS.ErrnoException | null> {
   const abandoned = `${lockDir}.stale.${process.pid}.${randomToken()}`;
 
   try {
     await fs.rename(lockDir, abandoned);
-  } catch {
-    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return error as NodeJS.ErrnoException;
   }
 
   await fs.rm(abandoned, { recursive: true, force: true });
+  return null;
 }
 
 /**
@@ -223,7 +231,13 @@ async function readLockSnapshot(
   return { mtimeMs: after.mtimeMs, owner };
 }
 
-function timeoutError(lockDir: string, options: LockOptions, owner: LockOwner | null, thisHost: string): LockTimeoutError {
+function timeoutError(
+  lockDir: string,
+  options: LockOptions,
+  owner: LockOwner | null,
+  thisHost: string,
+  takeoverError: NodeJS.ErrnoException | null = null,
+): LockTimeoutError {
   const held =
     owner === null
       ? ''
@@ -233,7 +247,13 @@ function timeoutError(lockDir: string, options: LockOptions, owner: LockOwner | 
           'cannot probe for liveness, so it is never taken over automatically. If that process is definitely gone, ' +
           `remove ${lockDir} by hand.`;
 
-  return new LockTimeoutError(`timed out waiting for the ${options.description} lock: ${lockDir}.${held}`, lockDir);
+  const stuck =
+    takeoverError === null
+      ? ''
+      : ` The lock is stale, but it could not be moved out of the way (${takeoverError.code ?? takeoverError.message}); ` +
+        `check the permissions of ${path.dirname(lockDir)}, or remove ${lockDir} by hand.`;
+
+  return new LockTimeoutError(`timed out waiting for the ${options.description} lock: ${lockDir}.${held}${stuck}`, lockDir);
 }
 
 async function acquire(lockDir: string, options: LockOptions): Promise<() => Promise<void>> {
@@ -254,6 +274,8 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   // the lock, whatever the directory's mtime says.
   let seenOwner: LockOwner | null = null;
   let seenAt = startedAt;
+  // Why the last stale-lock takeover failed, for the timeout message.
+  let takeoverError: NodeJS.ErrnoException | null = null;
 
   for (;;) {
     try {
@@ -265,7 +287,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
       try {
         const snapshot = await readLockSnapshot(lockDir, stat);
         if (snapshot === 'changed') {
-          if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host);
+          if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host, takeoverError);
           continue;
         }
         lastOwner = snapshot.owner;
@@ -281,8 +303,11 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
         const mtime = Math.min(snapshot.mtimeMs, lastOwner === null ? now : seenAt);
 
         if (isTakeoverAllowed(lastOwner, now - snapshot.mtimeMs, options.staleMs, host)) {
-          await takeOverStaleLock(lockDir);
-          continue;
+          takeoverError = await takeOverStaleLock(lockDir);
+          // The lock is out of the way: try to create ours at once. If it could
+          // not be moved, fall through to the deadline and the poll sleep, so a
+          // takeover that keeps failing ends in a timeout, not a busy loop.
+          if (takeoverError === null) continue;
         }
 
         // A holder on this host that is provably dead (a command killed while
@@ -307,7 +332,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
       }
 
-      if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host);
+      if (Date.now() > deadline) throw timeoutError(lockDir, options, lastOwner, host, takeoverError);
 
       await sleep(POLL_MS);
       continue;
