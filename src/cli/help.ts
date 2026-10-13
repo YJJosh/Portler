@@ -7,11 +7,11 @@ Usage:
   ${PACKAGE_NAME} setup [docker] [service...] [--prod]
   ${PACKAGE_NAME} start [service] [--prod] [--drain-ms <ms>]
   ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>] [--image <service>=<image>]
+  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
   ${PACKAGE_NAME} up k8s [service...] [--detach] [--image <service>=<image>]
   ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
   ${PACKAGE_NAME} k8s render [service...]
-  ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+  ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <service>=<image>] [--volume-set <name>]
   ${PACKAGE_NAME} ps [service...]
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports

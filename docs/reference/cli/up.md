@@ -4,7 +4,7 @@ Start services: assign ports, resolve env, and launch in dependency order.
 
 ```bash
 portler up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-portler up docker [service...] [--detach] [--volume-set <name>] [--image <service>=<image>]
+portler up docker [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
 portler up k8s [service...] [--detach] [--image <service>=<image>]
 ```
 
