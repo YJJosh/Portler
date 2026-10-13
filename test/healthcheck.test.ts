@@ -7,7 +7,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { normalizeHealthcheck } from '../src/config/healthcheck.ts';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../src/constants.ts';
-import { DOCKER_TCP_HOLD_MS, isTcpReady, waitForServiceReady } from '../src/readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, isTcpReady, portlerErrorsInLog, waitForServiceReady } from '../src/readiness/index.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment, ServiceConfig } from '../src/types/index.ts';
 
 describe('normalizeHealthcheck', () => {
@@ -303,6 +303,46 @@ describe('waitForServiceReady', () => {
         waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
         /exited before it became ready\. Check .*db\.log \(or "portler logs api"\) for the cause/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a detached log's refusals in chunks, whatever its size", () => {
+    // A long build's output can be large, so the log is scanned 64 KiB at a
+    // time; a line or a character split across two reads still counts.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-scan-'));
+    try {
+      const logFile = path.join(dir, 'api.log');
+      const chunk = 64 * 1024;
+
+      // A refusal that straddles the first chunk boundary with a two-byte
+      // character split across it, and a CRLF ending. The filler ends at byte
+      // chunk - 20, the 17-byte prefix and "ab" fill the rest, and "é" takes
+      // the last byte of the first read and the first of the second.
+      const filler = `${'a'.repeat(chunk - 21)}\n`;
+      writeFileSync(logFile, `${filler}[portler] error: abé network "portler-shop" is someone else's\r\nbuild output\n`);
+      assert.deepEqual(portlerErrorsInLog(logFile), [`abé network "portler-shop" is someone else's`]);
+
+      // Several megabytes of output around four refusals: the first three are
+      // reported, in order.
+      const noise = `${'step 1/9 : RUN pnpm install --frozen-lockfile '.repeat(20)}\n`.repeat(4_000);
+      writeFileSync(
+        logFile,
+        `${noise}[portler] error: one\n${noise}[portler] error: two\n[portler] error:   \n[portler] error: three\n${noise}[portler] error: four\n`,
+      );
+      assert.deepEqual(portlerErrorsInLog(logFile), ['one', 'two', 'three']);
+
+      // A refusal that runs on for a megabyte is cut, and says so.
+      writeFileSync(logFile, `[portler] error: ${'x'.repeat(1024 * 1024)}\n[portler] error: next\n`);
+      const [long, next] = portlerErrorsInLog(logFile);
+      assert.equal(long, `${'x'.repeat(500)}…`);
+      assert.equal(next, 'next');
+
+      // A last line without a newline counts; a missing log has none.
+      writeFileSync(logFile, 'boot\n[portler] error: volume is foreign');
+      assert.deepEqual(portlerErrorsInLog(logFile), ['volume is foreign']);
+      assert.deepEqual(portlerErrorsInLog(path.join(dir, 'missing.log')), []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

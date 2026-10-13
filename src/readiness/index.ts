@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync } from 'node:fs';
 import net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
 import { resolveEnvValue } from '../env/index.ts';
@@ -179,26 +180,72 @@ export function logLocationHint(serviceName: string, logFile: string | undefined
 }
 
 const PORTLER_ERROR_PREFIX = '[portler] error: ';
+const MAX_LOG_REASONS = 3;
+const MAX_LOG_REASON_LENGTH = 500;
+const LOG_READ_CHUNK = 64 * 1024;
 
 /**
  * Portler's own refusals from a detached service's log: the launch shell
  * writes them (a foreign container, network or volume under the name it needs)
  * and exits before the service starts. The log is truncated on every start,
  * so these lines belong to this run. A foreground run already shows them above.
+ *
+ * The log can be a long build's output, so it is read in fixed-size chunks
+ * and at most the start of one line is held at a time; the scan stops at the
+ * third refusal.
  */
 export function portlerErrorsInLog(logFile: string): string[] {
-  let text: string;
+  let fd: number;
   try {
-    text = readFileSync(logFile, 'utf8');
+    fd = openSync(logFile, 'r');
   } catch {
     return [];
   }
-  return text
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith(PORTLER_ERROR_PREFIX))
-    .map((line) => line.slice(PORTLER_ERROR_PREFIX.length).trim())
-    .filter((line) => line !== '')
-    .slice(0, 3);
+  const reasons: string[] = [];
+  const keep = PORTLER_ERROR_PREFIX.length + MAX_LOG_REASON_LENGTH;
+  let line = '';
+  let cut = false;
+  const append = (piece: string) => {
+    if (line.length + piece.length <= keep) {
+      line += piece;
+    } else {
+      line += piece.slice(0, keep - line.length);
+      cut = true;
+    }
+  };
+  const endLine = () => {
+    const text = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (text.startsWith(PORTLER_ERROR_PREFIX)) {
+      const reason = text.slice(PORTLER_ERROR_PREFIX.length).trim();
+      if (reason !== '') reasons.push(cut ? `${reason}…` : reason);
+    }
+    line = '';
+    cut = false;
+  };
+  try {
+    const decoder = new StringDecoder('utf8');
+    const buffer = Buffer.alloc(LOG_READ_CHUNK);
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, null);
+      const text = read === 0 ? decoder.end() : decoder.write(buffer.subarray(0, read));
+      let from = 0;
+      for (let newline = text.indexOf('\n', from); newline !== -1; newline = text.indexOf('\n', from)) {
+        append(text.slice(from, newline));
+        endLine();
+        if (reasons.length === MAX_LOG_REASONS) return reasons;
+        from = newline + 1;
+      }
+      append(text.slice(from));
+      if (read === 0) {
+        endLine();
+        return reasons.slice(0, MAX_LOG_REASONS);
+      }
+    }
+  } catch {
+    return reasons;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
