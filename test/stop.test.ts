@@ -1393,3 +1393,86 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 });
+
+describe('stopServices in dependency levels with a Docker network', () => {
+  /** A fake docker on PATH that logs every call; `network rm` fails when `networkRmFails`. */
+  async function networkDocker(networkRmFails: boolean): Promise<{ bin: string; log: string }> {
+    const bin = path.join(projectDir, 'fake-bin');
+    const log = path.join(projectDir, 'docker.log');
+    await fs.mkdir(bin, { recursive: true });
+    const container = JSON.stringify({ id: 'sha256:c-api', labels: { 'portler.project': projectDir }, running: false });
+    const network = JSON.stringify({ id: 'net-id', labels: { 'portler.project': projectDir } });
+    const rm = networkRmFails
+      ? `echo "Error response from daemon: error while removing network: network net-x has active endpoints" >&2; exit 1`
+      : 'exit 0';
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> '${log}'`,
+        'case "$1 $2" in',
+        `  "network inspect") printf '%s\\n' '${network}' ;;`,
+        `  "network rm") ${rm} ;;`,
+        `  inspect*) printf '%s\\n' '${container}' ;;`,
+        '  rm*) exit 0 ;;',
+        '  *) echo "Error: No such object" >&2; exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return { bin, log };
+  }
+
+  /** api runs in Docker and is the only entry naming the network; it depends on a local db. */
+  async function mixedStack(): Promise<Record<string, PidServiceInfo>> {
+    const api = await startSleeper();
+    const db = await startSleeper();
+    const services: Record<string, PidServiceInfo> = {
+      api: {
+        ...pidInfo(api.pid!, (await readProcessStartToken(api.pid!)) ?? undefined),
+        dockerContainer: 'c-api',
+        dockerNetwork: 'net-x',
+        dependsOn: ['db'],
+      },
+      db: { ...pidInfo(db.pid!, (await readProcessStartToken(db.pid!)) ?? undefined), dependsOn: [] },
+    };
+    await writePidsFile(services);
+    return services;
+  }
+
+  it('removes the network after the last level, though the entry naming it was pruned in the first', { timeout: 15_000 }, async () => {
+    await mixedStack();
+    const { bin, log } = await networkDocker(false);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual([...result.completed].sort(), ['api', 'db']);
+      assert.deepEqual(result.remaining, []);
+      assert.equal(await readPids(projectDir), null);
+      const calls = (await fs.readFile(log, 'utf8')).split('\n');
+      assert.ok(calls.includes('network rm net-id'), `the network was removed; docker calls:\n${calls.join('\n')}`);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('keeps the entry that names a network it could not remove', { timeout: 15_000 }, async () => {
+    const services = await mixedStack();
+    const { bin } = await networkDocker(true);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir);
+      assert.equal(result.failures.length, 1);
+      assert.match(result.failures[0]!, /could not remove Docker network "net-x"/);
+      assert.deepEqual(result.completed, ['db']);
+      assert.deepEqual(result.remaining, ['api']);
+      assert.deepEqual((await readPids(projectDir))?.services, { api: services.api });
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+});
