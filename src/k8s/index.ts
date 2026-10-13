@@ -18,6 +18,7 @@ export {
   deleteK8sResources,
   deleteResourceKinds,
   deleteSelector,
+  deployedK8sServices,
   ensureNamespace,
   ensureNamespaceClaimable,
   getNamespacePhase,

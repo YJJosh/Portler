@@ -1,6 +1,6 @@
 import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { deleteK8sResources, detectCluster, type K8sDeleteResult } from '../../k8s/index.ts';
+import { deleteK8sResources, deployedK8sServices, detectCluster, type K8sDeleteResult } from '../../k8s/index.ts';
 import { releasePorts } from '../../ports/index.ts';
 import type { RunMode } from '../../config/index.ts';
 import { shellQuote } from '../../process/docker.ts';
@@ -10,7 +10,7 @@ import { withLifecycleLock } from '../../state/lock.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, servicesWithPorts } from '../services.ts';
-import { legacyMountCandidates } from './restart.ts';
+import { legacyMountCandidates, restartAccepts, type RestartRequest } from './restart.ts';
 
 /**
  * Like selectServiceNames, but also accepts "proxy" as a target when a proxy
@@ -75,7 +75,7 @@ interface RecordedLaunch {
   runMode: RunMode;
   prod: boolean;
   noSetup: boolean;
-  images: string[];
+  images: Record<string, string>;
   volumeSet: string | undefined;
 }
 
@@ -98,13 +98,13 @@ function recordedLaunch(
   const modes = new Set<RunMode>();
   const prods = new Set<boolean>();
   const setups = new Set<boolean>();
-  const images: string[] = [];
+  const images: Record<string, string> = {};
   serviceNames.forEach((serviceName, index) => {
     const launch = launches[index];
     modes.add(mode === 'k8s' ? 'k8s' : (launch?.runMode ?? mode));
     prods.add(launch?.prod === true);
     setups.add(launch?.setup !== false);
-    if (launch?.image !== undefined) images.push(`${serviceName}=${launch.image}`);
+    if (launch?.image !== undefined) images[serviceName] = launch.image;
   });
   if (modes.size !== 1 || prods.size !== 1 || setups.size !== 1) return undefined;
   if (volumeSets.some((set) => set === null)) return undefined;
@@ -122,7 +122,7 @@ function launchFlags(launch: RecordedLaunch, file: string | undefined): string[]
   if (file) parts.push('--file', shellQuote(file));
   if (launch.prod) parts.push('--prod');
   if (launch.noSetup) parts.push('--no-setup');
-  for (const image of launch.images) parts.push('--image', shellQuote(image));
+  for (const [service, image] of Object.entries(launch.images)) parts.push('--image', shellQuote(`${service}=${image}`));
   if (launch.volumeSet) parts.push('--volume-set', shellQuote(launch.volumeSet));
   return parts;
 }
@@ -147,13 +147,45 @@ export function upSuggestion(
   return parts.join(' ');
 }
 
+/** A command that brings the stopped services back, and the launch it repeats when it is a `restart`. */
+interface Recovery {
+  command: string;
+  restart: RecordedLaunch | undefined;
+}
+
+function recovery(
+  serviceNames: readonly string[],
+  launches: ReadonlyArray<PidServiceInfo | undefined>,
+  mode: RunMode,
+  file: string | undefined,
+  volumeSets: ReadonlyArray<string | null | undefined>,
+  runningPrerequisites: ReadonlyArray<PidServiceInfo | undefined>,
+  envVolumeSet: string | undefined,
+): Recovery | undefined {
+  if (runningPrerequisites.length === 0) {
+    const command = upSuggestion(serviceNames, launches, mode, file, volumeSets, envVolumeSet);
+    return command === undefined ? undefined : { command, restart: undefined };
+  }
+  const launch = recordedLaunch(serviceNames, launches, mode, volumeSets, envVolumeSet);
+  if (!launch) return undefined;
+  const compatible = runningPrerequisites.every(
+    (prerequisite) => prerequisite?.runMode === launch.runMode && (prerequisite.prod === true) === launch.prod,
+  );
+  if (!compatible) return undefined;
+  const parts = ['portler', 'restart'];
+  if (launch.runMode === 'docker') parts.push('docker');
+  parts.push(...serviceNames.map(shellQuote), ...launchFlags(launch, file));
+  return { command: parts.join(' '), restart: launch };
+}
+
 /**
  * The command that brings the stopped services back. `up` refuses when something the
  * services depend on is still running (it would start that too), so while a prerequisite
  * runs this is a `restart`, which starts what is stopped and leaves what runs alone.
  * Undefined when no command would do it: no single recorded launch (see recordedLaunch,
  * which also covers Kubernetes), or a running prerequisite started in another mode or with
- * another `--prod`, which restart refuses.
+ * another `--prod`, which restart refuses. A `restart` is still only offered once restart's
+ * own plan accepts it (warnAboutDependents).
  */
 export function recoveryCommand(
   serviceNames: readonly string[],
@@ -164,17 +196,37 @@ export function recoveryCommand(
   runningPrerequisites: ReadonlyArray<PidServiceInfo | undefined>,
   envVolumeSet: string | undefined = process.env.PORTLER_VOLUME_SET,
 ): string | undefined {
-  if (runningPrerequisites.length === 0) return upSuggestion(serviceNames, launches, mode, file, volumeSets, envVolumeSet);
-  const launch = recordedLaunch(serviceNames, launches, mode, volumeSets, envVolumeSet);
-  if (!launch) return undefined;
-  const compatible = runningPrerequisites.every(
-    (prerequisite) => prerequisite?.runMode === launch.runMode && (prerequisite.prod === true) === launch.prod,
-  );
-  if (!compatible) return undefined;
-  const parts = ['portler', 'restart'];
-  if (launch.runMode === 'docker') parts.push('docker');
-  parts.push(...serviceNames.map(shellQuote), ...launchFlags(launch, file));
-  return parts.join(' ');
+  return recovery(serviceNames, launches, mode, file, volumeSets, runningPrerequisites, envVolumeSet)?.command;
+}
+
+/**
+ * Whether `restart`, run as suggested, would plan and pass its checks without replaying
+ * anything the command does not say. Its plan reads every entry recorded for what the
+ * services depend on, a retained one whose process is gone included, so a mode or `--prod`
+ * recorded there can make it refuse what the running prerequisites alone allow.
+ */
+async function restartWouldAccept(
+  config: PortlerConfig,
+  file: string | undefined,
+  serviceNames: readonly string[],
+  launch: RecordedLaunch,
+  pids: PidsFile | null,
+  running: ReadonlySet<string>,
+): Promise<boolean> {
+  try {
+    const loadedConfig = await loadConfig(config.projectDir, file, { volumeSet: launch.volumeSet });
+    const request: RestartRequest = {
+      mode: launch.runMode,
+      requested: [...serviceNames],
+      modeExplicit: launch.runMode === 'docker',
+      prod: launch.prod ? true : undefined,
+      setup: launch.noSetup ? false : undefined,
+      images: Object.keys(launch.images).length > 0 ? launch.images : undefined,
+    };
+    return await restartAccepts(loadedConfig, request, pids, running);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -182,7 +234,8 @@ export function recoveryCommand(
  * against it, so name them: the user can stop them too, or bring the dependency back.
  * A running service's dependencies are the ones it recorded when it started, because an
  * edited portler.yml says nothing about what is already running; entries that record none
- * (older ones, Kubernetes port-forwards) use the config.
+ * (older ones, Kubernetes port-forwards) and services without one (`alsoRunning`: deployed in
+ * the cluster without a port-forward) use the config.
  */
 async function warnAboutDependents(
   config: PortlerConfig,
@@ -191,10 +244,11 @@ async function warnAboutDependents(
   mode: RunMode,
   file: string | undefined,
   retained: ReadonlySet<string>,
+  alsoRunning: readonly string[] = [],
 ): Promise<void> {
   const stopped = new Set(stoppedNames);
   const pids = await readPids(config.projectDir);
-  const live = await liveServiceNames(config.projectDir, pids);
+  const live = [...new Set([...(await liveServiceNames(config.projectDir, pids)), ...alsoRunning])];
   const dependents: string[] = [];
   for (const name of live) {
     if (stopped.has(name)) continue;
@@ -225,7 +279,10 @@ async function warnAboutDependents(
     if (prerequisites) {
       const liveNow = new Set(live);
       const running = prerequisites.filter((name) => liveNow.has(name)).map((name) => pids?.services[name]);
-      command = recoveryCommand(back, launches, mode, file, volumeSets, running);
+      const found = recovery(back, launches, mode, file, volumeSets, running, process.env.PORTLER_VOLUME_SET);
+      if (found && (!found.restart || (await restartWouldAccept(config, file, back, found.restart, pids, liveNow)))) {
+        command = found.command;
+      }
     }
   }
   const fix =
@@ -268,8 +325,8 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     // every reservation: releasing ports while the requested teardown is only
     // half complete is the false all-clear the registry is meant to prevent.
     let deletedFromCluster: K8sDeleteResult = { deleted: false, services: [] };
-    if (mode === 'k8s') {
-      const cluster = await detectCluster();
+    const cluster = mode === 'k8s' ? await detectCluster() : undefined;
+    if (cluster) {
       deletedFromCluster = await deleteK8sResources(cluster, config, {
         serviceNames: selectedNames,
         deleteVolumes: args.volumes,
@@ -297,7 +354,12 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
         ...deletedFromCluster.services.filter((name) => name !== PROXY_SERVICE_NAME),
       ]),
     ];
-    if (selectedNames && takenAway.length > 0) await warnAboutDependents(config, takenAway, before, mode, args.file, new Set(result.remaining));
+    if (selectedNames && takenAway.length > 0) {
+      // A Kubernetes service without a port has no port-forward, and so no entry to find it
+      // by: the cluster says whether it still runs.
+      const deployed = cluster ? ((await deployedK8sServices(cluster, config)) ?? []) : [];
+      await warnAboutDependents(config, takenAway, before, mode, args.file, new Set(result.remaining), deployed);
+    }
 
     // Exit non-zero when down did NOT finish the job: a service is only
     // "stopped" once its process group is confirmed gone, so what is left here

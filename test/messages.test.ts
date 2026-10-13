@@ -497,6 +497,39 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.match(portler(projectDir, 'ps').stdout, /^db\s.*running/m);
   });
 
+  it('offers a restart only when restart, reading every recorded prerequisite, accepts it', async () => {
+    const service = (name: string, port: number, deps?: string) =>
+      [`  ${name}:`, '    command: node server.js', `    port: ${port}`, '    port_env: PORT', ...(deps ? [`    depends_on: [${deps}]`] : [])];
+    const projectDir = await project(
+      [
+        'services:',
+        ...service('cache', 4120),
+        ...service('queue', 4121),
+        ...service('db', 4122, 'cache, queue'),
+        ...service('api', 4123, 'db'),
+        '',
+      ].join('\n'),
+      { 'server.js': server },
+    );
+    assert.equal(portler(projectDir, 'up', '-d').status, 0);
+
+    // queue's process is gone, but its entry is still recorded, from a production launch.
+    assert.equal(portler(projectDir, 'down', 'queue').status, 0);
+    const exited = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+    await new Promise((resolve) => exited.once('exit', resolve));
+    const pids = await readPids(projectDir);
+    assert.ok(pids);
+    pids.services.queue = { pid: exited.pid!, command: 'node server.js', cwd: projectDir, startedAt: new Date().toISOString(), runMode: 'local', prod: true };
+    await writePids(projectDir, pids);
+
+    const down = portler(projectDir, 'down', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    // cache alone would allow `restart db`, but restart plans with queue's entry too and refuses.
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or start db again the way it was started\./);
+    assert.doesNotMatch(down.stderr, /portler restart|portler up/);
+    assert.equal(portler(projectDir, 'restart', 'db').status, 1, 'restart refuses what the warning does not offer');
+  });
+
   it('uses the dependencies each running service recorded when it started', async () => {
     const service = (name: string, port: number, deps?: string) =>
       [`  ${name}:`, '    command: node server.js', `    port: ${port}`, '    port_env: PORT', ...(deps ? [`    depends_on: [${deps}]`] : [])];
@@ -521,9 +554,9 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.equal(back.status, 0, back.stdout + back.stderr);
   });
 
-  // api is deployed and port-forwarded (a stand-in process); db has no port, so no forward.
-  // `deleted` is what the fake kubectl reports deleting.
-  async function k8sProject(t: { after: (fn: () => void) => void }, deleted: string[]) {
+  // api is deployed and port-forwarded (a stand-in process); db and worker have no port, so
+  // no forward. `deleted` is what the fake kubectl reports deleting, `deployed` what it lists.
+  async function k8sProject(t: { after: (fn: () => void) => void }, deleted: string[], deployed: string[] = []) {
     const projectDir = await project(
       [
         'services:',
@@ -533,6 +566,10 @@ describe('down warns from what is running, not from an edited portler.yml', () =
         '  api:',
         '    image: example/api:latest',
         '    port: 8080',
+        '    k8s: true',
+        '    depends_on: [db]',
+        '  worker:',
+        '    image: example/worker:latest',
         '    k8s: true',
         '    depends_on: [db]',
         '',
@@ -553,6 +590,7 @@ describe('down warns from what is running, not from an edited portler.yml', () =
         deleted.length > 0
           ? `  *" delete "*) printf '%s\\n' ${deleted.map((name) => `'${name}'`).join(' ')} ;;`
           : `  *" delete "*) echo 'No resources found' ;;`,
+        ...(deployed.length > 0 ? [`  *" get deployment "*) printf '%s\\n' ${deployed.map((name) => `'${name}'`).join(' ')} ;;`] : []),
         'esac',
         'exit 0',
         '',
@@ -596,6 +634,16 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.doesNotMatch(down.stdout, /no running services found/);
     assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or start db again the way it was started\./);
     assert.doesNotMatch(down.stderr, /portler up|portler restart/);
+  });
+
+  it('warns about a dependent deployed without a port-forward', async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as kubectl');
+    const { projectDir, env } = await k8sProject(t, ['deployment.apps/db'], ['deployment.apps/api', 'deployment.apps/worker']);
+
+    // worker has no port, so no PID entry: only the cluster says it still runs.
+    const down = portlerWith(projectDir, env, 'down', 'k8s', 'db');
+    assert.equal(down.status, 0, down.stdout + down.stderr);
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\), worker \(on db\)\./);
   });
 
   it('takes nothing away when down k8s finds nothing deployed for the service', async (t) => {

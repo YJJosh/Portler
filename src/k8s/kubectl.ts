@@ -510,6 +510,38 @@ export async function deleteK8sResources(
 }
 
 /**
+ * The services of this project that have a Deployment in its namespace: what runs in the
+ * cluster, whether a port-forward (and with it a PID entry) tracks it or not. Undefined when
+ * kubectl could not say, or when two services share a Kubernetes name and a Deployment
+ * could be either.
+ */
+export async function deployedK8sServices(
+  cluster: ClusterInfo,
+  config: PortlerConfig,
+  run: CommandRunner = runCommand,
+): Promise<string[] | undefined> {
+  let byK8sName: Map<string, string>;
+  try {
+    byK8sName = new Map([...k8sServiceNames(Object.keys(config.services)).entries()].map(([service, name]) => [name, service]));
+  } catch {
+    return undefined;
+  }
+  const listed = await run(
+    'kubectl',
+    kubectlArgs(cluster, ['get', 'deployment', '--namespace', config.k8sNamespace, '--selector', deleteSelector(config), '-o', 'name']),
+  );
+  if (listed.code !== 0) return undefined;
+  return listed.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^[\w.-]+\/\S+$/.test(line))
+    .flatMap((resource) => {
+      const service = byK8sName.get(resource.split('/', 2)[1] ?? '');
+      return service !== undefined ? [service] : [];
+    });
+}
+
+/**
  * Start the port-forward supervisor for a service: a small standalone
  * `portler __k8s-forward` process that runs `kubectl port-forward` in a loop,
  * re-spawning it (with capped backoff) when a pod restart kills it. The
