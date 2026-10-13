@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig } from '../../config/index.ts';
 import { pruneGlobalRegistry, releasePorts } from '../../ports/index.ts';
-import { readPids, readPidsOrNull, runningServices, stopServices } from '../../process/index.ts';
+import { readPids, readPidsOrNull, liveServiceNames, stopServices } from '../../process/index.ts';
 import { portlerDir } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import { pathExists } from '../../util/fs.ts';
@@ -71,7 +71,7 @@ export async function commandClean(args: ParsedArgs): Promise<number> {
 
 async function cleanProject(projectDir: string, args: ParsedArgs): Promise<number> {
   const pids = await readPidsForClean(projectDir, args.force);
-  const running = runningServices(pids);
+  const running = await liveServiceNames(projectDir, pids);
 
   if (running.length > 0 && !args.force) {
     throw new Error(`services are still running: ${running.join(', ')}. Run "portler down" first or pass --force to stop them.`);
@@ -79,7 +79,7 @@ async function cleanProject(projectDir: string, args: ParsedArgs): Promise<numbe
 
   // A dead supervisor does not prove its Docker container died with it. Always
   // process every surviving PID entry before deleting the only file that names
-  // those resources, even when `runningServices` found no live leader.
+  // those resources, even when the service is no longer running.
   if (pids && Object.keys(pids.services).length > 0) {
     const result = await stopServices(projectDir, undefined, { force: args.force });
     if (result.stopped.length > 0) process.stdout.write(`[portler] stopped: ${result.stopped.join(', ')}\n`);

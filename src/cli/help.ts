@@ -62,6 +62,9 @@ provably belongs to someone else. Inspect the pid first with
 With a "proxy:" block in portler.yml, "ps proxy" and "down proxy" select just
 the reverse proxy.
 
+"clean" refuses running services, including containers left by dead supervisors
+and containers whose liveness cannot be checked; only --force stops them first.
+
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 
 Documentation: https://yjjosh.github.io/Portler
