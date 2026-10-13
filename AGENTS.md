@@ -60,8 +60,9 @@ user documentation lives in [`docs/`](docs/).
 
 - Never signal a process Portler cannot prove it started: its recorded start
   token must match (`maySignal` in `src/process/identity.ts`). When in doubt,
-  treat it as not ours and still running. Only `down --force` signals an
-  unverifiable process, and never one whose pid was provably reused.
+  treat it as not ours and still running. Only `down --force` and
+  `clean --force` (both through the `force` option of `stopServices`) signal
+  an unverifiable process, and never one whose pid was provably reused.
 - Only touch Docker containers, networks and volumes, or Kubernetes
   resources, labelled as this project's (`src/process/ownership.ts`), and
   re-check ownership right before a destructive call.
