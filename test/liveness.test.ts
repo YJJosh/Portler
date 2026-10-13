@@ -7,12 +7,12 @@ import path from 'node:path';
 import { it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { serviceLiveness } from '../src/process/liveness.ts';
-import { isPidAlive, processGroupAlive, readPids } from '../src/process/pids.ts';
+import { isPidAlive, isPidRunning, processGroupAlive, readPids } from '../src/process/pids.ts';
 import { startZombieGroup, waitFor } from './zombie-group.ts';
 
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 
-it('up refuses to overwrite an orphan group retained by down', { timeout: 20_000 }, async () => {
+it('up refuses to overwrite an orphan group retained by down', { timeout: 20_000 }, async (t) => {
   const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-orphan-live-')));
   const groups = new Set<number>();
   const run = (...args: string[]) => spawnSync(process.execPath, ['--experimental-strip-types', cli, ...args], {
@@ -31,7 +31,15 @@ it('up refuses to overwrite an orphan group retained by down', { timeout: 20_000
     }
     assert.ok(member > 0, 'the service spawned a member before killing its leader');
     process.kill(info.pid, 'SIGKILL');
-    assert.equal(await waitFor(() => isPidAlive(info.pid), false), false);
+    // The case under test needs the leader reaped, not just dead. A zombie
+    // leader still holds its PID and start token, so down can prove the group
+    // is ours and stop it. Under a PID 1 that does not reap orphans (a
+    // container without --init) the leader stays a zombie forever.
+    if (await waitFor(() => isPidRunning(info.pid), false)) {
+      t.skip('the killed leader was never reaped; run under a process that reaps orphans (docker run --init)');
+      return;
+    }
+    assert.equal(isPidAlive(info.pid), false);
     assert.ok(processGroupAlive(info.pid));
     const down = run('down');
     assert.equal(down.status, 1, down.stderr);
