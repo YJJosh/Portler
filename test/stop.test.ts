@@ -925,6 +925,54 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     });
   }
 
+  it('counts a removed container stopped when its late-exiting leader pid is reused during the late wait', { timeout: 15_000 }, async () => {
+    // The shell exits just before the signal round (so its refusal is held back),
+    // its group then empties, and its pid goes to a stranger that leads a group
+    // under the same number. The group probe reads alive to the end, but the
+    // leader's identity says the pid is no longer ours: the service was stopped.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const ours = 'Mon Oct 12 20:48:05 2026 4242';
+    const stranger = 'Mon Oct 12 21:30:00 2026 4242';
+    await writePidsFile({ db: { ...pidInfo(4242, ours), dockerContainer: 'c-db' } });
+
+    // 'ours' until the signal round, 'gone' at the round, then a stranger's
+    let phase: 'ours' | 'gone' | 'stranger' = 'ours';
+    let verifies = 0;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // first verify: the reuse check before the round; second: the round;
+        // third: the check after the late wait
+        pidRunning: () => {
+          verifies += 1;
+          if (verifies === 2) phase = 'gone';
+          if (verifies >= 3) phase = 'stranger';
+          return phase !== 'gone';
+        },
+        pidAlive: () => phase !== 'gone',
+        readStartToken: async () => (phase === 'ours' ? ours : phase === 'stranger' ? stranger : null),
+        groupState: () => 'alive',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled, least of all the stranger');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });

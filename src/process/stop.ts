@@ -556,14 +556,17 @@ export async function stopServices(
   // A held-back refusal: Portler removed this service's running container and
   // its leader is no longer runnable, so the only thing left is whatever its
   // group still holds. Wait for that group the same bounded time the settle wait
-  // gives, without signalling anything. Gone: stopped. Still alive: the refusal
-  // stands, with the warning the round held back.
+  // gives, without signalling anything. Gone: stopped. A leader pid that a
+  // different process now holds is stopped too, for the reason given at the
+  // settle wait: the reuse proves the old group emptied, and a group alive under
+  // that number now is the stranger's. Still alive otherwise: the refusal stands,
+  // with the warning the round held back.
   const lateDeadline = Date.now() + probes.confirmMs;
   while (Date.now() < lateDeadline && lateSettling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
     await sleep(POLL_MS);
   }
   for (const target of lateSettling) {
-    if (probes.groupState(target.info.pid) === 'gone') {
+    if (probes.groupState(target.info.pid) === 'gone' || (await verifyPid(probes, target.info)) === 'reused') {
       stopped.push(target.name);
       continue;
     }
