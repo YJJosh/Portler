@@ -15,6 +15,7 @@ user documentation lives in [`docs/`](docs/).
 
   ```sh
   npm run verify       # typecheck (including tests), tests, build, smoke
+  npm pack --dry-run   # the files the npm package would contain
   npm run docs:build   # the docs site; dead links fail the build
   ```
 
@@ -64,8 +65,10 @@ user documentation lives in [`docs/`](docs/).
 - Only touch Docker containers, networks and volumes, or Kubernetes
   resources, labelled as this project's (`src/process/ownership.ts`), and
   re-check ownership right before a destructive call.
-- `down` never deletes named volumes. Only `portler volumes remove` does, and
-  only for volumes this project owns.
+- `down` never deletes named volumes. Only `portler volumes remove` deletes
+  existing ones, and only those this project owns. The one other deletion is
+  `volumes fork` rolling back the target it just created when the copy fails
+  (`forkVolume` in `src/volumes/manager.ts`), again only while it is still ours.
 - Change `.portler/` state and the registry only under the existing locks
   (`src/state/lock.ts`, `src/ports/lock.ts`).
 
@@ -82,8 +85,9 @@ out any breaking change in the PR description so it reaches the release notes.
 
 ## Releases
 
-- The docs site deploys only when a release is published; the skill installs
-  from `main`.
+- The docs site deploys automatically when a release is published, and a
+  maintainer can also run **deploy docs** by hand. The skill installs from
+  `main`.
 - A maintainer runs the GitHub Actions in order: **1. Prepare version PR**
   opens the version bump, then after it is merged **prepare release** tags
   `main` and drafts the notes, and publishing that draft runs **npm publish**
