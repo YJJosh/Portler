@@ -213,7 +213,7 @@ type RoundResult =
   /** The signal reached the group (or the group was already gone). */
   | { status: 'signalled' }
   /** Identity could not be (re-)established, so nothing was signalled. */
-  | { status: 'refused'; verdict: IdentityVerdict; group: GroupState }
+  | { status: 'refused'; verdict: IdentityVerdict; group: GroupState; deferred: boolean }
   /** The kernel rejected the signal (EPERM, ...). */
   | { status: 'error'; message: string };
 
@@ -348,6 +348,7 @@ async function signalRound(
   targets: Target[],
   signal: NodeJS.Signals,
   warnOnRefusal: boolean,
+  deferRefusal: (target: Target, verdict: IdentityVerdict) => boolean = () => false,
 ): Promise<Map<Target, RoundResult>> {
   const results = new Map<Target, RoundResult>();
 
@@ -369,10 +370,13 @@ async function signalRound(
       const action: SignalAction = forcedSignal ? 'group' : signalDecision(verdict, group, target.provenOurs);
 
       if (action === 'none') {
-        if (warnOnRefusal && verdict === 'reused') warnReused(target.name, target.info.pid);
-        if (warnOnRefusal && verdict === 'unverifiable') warnUnverifiable(target.name, target.info.pid, false);
-        if (warnOnRefusal && verdict === 'gone' && group === 'alive') warnOrphanGroup(target.name, target.info.pid);
-        results.set(target, { status: 'refused', verdict, group });
+        // A deferred refusal is the caller's to judge (and warn about) later.
+        const deferred = deferRefusal(target, verdict);
+        const warn = warnOnRefusal && !deferred;
+        if (warn && verdict === 'reused') warnReused(target.name, target.info.pid);
+        if (warn && verdict === 'unverifiable') warnUnverifiable(target.name, target.info.pid, false);
+        if (warn && verdict === 'gone' && group === 'alive') warnOrphanGroup(target.name, target.info.pid);
+        results.set(target, { status: 'refused', verdict, group, deferred });
         return;
       }
 
@@ -499,13 +503,19 @@ export async function stopServices(
   // token whose leader is now a zombie reads as unverifiable), so it skips the
   // signal rounds and counts as stopped.
   for (const target of settled) stopped.push(target.name);
+  // The leader can also exit after the checks above and before this round, with
+  // the `docker run` client still in its group for a moment. Such a refusal is
+  // held back: below, the group gets the same confirm window as the settle wait.
   const termRound = await signalRound(
     probes,
     targets.filter((target) => !settled.has(target)),
     'SIGTERM',
     true,
+    (target, verdict) =>
+      containerCleanup.removed.has(target.name) && verdict !== 'reused' && !probes.pidAlive(target.info.pid),
   );
   const termed: Target[] = [];
+  const lateSettling: Target[] = [];
 
   // Bookkeeping policy for everything we did not signal:
   //
@@ -534,9 +544,37 @@ export async function stopServices(
     }
 
     if (result.verdict === 'unverifiable' || (result.verdict === 'gone' && result.group === 'alive')) {
+      if (result.deferred) {
+        lateSettling.push(target);
+        continue;
+      }
       unverified.push(target.name);
       keep.add(target.name);
     }
+  }
+
+  // A held-back refusal: Portler removed this service's running container and
+  // its leader is no longer runnable, so the only thing left is whatever its
+  // group still holds. Wait for that group the same bounded time the settle wait
+  // gives, without signalling anything. Gone: stopped. Still alive: the refusal
+  // stands, with the warning the round held back.
+  const lateDeadline = Date.now() + probes.confirmMs;
+  while (Date.now() < lateDeadline && lateSettling.some((target) => probes.groupState(target.info.pid) === 'alive')) {
+    await sleep(POLL_MS);
+  }
+  for (const target of lateSettling) {
+    if (probes.groupState(target.info.pid) === 'gone') {
+      stopped.push(target.name);
+      continue;
+    }
+    const result = termRound.get(target)!;
+    if (result.status === 'refused' && result.verdict === 'unverifiable') {
+      warnUnverifiable(target.name, target.info.pid, false);
+    } else {
+      warnOrphanGroup(target.name, target.info.pid);
+    }
+    unverified.push(target.name);
+    keep.add(target.name);
   }
 
   // "Gone" is LATCHED the moment it is observed. A group that has exited cannot
