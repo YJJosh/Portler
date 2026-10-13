@@ -36,7 +36,7 @@ portler volumes list|fork|remove          # manage Portler-managed "@name" Docke
 
 ## portler.yml essentials
 
-Per service: `command` + `cwd` (local) or `image`/`build` (Docker), `port`, `port_env`, `env`, `depends_on` (start order), `healthcheck` (`tcp`/`http`/`command`), `volumes` (`@name:` prefix = Portler-managed, project-scoped), `setup`. Top level: `use_env: .env` (listed files must exist or `up` fails), `setup`, an optional `proxy:` block (`port: auto`, `routes: {/api: backend, /: frontend}`, longest prefix wins) serving the whole stack behind one URL, and `prod` overrides used with `--prod`. `docker`, `k8s`, and `proxy` are reserved service names.
+Per service: `command` + `cwd` (local) or `image`/`build` (Docker), `port`, `port_env`, `env`, `depends_on` (start order), `healthcheck` (`tcp`/`http`/`command`), `volumes` (`@name:` prefix = Portler-managed, project-scoped), `setup`. Top level: `use_env: .env` (listed files must exist or `up` fails), `setup`, an optional `proxy:` block (`port: auto`, `routes: {/api: backend, /: frontend}`, longest prefix wins) serving the whole stack behind one URL, and `prod` overrides used with `--prod`. `docker` and `k8s` are reserved service names; so is `proxy` when a `proxy:` block exists.
 
 `setup` steps run on `up` before their service starts. A plain command runs once per checkout (again when the command changes), `{run: npm install, if_missing: node_modules}` only while that path is missing, `{run: ..., watch: [prisma/schema.prisma]}` again when a listed file changes, and `{run: ..., always: true}` on every `up`. `up --no-setup` skips them.
 
