@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { readProcessStartToken } from '../src/process/identity.ts';
-import { isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
+import { isPidAlive, isPidRunning, processGroupAliveAfterKill, readPids, writePids } from '../src/process/pids.ts';
 import { signalDecision, stopServices } from '../src/process/stop.ts';
 import type { StopHooks } from '../src/process/stop.ts';
 import type { PidsFile, PidServiceInfo } from '../src/types/index.ts';
@@ -74,13 +74,14 @@ function pidInfo(pid: number, startToken: string | undefined): PidServiceInfo {
 }
 
 /** Poll until the pid is gone, so the assertion does not race the signal. */
+/** Waits until `pid` no longer runs: a zombie counts as exited, as under a PID 1 that never reaps it stays one. */
 async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isPidRunning(pid)) return true;
+    if (!isPidAlive(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return !isPidRunning(pid);
+  return !isPidAlive(pid);
 }
 
 describe('signalDecision', () => {
@@ -231,9 +232,12 @@ describe('stopServices', () => {
 
     await writePidsFile({ api: pidInfo(pid, token) });
 
-    // The process exits; the pid entry now points at nothing.
+    // The process exits; the pid entry now points at nothing. Wait for Node to
+    // reap it (its own child), not just for it to stop running: an unreaped
+    // zombie would still answer to its pid and start token.
+    const reaped = new Promise((resolve) => original.once('exit', resolve));
     process.kill(pid, 'SIGKILL');
-    await waitForExit(pid);
+    await reaped;
 
     const result = await stopServices(projectDir);
 
@@ -599,5 +603,714 @@ describe('stopServices: the SIGKILL round', () => {
 
     assert.deepEqual(result.stopped, ['api']);
     assert.deepEqual(result.failures, []);
+  });
+});
+
+/**
+ * A Docker service whose supervising `docker run` shell was killed while its
+ * container ran on: the leader pid is gone, and the `docker run` client is left
+ * in the group until the container goes. A `docker` on PATH stands in for the
+ * daemon; its `rm -f` drops a marker that makes the left-behind member exit,
+ * the way the real client does when its container is removed.
+ */
+describe('stopServices: a container whose docker run shell is gone', () => {
+  /**
+   * `rmDelay` keeps `docker rm` from returning for that many seconds after it
+   * drops the marker, so the member can exit before Portler looks at its group.
+   */
+  async function fakeDocker(
+    dir: string,
+    marker: string,
+    { running = true, rmDelay = 0 }: { running?: boolean; rmDelay?: number } = {},
+  ): Promise<string> {
+    const bin = path.join(dir, 'fake-bin');
+    await fs.mkdir(bin, { recursive: true });
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      [
+        '#!/bin/sh',
+        'case "$1" in',
+        `  rm) : > '${marker}'; sleep ${rmDelay}; exit 0 ;;`,
+        `  inspect) printf '%s\\n' '${inspected}' ;;`,
+        '  *) echo "Error: No such object" >&2; exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return bin;
+  }
+
+  /** A group whose leader has exited, leaving one member that runs until `marker` exists (or forever). */
+  async function orphanedGroup(marker: string | null): Promise<{ leader: number; member: number }> {
+    const memberFile = path.join(projectDir, `member-${Date.now()}`);
+    const body = marker
+      ? `const fs=require('fs');setInterval(()=>{if(fs.existsSync(${JSON.stringify(marker)}))process.exit(0)},25)`
+      : 'setInterval(()=>{},1000)';
+    const leaderScript =
+      `const c=require('child_process').spawn(process.execPath,['-e',${JSON.stringify(body)}],{stdio:'ignore'});` +
+      `c.unref();require('fs').writeFileSync(${JSON.stringify(memberFile)},String(c.pid));process.exit(0)`;
+    const leader = spawn(process.execPath, ['-e', leaderScript], { detached: true, stdio: 'ignore' });
+    spawned.push(leader);
+    await once(leader, 'exit');
+    const member = Number(await fs.readFile(memberFile, 'utf8'));
+    return { leader: leader.pid!, member };
+  }
+
+  it('reports it stopped and prunes the entry once removing the container ends the group', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const { leader, member } = await orphanedGroup(marker);
+    assert.ok(isPidRunning(member), 'the left-behind member runs before down');
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined);
+      assert.ok(await waitForExit(member), 'the member exited when its container was removed');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('reports it stopped when the group is already gone by the time docker rm returns', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker, { rmDelay: 0.5 });
+    const { leader, member } = await orphanedGroup(marker);
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.ok(!isPidAlive(member), 'the member was gone before Portler first looked at its group');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its tokenless leader is left a zombie', { timeout: 15_000 }, async () => {
+    // Under a PID 1 that does not reap, the exited shell stays a zombie: kill(pid, 0)
+    // still answers, so an entry without a start token (older Portler, or a token
+    // that could not be read) verifies as unverifiable. The container was removed
+    // and nothing in the group can run, so it is stopped, signalled by nobody and
+    // without a warning.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, undefined), dockerContainer: 'c-db' } });
+
+    const signals: NodeJS.Signals[] = [];
+    const warnings: string[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => true, // a zombie leader still answers kill(pid, 0)
+        pidAlive: () => false, // ...but it is a zombie
+        groupState: () => 'gone', // and nothing runnable is left in its group
+        readStartToken: async () => 'Mon Oct 12 20:48:05 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(warnings.filter((line) => line.includes('warning')), [], 'and nothing is warned about');
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its leader pid now belongs to a stranger', { timeout: 15_000 }, async () => {
+    // The shell exited long ago and the OS gave its pid to an unrelated process,
+    // which here even leads a live group under that number. The token proves the
+    // pid is not ours, and the reuse proves our old group was empty, so removing
+    // the running container is the stop. The stranger is never signalled.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => true, // the stranger answers kill(pid, 0)
+        pidAlive: () => true, // and is runnable
+        groupState: () => 'alive', // and leads its own group under that number
+        readStartToken: async () => 'Tue Oct 13 09:00:00 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'the stranger is never signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its leader pid is reused during the wait', { timeout: 15_000 }, async () => {
+    // The shell was already gone when the container was removed, so the service
+    // waits for its group. During that wait the old group empties and the OS hands
+    // the pid to a stranger that leads a live group under the same number. The
+    // token still proves the pid is not ours, so this is a stop, not an orphan.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    let reused = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => reused,
+        pidAlive: () => reused,
+        groupState: () => {
+          // the old group, and from the first look on the stranger's, are alive
+          const state = 'alive';
+          reused = true;
+          return state;
+        },
+        readStartToken: async () => 'Tue Oct 13 09:00:00 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'the stranger is never signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its group exits right after the settle wait', { timeout: 15_000 }, async () => {
+    // The shell was gone when the container was removed, and the client it left
+    // stays alive through the whole settle wait, including the last check. It
+    // exits before the signal round looks, so that round sees a plain stale
+    // entry. The container was still removed by us, so the service was stopped.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    let roundStarted = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // only verifyPid calls this, and a settling target first meets it in the signal round
+        pidRunning: () => {
+          roundStarted = true;
+          return false;
+        },
+        pidAlive: () => false,
+        groupState: () => (roundStarted ? 'gone' : 'alive'),
+        readStartToken: async () => null,
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'nothing is signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  for (const outlives of [false, true]) {
+    const title = outlives
+      ? 'keeps the entry when the group of a leader that exited just before the round outlives the wait'
+      : 'counts a removed container stopped when its leader exits just before the signal round';
+    it(title, { timeout: 15_000 }, async () => {
+      // The shell is still alive when the container is removed and when the
+      // settle checks look, so the service is not settling. It exits just before
+      // the signal round, leaving its `docker run` client in the group for a
+      // moment. The round must not judge that group on the spot.
+      const marker = path.join(projectDir, 'removed');
+      const bin = await fakeDocker(projectDir, marker);
+      const token = 'Mon Oct 12 20:48:05 2026 4242';
+      await writePidsFile({ db: { ...pidInfo(4242, token), dockerContainer: 'c-db' } });
+
+      let verifies = 0;
+      let exited = false;
+      let groupChecksAfterExit = 0;
+      const signals: NodeJS.Signals[] = [];
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+      try {
+        const result = await stopServices(projectDir, ['db'], {}, {
+          graceMs: 20,
+          confirmMs: 300,
+          // first verify: the reuse check before the round (leader still ours);
+          // second: the signal round (the leader has just exited)
+          pidRunning: () => {
+            verifies += 1;
+            if (verifies >= 2) exited = true;
+            return !exited;
+          },
+          pidAlive: () => !exited,
+          readStartToken: async () => (exited ? null : token),
+          groupState: () => {
+            if (!exited) return 'alive';
+            groupChecksAfterExit += 1;
+            return outlives || groupChecksAfterExit < 3 ? 'alive' : 'gone';
+          },
+          sendSignal: (_pid, signal) => {
+            signals.push(signal);
+            return { status: 'sent' };
+          },
+        });
+        assert.deepEqual(signals, [], 'nothing is signalled');
+        if (outlives) {
+          assert.deepEqual(result.stopped, []);
+          assert.deepEqual(result.unverified, ['db']);
+          assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
+        } else {
+          assert.deepEqual(result.stopped, ['db']);
+          assert.deepEqual(result.unverified, []);
+          assert.deepEqual(result.failures, []);
+          assert.deepEqual(result.completed, ['db']);
+          assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+        }
+      } finally {
+        process.env.PATH = savedPath;
+      }
+    });
+  }
+
+  it('counts a removed container stopped when its late-exiting leader pid is reused during the late wait', { timeout: 15_000 }, async () => {
+    // The shell exits just before the signal round (so its refusal is held back),
+    // its group then empties, and its pid goes to a stranger that leads a group
+    // under the same number. The group probe reads alive to the end, but the
+    // leader's identity says the pid is no longer ours: the service was stopped.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const ours = 'Mon Oct 12 20:48:05 2026 4242';
+    const stranger = 'Mon Oct 12 21:30:00 2026 4242';
+    await writePidsFile({ db: { ...pidInfo(4242, ours), dockerContainer: 'c-db' } });
+
+    // 'ours' until the signal round, 'gone' at the round, then a stranger's
+    let phase: 'ours' | 'gone' | 'stranger' = 'ours';
+    let verifies = 0;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // first verify: the reuse check before the round; second: the round;
+        // third: the check after the late wait
+        pidRunning: () => {
+          verifies += 1;
+          if (verifies === 2) phase = 'gone';
+          if (verifies >= 3) phase = 'stranger';
+          return phase !== 'gone';
+        },
+        pidAlive: () => phase !== 'gone',
+        readStartToken: async () => (phase === 'ours' ? ours : phase === 'stranger' ? stranger : null),
+        groupState: () => 'alive',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled, least of all the stranger');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its pid is reused between the round and the hold-back', { timeout: 15_000 }, async () => {
+    // At the signal round the leader is gone and its group still alive; before
+    // Portler decides whether to hold the refusal back, the group empties and the
+    // pid goes to a stranger leading a group under the same number. The refusal
+    // is held back anyway, and the check after the wait sees the stranger.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const ours = 'Mon Oct 12 20:48:05 2026 4343';
+    const stranger = 'Mon Oct 12 21:30:00 2026 4343';
+    await writePidsFile({ db: { ...pidInfo(4343, ours), dockerContainer: 'c-db' } });
+
+    let phase: 'ours' | 'gone' | 'stranger' = 'ours';
+    let verifies = 0;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // first verify: the reuse check before the round (ours); second: the
+        // round (gone); after that the pid is a stranger's
+        pidRunning: () => {
+          verifies += 1;
+          if (verifies === 2) phase = 'gone';
+          return phase !== 'gone';
+        },
+        pidAlive: () => phase !== 'gone',
+        readStartToken: async () => (phase === 'ours' ? ours : phase === 'stranger' ? stranger : null),
+        // the round reads the old group alive; right after, the stranger takes
+        // the pid and leads a group under it
+        groupState: () => {
+          if (phase === 'gone') phase = 'stranger';
+          return 'alive';
+        },
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled, least of all the stranger');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its pid is reused right after the late check', { timeout: 15_000 }, async () => {
+    // The leader exits just before the round, so its refusal waits out the late
+    // wait. The check after it sees the leader gone and its group gone; a
+    // stranger then takes the pid (without leading a group). That later
+    // liveness must not overturn the gone/gone just sampled.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const ours = 'Mon Oct 12 20:48:05 2026 4444';
+    await writePidsFile({ db: { ...pidInfo(4444, ours), dockerContainer: 'c-db' } });
+
+    let verifies = 0;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // first verify: the reuse check before the round (ours, alive); every
+        // later one finds the pid gone
+        pidRunning: () => {
+          verifies += 1;
+          return verifies === 1;
+        },
+        // the stranger holds the pid by the time anything asks after the check
+        pidAlive: () => true,
+        readStartToken: async () => ours,
+        // the old group lives on until the check after the late wait
+        groupState: () => (verifies >= 3 ? 'gone' : 'alive'),
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its tokenless pid goes to a stranger after the group is seen gone', { timeout: 15_000 }, async () => {
+    // An entry without a start token verifies as unverifiable, so its refusal is
+    // held back. During the wait its old group is seen gone; a stranger then
+    // takes the pid and leads a group under that number. Re-probing would read
+    // that stranger's group as alive, so the gone that was seen must stand.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4545, undefined), dockerContainer: 'c-db' } });
+
+    let verifies = 0;
+    let probesAfterRound = 0;
+    const signals: NodeJS.Signals[] = [];
+    const warnings: string[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 300,
+        // the old leader, then the stranger: something always answers at the pid
+        pidRunning: () => {
+          verifies += 1;
+          return true;
+        },
+        pidAlive: () => true,
+        readStartToken: async () => 'Mon Oct 12 21:00:00 2026 4545',
+        // the round's probe reads alive; the first probe of the late wait sees
+        // the old group gone; after that the stranger's own group answers
+        groupState: () => {
+          if (verifies < 2) return 'alive';
+          probesAfterRound += 1;
+          return probesAfterRound === 2 ? 'gone' : 'alive';
+        },
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(warnings.filter((line) => line.includes('warning')), [], 'and nothing is warned about');
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('keeps a group seen gone during the settle wait counted as gone while another group holds the wait', { timeout: 15_000 }, async () => {
+    // db (no start token) and cache both had their shells exit before down
+    // started. db's old group is seen gone mid-wait; a stranger then takes its pid
+    // and leads a group under that number. cache's group never goes, so the wait
+    // runs on. The gone seen for db must stand rather than be re-probed.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({
+      db: { ...pidInfo(4646, undefined), dockerContainer: 'c-db' },
+      cache: { ...pidInfo(4747, 'Mon Oct 12 20:48:05 2026 4747'), dockerContainer: 'c-cache' },
+    });
+
+    let dbProbes = 0;
+    let stranger = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      const result = await stopServices(projectDir, ['db', 'cache'], {}, {
+        graceMs: 20,
+        confirmMs: 300,
+        // db's pid is free until its group is seen gone, then a stranger holds it
+        pidRunning: (pid) => (pid === 4646 ? stranger : false),
+        pidAlive: (pid) => (pid === 4646 ? stranger : false),
+        readStartToken: async (pid) => (pid === 4646 && stranger ? 'Mon Oct 12 21:00:00 2026 4646' : null),
+        groupState: (pid) => {
+          if (pid !== 4646) return 'alive'; // cache's group never goes
+          dbProbes += 1;
+          if (dbProbes === 2) {
+            stranger = true;
+            return 'gone';
+          }
+          return 'alive'; // before: the old group; after: the stranger's own
+        },
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, ['cache']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, "db's entry is pruned");
+      assert.ok((await readPids(projectDir))?.services.cache, "cache's entry is kept");
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker, { running: false });
+    const leader = spawn(process.execPath, ['-e', 'process.exit(0)'], { detached: true, stdio: 'ignore' });
+    spawned.push(leader);
+    await once(leader, 'exit');
+    await writePidsFile({ db: { ...pidInfo(leader.pid!, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db']);
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the stale entry is pruned');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('gives a removed container whose leader was already gone one confirm window, not two', { timeout: 15_000 }, async () => {
+    // The shell had exited before down started and its group never goes. The
+    // settle wait spends the confirm window on it; the later hold-back must not
+    // add a second one, so the warning comes after about one window in all.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    const probeTimes: number[] = [];
+    const warnings: string[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    const confirmMs = 500;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs,
+        pidRunning: () => false, // the leader exited before down started
+        pidAlive: () => false,
+        groupState: () => {
+          probeTimes.push(Date.now());
+          return 'alive'; // and its group never goes
+        },
+        sendSignal: () => ({ status: 'sent' }),
+      });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, ['db']);
+      assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
+      assert.equal(warnings.filter((line) => line.includes('warning')).length, 1, 'one warning');
+      const span = probeTimes[probeTimes.length - 1]! - probeTimes[0]!;
+      assert.ok(span < confirmMs * 1.6, `the group was watched for ${span} ms, about one ${confirmMs} ms window`);
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('judges each held-back container at its own deadline, not at the last one', { timeout: 15_000 }, async () => {
+    // db's shell had exited before down started, so db spends the settle wait;
+    // cache's shell exits just before the signal round and gets its own window
+    // after it. Neither group ever goes. db must be judged when its window ends,
+    // not held on until cache's later one ends too.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const token = 'Mon Oct 12 20:48:05 2026 5252';
+    await writePidsFile({
+      db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' },
+      cache: { ...pidInfo(5252, token), dockerContainer: 'c-cache' },
+    });
+
+    let cacheVerifies = 0;
+    let cacheExited = false;
+    const dbProbes: number[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    const confirmMs = 500;
+    try {
+      const result = await stopServices(projectDir, ['db', 'cache'], {}, {
+        graceMs: 20,
+        confirmMs,
+        pidRunning: (pid) => {
+          if (pid === 4242) return false; // db's leader exited before down started
+          cacheVerifies += 1; // first: the reuse check before the round; second: the round
+          if (cacheVerifies >= 2) cacheExited = true;
+          return !cacheExited;
+        },
+        pidAlive: (pid) => (pid === 4242 ? false : !cacheExited),
+        readStartToken: async (pid) => (pid === 5252 && !cacheExited ? token : null),
+        groupState: (pid) => {
+          if (pid === 4242) dbProbes.push(Date.now());
+          return 'alive'; // neither group ever goes
+        },
+        sendSignal: () => ({ status: 'sent' }),
+      });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual([...result.unverified].sort(), ['cache', 'db']);
+      const span = dbProbes[dbProbes.length - 1]! - dbProbes[0]!;
+      assert.ok(span < confirmMs * 1.6, `db's group was watched for ${span} ms, about one ${confirmMs} ms window`);
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('still keeps the entry when the group outlives its removed container', { timeout: 15_000 }, async () => {
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const { leader, member } = await orphanedGroup(null);
+    await writePidsFile({ db: { ...pidInfo(leader, undefined), dockerContainer: 'c-db' } });
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, { confirmMs: 300 });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual(result.unverified, ['db']);
+      assert.deepEqual(result.completed, []);
+      assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
+      assert.ok(isPidRunning(member), 'nothing was signalled');
+    } finally {
+      process.env.PATH = savedPath;
+      try {
+        process.kill(member, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
   });
 });

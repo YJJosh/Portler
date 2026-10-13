@@ -213,7 +213,7 @@ type RoundResult =
   /** The signal reached the group (or the group was already gone). */
   | { status: 'signalled' }
   /** Identity could not be (re-)established, so nothing was signalled. */
-  | { status: 'refused'; verdict: IdentityVerdict; group: GroupState }
+  | { status: 'refused'; verdict: IdentityVerdict; group: GroupState; deferred: boolean }
   /** The kernel rejected the signal (EPERM, ...). */
   | { status: 'error'; message: string };
 
@@ -261,7 +261,7 @@ function warnOrphanGroup(name: string, pid: number): void {
 async function removeDockerContainers(
   projectDir: string,
   targets: Target[],
-): Promise<{ keep: Set<string>; failures: string[] }> {
+): Promise<{ keep: Set<string>; failures: string[]; removed: Set<string> }> {
   const byContainer = new Map<string, string[]>();
   for (const target of targets) {
     const container = target.info.dockerContainer;
@@ -271,15 +271,17 @@ async function removeDockerContainers(
 
   const keep = new Set<string>();
   const failures: string[] = [];
+  const removed = new Set<string>();
 
   await Promise.all(
     [...byContainer].map(async ([container, services]) => {
       const outcome = await removeOwnedContainer(container, projectDir);
+      if (outcome.status === 'removed' && outcome.running === true) for (const service of services) removed.add(service);
       handleRemoval('container', container, services, outcome, keep, failures);
     }),
   );
 
-  return { keep, failures };
+  return { keep, failures, removed };
 }
 
 function handleRemoval(
@@ -346,6 +348,7 @@ async function signalRound(
   targets: Target[],
   signal: NodeJS.Signals,
   warnOnRefusal: boolean,
+  deferRefusal: (target: Target, verdict: IdentityVerdict) => boolean = () => false,
 ): Promise<Map<Target, RoundResult>> {
   const results = new Map<Target, RoundResult>();
 
@@ -367,10 +370,13 @@ async function signalRound(
       const action: SignalAction = forcedSignal ? 'group' : signalDecision(verdict, group, target.provenOurs);
 
       if (action === 'none') {
-        if (warnOnRefusal && verdict === 'reused') warnReused(target.name, target.info.pid);
-        if (warnOnRefusal && verdict === 'unverifiable') warnUnverifiable(target.name, target.info.pid, false);
-        if (warnOnRefusal && verdict === 'gone' && group === 'alive') warnOrphanGroup(target.name, target.info.pid);
-        results.set(target, { status: 'refused', verdict, group });
+        // A deferred refusal is the caller's to judge (and warn about) later.
+        const deferred = deferRefusal(target, verdict);
+        const warn = warnOnRefusal && !deferred;
+        if (warn && verdict === 'reused') warnReused(target.name, target.info.pid);
+        if (warn && verdict === 'unverifiable') warnUnverifiable(target.name, target.info.pid, false);
+        if (warn && verdict === 'gone' && group === 'alive') warnOrphanGroup(target.name, target.info.pid);
+        results.set(target, { status: 'refused', verdict, group, deferred });
         return;
       }
 
@@ -425,6 +431,17 @@ function warnSecondRoundRefusal(target: Target): void {
  * - Docker cleanup failed -> entry KEPT, so the container/network it names is
  *   not forgotten
  */
+// A leader that still answers at its pid (a zombie, or a live process) is not
+// runnable code of this service when the pid is not alive, or when a second
+// identity check finds it gone or handed to someone else. The second check
+// stops a pid reused between the first check and this one from reading as the
+// leader still running.
+async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<boolean> {
+  if (!probes.pidAlive(info.pid)) return true;
+  const again = await verifyPid(probes, info);
+  return again === 'gone' || again === 'reused';
+}
+
 export async function stopServices(
   projectDir: string,
   serviceNames?: string[],
@@ -459,8 +476,68 @@ export async function stopServices(
   for (const name of containerCleanup.keep) keep.add(name);
   failures.push(...containerCleanup.failures);
 
-  const termRound = await signalRound(probes, targets, 'SIGTERM', true);
+  // A service whose supervising shell has already exited while its container ran
+  // on: removing the running container is what stops it, and the `docker run`
+  // client left in its process group exits then, possibly before `docker rm`
+  // has even returned. Give that group the confirm window to go before judging
+  // it, so the service reads as stopped instead of as an orphaned group nobody
+  // can prove. Nothing is signalled here; a group that is still alive at the
+  // deadline gets today's careful treatment.
+  const settling = targets.filter(
+    (target) => containerCleanup.removed.has(target.name) && !probes.pidAlive(target.info.pid),
+  );
+  // A group seen gone here stays gone: the leader was already not runnable, so
+  // nothing of ours can bring the group back, and once its pid is free a
+  // stranger may lead a group under the same number. So each target's gone is
+  // remembered, and a later probe never overturns it.
+  const sawGone = new Set<Target>();
+  const settleDeadline = Date.now() + probes.confirmMs;
+  for (;;) {
+    for (const target of settling) {
+      if (!sawGone.has(target) && probes.groupState(target.info.pid) === 'gone') sawGone.add(target);
+    }
+    if (sawGone.size === settling.length || Date.now() >= settleDeadline) break;
+    await sleep(POLL_MS);
+  }
+  // A leader whose pid now runs a different process (its start token no longer
+  // matches) has exited, whether that happened long ago or during the wait above.
+  // Its group went with it: the kernel never hands out a pid that is still in use
+  // as a process-group id, so the reuse proves the old group was empty, and
+  // whatever group now carries that number is the stranger's. Such a service is
+  // stopped once its container is removed; its pid is never signalled. This is
+  // checked after the wait so a reuse during it still counts.
+  const settled = new Set<Target>();
+  for (const target of targets) {
+    if (!containerCleanup.removed.has(target.name)) continue;
+    if (settling.includes(target) && (sawGone.has(target) || probes.groupState(target.info.pid) === 'gone')) {
+      settled.add(target);
+    } else if ((await verifyPid(probes, target.info)) === 'reused') {
+      settled.add(target);
+    }
+  }
+
+  // A settled service has nothing left to signal or identify: its running
+  // container was ours by label and is gone, its leader is not runnable, and its
+  // group holds nothing runnable either. Verifying the leader's identity again
+  // could only fail for reasons that no longer matter (an entry without a start
+  // token whose leader is now a zombie reads as unverifiable), so it skips the
+  // signal rounds and counts as stopped.
+  for (const target of settled) stopped.push(target.name);
+  // The leader can also exit after the checks above and before this round, with
+  // the `docker run` client still in its group for a moment, and its pid can be
+  // reused in the time it takes to look. So every refusal for a service whose
+  // running container Portler just removed is held back, whatever the leader
+  // looks like at this instant; below, its group gets the same confirm window as
+  // the settle wait and it is judged once, afterwards.
+  const termRound = await signalRound(
+    probes,
+    targets.filter((target) => !settled.has(target)),
+    'SIGTERM',
+    true,
+    (target, verdict) => containerCleanup.removed.has(target.name) && verdict !== 'reused',
+  );
   const termed: Target[] = [];
+  const lateSettling: Target[] = [];
 
   // Bookkeeping policy for everything we did not signal:
   //
@@ -473,6 +550,7 @@ export async function stopServices(
   // - the kill itself failed (EPERM): a live group we are not allowed to signal.
   //   That is a failure, not a stop.
   for (const target of targets) {
+    if (settled.has(target)) continue;
     const result = termRound.get(target)!;
 
     if (result.status === 'signalled') {
@@ -488,9 +566,69 @@ export async function stopServices(
     }
 
     if (result.verdict === 'unverifiable' || (result.verdict === 'gone' && result.group === 'alive')) {
+      if (result.deferred) {
+        lateSettling.push(target);
+        continue;
+      }
       unverified.push(target.name);
       keep.add(target.name);
     }
+  }
+
+  // A held-back refusal: Portler removed this service's running container, so
+  // the only thing left is whatever its group still holds. Wait for that group
+  // the same bounded time the settle wait gives, without signalling anything,
+  // then judge it once from a fresh look. A leader pid that a different process
+  // now holds means stopped, for the reason given at the settle wait: the reuse
+  // proves the old group emptied, and a group alive under that number now is the
+  // stranger's. A group that is gone with a leader that is not runnable means
+  // stopped too. Anything else (a live leader Portler cannot identify, or a
+  // group still alive under it): the refusal stands, with the warning the round
+  // held back. The sampled verdict is what counts: a leader seen gone with its
+  // group seen gone is stopped, whatever a later look at that pid number finds.
+  // A service that already sat through the settle wait keeps that wait's
+  // deadline instead of getting a second window, so no service waits longer
+  // than one confirm window in all. Each one is judged as soon as its own
+  // deadline passes or its group goes, not when the last of them is done.
+  const lateStart = Date.now();
+  const lateDeadlineFor = (target: Target): number =>
+    settling.includes(target) ? settleDeadline : lateStart + probes.confirmMs;
+  // A group seen gone in the wait below is LATCHED and handed in: its pid can
+  // go to a stranger a moment later, whose own group would then read as alive.
+  // Once the group has been seen gone, only a leader proven ours by its start
+  // token and still runnable (our own process, moved to another group) keeps
+  // the entry; a stranger at the pid can never prove that.
+  const judgeLate = async (target: Target, sawGroupGone: boolean): Promise<void> => {
+    const verdict = await verifyPid(probes, target.info);
+    const groupGone = sawGroupGone || probes.groupState(target.info.pid) === 'gone';
+    if (
+      verdict === 'reused' ||
+      (groupGone && (verdict !== 'match' || (await leaderNotRunnable(probes, target.info))))
+    ) {
+      stopped.push(target.name);
+      return;
+    }
+    const result = termRound.get(target)!;
+    if (result.status === 'refused' && result.verdict === 'unverifiable') {
+      warnUnverifiable(target.name, target.info.pid, false);
+    } else {
+      warnOrphanGroup(target.name, target.info.pid);
+    }
+    unverified.push(target.name);
+    keep.add(target.name);
+  };
+  const pendingLate = [...lateSettling];
+  while (pendingLate.length > 0) {
+    for (const target of [...pendingLate]) {
+      let sawGroupGone = false;
+      if (Date.now() < lateDeadlineFor(target)) {
+        if (probes.groupState(target.info.pid) === 'alive') continue;
+        sawGroupGone = true;
+      }
+      pendingLate.splice(pendingLate.indexOf(target), 1);
+      await judgeLate(target, sawGroupGone);
+    }
+    if (pendingLate.length > 0) await sleep(POLL_MS);
   }
 
   // "Gone" is LATCHED the moment it is observed. A group that has exited cannot
@@ -575,6 +713,14 @@ export async function stopServices(
   const completed = selectedNames.filter((name) => !keep.has(name));
   const remaining = selectedNames.filter((name) => keep.has(name));
   if (completed.length > 0) await removePidEntries(projectDir, completed);
+
+  // Removing a service's running container is what stops it. Whatever the
+  // signal rounds made of its leader afterwards (a group that exited between the
+  // last settle check and the round reads as plain stale), a service whose
+  // running container we removed and whose entry is now pruned was stopped.
+  for (const name of completed) {
+    if (containerCleanup.removed.has(name) && !stopped.includes(name)) stopped.push(name);
+  }
 
   return { stopped, unverified, failures, completed, remaining };
 }
