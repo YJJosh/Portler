@@ -205,6 +205,24 @@ describe('env for a running service', () => {
     assert.ok(value(local.stdout, 'PORTLER_POSTGRES_CONTAINER'), 'a service that is a container in the plain view keeps its name');
   });
 
+  it('shows each view\'s own image for a container service with a docker.image override', async () => {
+    // Both views name the same container, so the cached state passes the container-name
+    // check; the image cached by `env docker` must not leak into the plain view.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
+    image: example/api-base
+    port: 5000
+    docker:
+      image: example/api-docker
+`, 'utf8');
+    const docker = run('docker', 'api');
+    assert.equal(docker.status, 0, docker.stderr);
+    assert.equal(value(docker.stdout, 'PORTLER_API_IMAGE'), 'example/api-docker');
+    const plain = run('api');
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(value(plain.stdout, 'PORTLER_API_IMAGE'), 'example/api-base');
+    assert.equal(value(plain.stdout, 'PORTLER_API_CONTAINER'), value(docker.stdout, 'PORTLER_API_CONTAINER'));
+  });
+
   it('refuses a typed k8s mode for a service that up k8s would refuse', async () => {
     await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
     command: node api.js

@@ -197,12 +197,16 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
       else validateK8sMode(config, launched);
     }
 
-    // A partial `up` rewrites state.json with only its own pins, so a cached image can name
-    // portler.yml's image while a running container's pids.json entry still holds its pin.
+    // Only the ports come from state.json. Its container fields can belong to another view: a
+    // service with both a top-level `image` and a `docker.image` keeps one container name in
+    // both modes, so the cache check passes with the other mode's image, and a partial `up`
+    // rewrites state.json with only its own pins. Show what a fresh allocation for this view
+    // would hold; `config` already carries the running containers' pins.
     const { assignments: cached } = await ensureAssignments(config);
     const assignments: Assignments = Object.assign(Object.create(null) as Assignments, cached);
-    for (const [name, image] of Object.entries(pins)) {
-      if (assignments[name]) assignments[name] = { ...assignments[name], image };
+    for (const name of Object.keys(assignments)) {
+      const docker = config.services[name]?.docker;
+      if (docker) assignments[name] = { ...assignments[name], containerName: docker.containerName, image: docker.image };
     }
     const generatedEnv = buildGeneratedEnv(assignments);
     // Always refresh runtime.env, even when cached state was reused, so a
