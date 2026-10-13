@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { normalizeHealthcheck } from '../src/config/healthcheck.ts';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../src/constants.ts';
-import { DOCKER_TCP_HOLD_MS, isTcpReady, waitForServiceReady } from '../src/readiness/index.ts';
+import { DOCKER_TCP_HOLD_MS, isTcpReady, portlerErrorsInLog, waitForServiceReady } from '../src/readiness/index.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment, ServiceConfig } from '../src/types/index.ts';
 
 describe('normalizeHealthcheck', () => {
@@ -268,6 +270,105 @@ describe('waitForServiceReady', () => {
       waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, '/proj/.portler/logs/api.log'),
       (error: Error) => /Check \/proj\/\.portler\/logs\/api\.log \(or "portler logs api"\) for the cause/.test(error.message) && !/above/.test(error.message),
     );
+  });
+
+  it("puts Portler's own refusal from a detached log into the error", async () => {
+    // The launch shell refuses a container name another project owns and
+    // exits before Docker starts anything; in a detached run that line is
+    // only in the log, so the terminal used to say just "exited".
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-log-'));
+    try {
+      const logFile = path.join(dir, 'db.log');
+      writeFileSync(
+        logFile,
+        'Unable to find image locally\n' +
+          '[portler] error: container "portler-shop--db" exists but is not managed by this project; refusing to remove it. ' +
+          'Rename it, remove it yourself, or set container_name.\n',
+      );
+      const port = await findFreePort();
+      const service = makeService({ port: 4000, healthcheck: { type: 'tcp', timeoutMs: 5_000, intervalMs: 25 } });
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
+        (error: Error) => {
+          assert.match(error.message, /^service "api" exited before it became ready: container "portler-shop--db" exists but is not managed by this project/);
+          assert.match(error.message, new RegExp(`The full output is in ${logFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(or "portler logs api"\\)`));
+          assert.doesNotMatch(error.message, /\[portler\] error:/, 'the prefix is not repeated inside the message');
+          return true;
+        },
+      );
+
+      // A log without a refusal of Portler's keeps the plain hint.
+      writeFileSync(logFile, 'panic: listen tcp: address already in use\n');
+      await assert.rejects(
+        waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
+        /exited before it became ready\. Check .*db\.log \(or "portler logs api"\) for the cause/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a detached log's refusals from its last MiB, in chunks", () => {
+    // The launch shell builds first and checks names afterwards, so a refusal
+    // follows any build output. Only the last MiB is read, 64 KiB at a time; a
+    // line or a character split across two reads still counts.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-scan-'));
+    try {
+      const logFile = path.join(dir, 'api.log');
+      const chunk = 64 * 1024;
+
+      // A refusal that straddles the first chunk boundary with a two-byte
+      // character split across it, and a CRLF ending. The filler ends at byte
+      // chunk - 20, the 17-byte prefix and "ab" fill the rest, and "é" takes
+      // the last byte of the first read and the first of the second.
+      const filler = `${'a'.repeat(chunk - 21)}\n`;
+      writeFileSync(logFile, `${filler}[portler] error: abé network "portler-shop" is someone else's\r\nbuild output\n`);
+      assert.deepEqual(portlerErrorsInLog(logFile), [`abé network "portler-shop" is someone else's`]);
+
+      // Several megabytes of build output, then four refusals: the last three
+      // are reported, in order.
+      const noise = `${'step 1/9 : RUN pnpm install --frozen-lockfile '.repeat(20)}\n`.repeat(4_000);
+      writeFileSync(
+        logFile,
+        `${noise}${noise}[portler] error: one\n[portler] error: two\n[portler] error:   \n[portler] error: three\nbuild output\n[portler] error: four\n`,
+      );
+      assert.deepEqual(portlerErrorsInLog(logFile), ['two', 'three', 'four']);
+
+      // A refusal before the last MiB is not read.
+      writeFileSync(logFile, `[portler] error: early\n${noise}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), []);
+
+      // The last MiB below starts at the "[" of a line that began earlier, so
+      // the rest of that line is not taken for a refusal; when the byte before
+      // the window is a newline, the line is whole and counts.
+      const tail = 1024 * 1024;
+      const window = `[portler] error: fake\n${'b'.repeat(tail - 45)}\n[portler] error: real\n`;
+      assert.equal(Buffer.byteLength(window), tail);
+      writeFileSync(logFile, `zzz${window}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), ['real']);
+      writeFileSync(logFile, `zzz\n${window}`);
+      assert.deepEqual(portlerErrorsInLog(logFile), ['fake', 'real']);
+
+      // A refusal that runs on for hundreds of kilobytes is cut, and says so.
+      writeFileSync(logFile, `[portler] error: ${'x'.repeat(300 * 1024)}\n[portler] error: next\n`);
+      const [long, next] = portlerErrorsInLog(logFile);
+      assert.equal(long, `${'x'.repeat(500)}…`);
+      assert.equal(next, 'next');
+
+      // A last line without a newline counts; a missing log has none.
+      writeFileSync(logFile, 'boot\n[portler] error: volume is foreign');
+      assert.deepEqual(portlerErrorsInLog(logFile), ['volume is foreign']);
+      assert.deepEqual(portlerErrorsInLog(path.join(dir, 'missing.log')), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads no more of a detached log than it held when the scan started', { skip: process.platform === 'win32' }, () => {
+    // A process the launch shell left behind can keep appending to the log
+    // while it is scanned. /dev/zero stands in for a file that never ends:
+    // its size reads as 0 and a read never reaches end-of-file.
+    assert.deepEqual(portlerErrorsInLog('/dev/zero'), []);
   });
 
   it('does not let the Docker hold run past the attempt deadline', async () => {

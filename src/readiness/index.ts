@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
 import { resolveEnvValue } from '../env/index.ts';
@@ -177,10 +179,105 @@ export function logLocationHint(serviceName: string, logFile: string | undefined
     : `Check ${logFile} (or "portler logs ${serviceName}") for the cause`;
 }
 
+const PORTLER_ERROR_PREFIX = '[portler] error: ';
+const MAX_LOG_REASONS = 3;
+const MAX_LOG_REASON_LENGTH = 500;
+const LOG_READ_CHUNK = 64 * 1024;
+const LOG_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * Portler's own refusals from a detached service's log. The launch shell
+ * builds the image first and then checks the network, volumes and container
+ * name, exiting at the first one that is not this project's, so a refusal is
+ * the last thing it writes, after any build output. The log is truncated on
+ * every start, so these lines belong to this run. A foreground run already
+ * shows them above.
+ *
+ * Only the last MiB the log held when the scan started is read, 64 KiB at a
+ * time: a long build costs nothing beyond that, and a process left behind
+ * that keeps appending cannot keep the scan going. At most the start of one
+ * line and the last three refusals are held.
+ */
+export function portlerErrorsInLog(logFile: string): string[] {
+  let fd: number;
+  try {
+    fd = openSync(logFile, 'r');
+  } catch {
+    return [];
+  }
+  const reasons: string[] = [];
+  const keep = PORTLER_ERROR_PREFIX.length + MAX_LOG_REASON_LENGTH;
+  let line = '';
+  let cut = false;
+  const append = (piece: string) => {
+    if (line.length + piece.length <= keep) {
+      line += piece;
+    } else {
+      line += piece.slice(0, keep - line.length);
+      cut = true;
+    }
+  };
+  const endLine = () => {
+    const text = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (text.startsWith(PORTLER_ERROR_PREFIX)) {
+      const reason = text.slice(PORTLER_ERROR_PREFIX.length).trim();
+      if (reason !== '') reasons.push(cut ? `${reason}…` : reason);
+      if (reasons.length > MAX_LOG_REASONS) reasons.shift();
+    }
+    line = '';
+    cut = false;
+  };
+  try {
+    const end = fstatSync(fd).size;
+    // A window that starts inside a line drops that line: read from one byte
+    // earlier and discard through the first newline, which is that byte when
+    // the window starts on a line of its own.
+    let position = end > LOG_TAIL_BYTES ? end - LOG_TAIL_BYTES - 1 : 0;
+    let skipping = position > 0;
+    const decoder = new StringDecoder('utf8');
+    const buffer = Buffer.alloc(LOG_READ_CHUNK);
+    while (position < end) {
+      const read = readSync(fd, buffer, 0, Math.min(buffer.length, end - position), position);
+      if (read === 0) break;
+      position += read;
+      const text = decoder.write(buffer.subarray(0, read));
+      let from = 0;
+      if (skipping) {
+        const newline = text.indexOf('\n');
+        if (newline === -1) continue;
+        skipping = false;
+        from = newline + 1;
+      }
+      for (let newline = text.indexOf('\n', from); newline !== -1; newline = text.indexOf('\n', from)) {
+        append(text.slice(from, newline));
+        endLine();
+        from = newline + 1;
+      }
+      append(text.slice(from));
+    }
+    if (!skipping) {
+      append(decoder.end());
+      endLine();
+    }
+    return reasons;
+  } catch {
+    return reasons;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
   const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
+  const reasons = logFile === undefined ? [] : portlerErrorsInLog(logFile);
   // "The same command": a bare `up <name>` would drop the mode and flags the
   // stack was started with.
+  if (reasons.length > 0) {
+    return new Error(
+      `service "${service.name}" exited before it became ready: ${reasons.join(' ')} ` +
+        `The full output is in ${logFile} (or "portler logs ${service.name}"); fix that, then run the same command again.`,
+    );
+  }
   return new Error(
     `service "${service.name}" exited before it became ready. ${logLocationHint(service.name, logFile)}${buildHint}, then run the same command again.`,
   );
