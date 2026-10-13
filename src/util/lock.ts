@@ -137,6 +137,10 @@ function ownerProvablyDead(owner: LockOwner | null, thisHost: string): boolean {
   return owner !== null && owner.host === thisHost && !isProcessAlive(owner.pid);
 }
 
+function sameOwner(a: LockOwner, b: LockOwner): boolean {
+  return a.pid === b.pid && a.host === b.host && a.at === b.at && a.token === b.token;
+}
+
 /**
  * Take over a stale lock. The rename makes the removal exclusive: if another
  * process renamed it first we get ENOENT and simply retry the mkdir, rather
@@ -214,8 +218,15 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   let lastOwner: LockOwner | null = null;
   // One deadline for the whole wait. It only ever moves later: once a dead
   // owner's lock has been found, the wait it justified holds even after
-  // another waiter takes the lock over and becomes the (live) owner.
+  // another waiter takes the lock over and becomes the (live) owner, and that
+  // replacement gets one ordinary waitMs window of its own (see below).
   let deadline = startedAt + options.waitMs;
+  let deadOwner: LockOwner | null = null;
+  let replacementWindowGiven = false;
+  // When we first saw the current owner: the latest that owner can have taken
+  // the lock, whatever the directory's mtime says.
+  let seenOwner: LockOwner | null = null;
+  let seenAt = startedAt;
 
   for (;;) {
     try {
@@ -227,8 +238,18 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
       try {
         const stat = await fs.stat(lockDir);
         lastOwner = await readOwner(lockDir);
+        const now = Date.now();
+        if (lastOwner !== null && (seenOwner === null || !sameOwner(lastOwner, seenOwner))) {
+          seenOwner = lastOwner;
+          seenAt = now;
+        }
+        // The lock directory's clock may run ahead of ours. A future mtime only
+        // makes the lock look younger (never stale early); it must not push the
+        // deadline past what we observed, so it counts as the moment we first
+        // saw this owner (fixed, so the deadline cannot slide on every poll).
+        const mtime = Math.min(stat.mtimeMs, lastOwner === null ? now : seenAt);
 
-        if (isTakeoverAllowed(lastOwner, Date.now() - stat.mtimeMs, options.staleMs, host)) {
+        if (isTakeoverAllowed(lastOwner, now - stat.mtimeMs, options.staleMs, host)) {
           await takeOverStaleLock(lockDir);
           continue;
         }
@@ -239,7 +260,14 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
         // ends with the lock; giving up at waitMs instead makes every command
         // started shortly after the crash fail outright.
         if (ownerProvablyDead(lastOwner, host)) {
-          deadline = Math.max(deadline, stat.mtimeMs + options.staleMs + DEAD_OWNER_MARGIN_MS);
+          deadline = Math.max(deadline, mtime + options.staleMs + DEAD_OWNER_MARGIN_MS);
+          deadOwner = lastOwner;
+        } else if (deadOwner !== null && !replacementWindowGiven && lastOwner !== null && !sameOwner(lastOwner, deadOwner)) {
+          // Another waiter took the dead owner's lock over. We have been
+          // waiting all along, so treat its acquisition as the moment our wait
+          // started and allow its critical section the ordinary waitMs, once.
+          deadline = Math.max(deadline, mtime + options.waitMs);
+          replacementWindowGiven = true;
         }
       } catch (statError) {
         // ENOENT: the holder released the lock between our failed mkdir and the

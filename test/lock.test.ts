@@ -214,6 +214,57 @@ describe('withDirLock', () => {
     assert.deepEqual([...ran].sort(), ['a', 'b']);
   });
 
+  it('gives the waiter that took over a dead owner\'s lock its own waitMs, not just the stale margin', async () => {
+    // The winner of the takeover may need most of an ordinary waitMs (a full
+    // port scan, say). The other waiters must wait for it the way they would
+    // for any live holder, not give up one margin after the dead lock went stale.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const lockDir = path.join(dir, 'replacement.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+
+    // Stale after 1 s; the margin ends at about 2 s. The winner takes over at
+    // about 1 s and holds 1.4 s, inside its own 2 s waitMs but past the margin.
+    const options = { staleMs: 1_000, waitMs: 2_000, description: 'test' };
+    const ran: string[] = [];
+    const hold = (name: string) =>
+      withDirLock(lockDir, options, async () => {
+        ran.push(name);
+        await new Promise((resolve) => setTimeout(resolve, 1_400));
+      });
+
+    await Promise.all([hold('a'), hold('b')]);
+    assert.deepEqual([...ran].sort(), ['a', 'b']);
+  });
+
+  it('does not let a dead owner\'s lock dated in the future stretch the wait', async () => {
+    // A lock directory on a filesystem whose clock runs ahead of ours: its
+    // mtime counts as now, so the wait ends about staleMs plus the margin
+    // later, not when the future timestamp finally goes stale.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((resolve) => dead.once('exit', resolve));
+    const lockDir = path.join(dir, 'future.lock');
+    await fs.mkdir(lockDir);
+    await fs.writeFile(
+      path.join(lockDir, 'owner'),
+      JSON.stringify({ pid: dead.pid, host: os.hostname(), at: new Date().toISOString(), token: 'crashed' }),
+    );
+    const future = new Date(Date.now() + 5 * 60_000);
+    await fs.utimes(lockDir, future, future);
+
+    const started = Date.now();
+    await assert.rejects(
+      withDirLock(lockDir, { staleMs: 300, waitMs: 200, description: 'test' }, async () => undefined),
+      LockTimeoutError,
+    );
+    assert.ok(Date.now() - started < 5_000, `waited ${Date.now() - started} ms for a lock dated five minutes ahead`);
+    await fs.rm(lockDir, { recursive: true, force: true });
+  });
+
   it('still gives up at waitMs on a lock whose owner is alive', async () => {
     const lockDir = path.join(dir, 'busy.lock');
     await fs.mkdir(lockDir);
