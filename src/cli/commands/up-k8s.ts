@@ -23,7 +23,7 @@ import {
   writeManifestFiles,
 } from '../../k8s/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
-import { readPids, runningServices, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
+import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { isTcpReady, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
@@ -145,7 +145,7 @@ async function startK8sPhase(
   cluster: ClusterInfo,
   selectedNames: string[],
 ): Promise<K8sStack> {
-  const runningNames = new Set(runningServices(await readPids(config.projectDir)));
+  const runningNames = new Set(await liveServiceNames(config.projectDir, await readPids(config.projectDir)));
   ensureNoOverlap(runningNames, selectedNames);
 
   const state = await readState(config.projectDir);
