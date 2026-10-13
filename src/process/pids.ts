@@ -220,8 +220,14 @@ function linuxGroupHasLiveMember(pgid: number): boolean {
   return !groupHoldsOnlyZombies(() => scanProcGroup(pgid));
 }
 
-/** One pass over /proc: the group's members, or 'unknown' when a member's state cannot be read. */
-export type GroupScan = { members: number[]; live: boolean } | 'unknown';
+/**
+ * One pass over /proc: what it saw of the group, or 'unknown' when a member's state
+ * cannot be read. `members` holds every member pid, every thread id a zombie member
+ * listed (`pid/tid`), and every pid that exited between the listing and its own read
+ * (`?pid`, its group unknown). Two scans compare equal only when nothing came, went or
+ * changed in between, which is what groupHoldsOnlyZombies relies on.
+ */
+export type GroupScan = { members: string[]; live: boolean } | 'unknown';
 
 /** One pass over a procfs (`procRoot` is only for tests). */
 export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
@@ -231,20 +237,27 @@ export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
   } catch {
     return 'unknown';
   }
-  const members: number[] = [];
+  const members: string[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const stat = readProcState(`${procRoot}/${entry}/stat`);
-    if (stat === 'gone') continue;
+    // It exited after the listing. It may have been ours and may have forked a
+    // process this listing missed, so it stays in the record and the next scan,
+    // which no longer lists it, cannot match this one.
+    if (stat === 'gone') {
+      members.push(`?${entry}`);
+      continue;
+    }
     if (stat === 'unknown') return 'unknown';
     if (stat.pgrp !== pgid) continue;
-    if (!isZombieState(stat.state)) return { members: [...members, Number(entry)], live: true };
+    members.push(entry);
+    if (!isZombieState(stat.state)) return { members, live: true };
     // The /proc/<pid>/stat state is the main thread's. Its other threads may still run.
-    const threads = threadsAllZombies(`${procRoot}/${entry}/task`);
-    if (threads === 'gone') continue;
+    const threads = readThreads(`${procRoot}/${entry}/task`);
+    if (threads === 'gone') continue; // reaped since; the next listing will not show it
     if (threads === 'unknown') return 'unknown';
-    if (!threads) return { members: [...members, Number(entry)], live: true };
-    members.push(Number(entry));
+    members.push(...threads.tids.map((tid) => `${entry}/${tid}`));
+    if (threads.live) return { members, live: true };
   }
   return { members, live: false };
 }
@@ -268,34 +281,43 @@ function readProcState(path: string): { state: string; pgrp: number } | 'gone' |
   return { state: fields[0], pgrp: Number(fields[2]) };
 }
 
-/** True when every thread of a process is a zombie; 'gone' when the process has been reaped meanwhile. */
-function threadsAllZombies(taskDir: string): boolean | 'gone' | 'unknown' {
-  let tids: string[];
+/**
+ * A process's listed thread ids and whether any of them can run; 'gone' when the
+ * process has been reaped since. A thread that exited between the listing and its
+ * own read stays listed: it may have started a thread this listing missed, and the
+ * next scan, which no longer lists it, then cannot match this one.
+ */
+function readThreads(taskDir: string): { tids: string[]; live: boolean } | 'gone' | 'unknown' {
+  let entries: string[];
   try {
-    tids = readdirSync(taskDir);
+    entries = readdirSync(taskDir);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown';
   }
-  for (const tid of tids) {
+  const tids: string[] = [];
+  for (const tid of entries) {
     if (!/^\d+$/.test(tid)) continue;
+    tids.push(tid);
     const state = readProcState(`${taskDir}/${tid}/stat`);
     if (state === 'gone') continue;
     if (state === 'unknown') return 'unknown';
-    if (!isZombieState(state.state)) return false;
+    if (!isZombieState(state.state)) return { tids, live: true };
   }
-  return true;
+  return { tids, live: false };
 }
 
 /**
  * Decides from repeated scans whether a group holds only zombies. One scan is not
- * enough: a live member can fork after the listing and exit before its own state is
- * read, so the new child is missed while its parent already reads as a zombie. The
- * answer is yes only when two consecutive scans find the same members and none of
- * them can run. Every member of the second scan was then already a zombie when the
- * first scan read it, before the second listing, so none of them could fork a member
- * the second listing missed. A live member, an unreadable one, or members that keep
- * changing for `attempts` scans keep the answer no.
+ * enough: a live process or thread can start another after the listing and exit
+ * before its own state is read, so the new one is missed. The answer is yes only when
+ * two consecutive scans record the same processes and threads, including any that
+ * exited mid-read, and none of them can run. Nothing then exited during the first
+ * scan (it would be missing from the second listing), and every process and thread of
+ * the second scan was already a zombie when the first scan read it, before the second
+ * listing, so none of them could start one the second listing missed. A live member,
+ * an unreadable one, or records that keep changing for `attempts` scans keep the
+ * answer no.
  */
 export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
   let previous = scan();
@@ -309,10 +331,10 @@ export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): bool
   return false;
 }
 
-function sameMembers(a: number[], b: number[]): boolean {
+function sameMembers(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const seen = new Set(a);
-  return b.every((pid) => seen.has(pid));
+  return b.every((member) => seen.has(member));
 }
 
 /** True when the procfs at /proc is mounted with a hidepid option that hides processes. */

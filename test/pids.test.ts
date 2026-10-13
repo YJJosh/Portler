@@ -78,7 +78,7 @@ describe('processGroupAlive', () => {
       let calls = 0;
       return { scan: () => scans[Math.min(calls++, scans.length - 1)], calls: () => calls };
     };
-    const zombies = (...members: number[]): GroupScan => ({ members, live: false });
+    const zombies = (...members: number[]): GroupScan => ({ members: members.map(String), live: false });
 
     // Stable: the same zombies twice.
     let run = scripted(zombies(5), zombies(5));
@@ -87,7 +87,7 @@ describe('processGroupAlive', () => {
 
     // The race: 5 forked 6 after the first listing and then exited, so the first scan
     // read 5 as a zombie and never saw 6. The second listing finds 6 running.
-    run = scripted(zombies(5), { members: [5, 6], live: true });
+    run = scripted(zombies(5), { members: ['5', '6'], live: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
 
     // 6 had already become a zombie by the second scan: the members changed, so a
@@ -102,7 +102,7 @@ describe('processGroupAlive', () => {
     assert.equal(run.calls(), 4);
 
     // A live member or an unreadable one in the first scan ends it at once.
-    run = scripted({ members: [5], live: true });
+    run = scripted({ members: ['5'], live: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
     assert.equal(run.calls(), 1);
     run = scripted('unknown');
@@ -132,20 +132,60 @@ describe('processGroupAlive', () => {
       mkdirSync(path.join(root, 'self'));
       proc(900, 'S', 77, { 900: 'S' }); // another group, never a member
       proc(100, 'Z', 100, { 100: 'Z', 101: 'S' });
-      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: true });
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: true });
 
       // Once the worker has exited too, the member is a zombie through and through.
       writeFileSync(path.join(root, '100', 'task', '101', 'stat'), stat(101, 'Z', 100));
-      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: false });
-      // A thread that went away between listing and reading does not count.
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false });
+      // A thread that went away between listing and reading cannot run, but it stays
+      // in the record, so a scan after it is gone does not match this one.
       rmSync(path.join(root, '100', 'task', '101'), { recursive: true });
       mkdirSync(path.join(root, '100', 'task', '101'));
-      assert.deepEqual(scanProcGroup(100, root), { members: [100], live: false });
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false });
 
       // A task list that cannot be read leaves the answer unknown, never "gone".
       rmSync(path.join(root, '100', 'task'), { recursive: true });
       writeFileSync(path.join(root, '100', 'task'), '');
       assert.equal(scanProcGroup(100, root), 'unknown');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('never matches two scans across which a thread was replaced, or a process exited mid-read', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'portler-proc-'));
+    const stat = (pid: number, state: string, pgrp: number) => `${pid} (svc) ${state} 1 ${pgrp} ${pgrp} 0 -1 0\n`;
+    const task = (tid: number) => path.join(root, '100', 'task', String(tid));
+    const listedNotRead = (tid: number) => mkdirSync(task(tid), { recursive: true });
+    const thread = (tid: number, state: string) => {
+      mkdirSync(task(tid), { recursive: true });
+      writeFileSync(path.join(task(tid), 'stat'), stat(tid, state, 100));
+    };
+    try {
+      writeFileSync(path.join(root, '.keep'), '');
+      mkdirSync(path.join(root, '100'));
+      writeFileSync(path.join(root, '100', 'stat'), stat(100, 'Z', 100));
+      thread(100, 'Z');
+      // Codex's race, scan by scan. Worker 101 starts 102 after the first task listing
+      // and exits before its own read; 102 starts 103 after the second listing and
+      // exits before its read; 103 runs. Each scan sees only zombies and vanished
+      // threads, and by pid alone both look like [100].
+      const states = [
+        () => listedNotRead(101),
+        () => { rmSync(task(101), { recursive: true }); listedNotRead(102); },
+        () => { rmSync(task(102), { recursive: true }); thread(103, 'S'); },
+      ];
+      let calls = 0;
+      const scan = () => { states[Math.min(calls, states.length - 1)](); calls++; return scanProcGroup(100, root); };
+      assert.equal(groupHoldsOnlyZombies(scan), false, 'the thread that is still running keeps the group alive');
+      assert.equal(calls, 3);
+
+      // A process listed but gone before its read may have been ours: it is recorded,
+      // and the next scan, which no longer lists it, cannot match.
+      rmSync(path.join(root, '100', 'task'), { recursive: true });
+      thread(100, 'Z');
+      mkdirSync(path.join(root, '555'));
+      assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '?555'], live: false });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
