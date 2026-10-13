@@ -606,7 +606,7 @@ describe('foreground teardown ownership', () => {
     assert.ok(!after?.services.api, 'the dead replacement entry is pruned');
     assert.ok(!after?.services[PROXY_SERVICE_NAME], 'nothing foreign is live, so the proxy is stopped as usual');
     assert.deepEqual(Object.keys((await readRegistry()).ports), [], 'every reservation is released');
-    assert.ok((await docker.calls()).includes('rm -f sha256:replacement'), 'stopServices removes the exited container by id');
+    assert.ok((await docker.calls()).includes('rm -f -v sha256:replacement'), 'stopServices removes the exited container by id');
     assert.ok(isPidRunning(original.services.api!.pid), 'this run\'s original process is not signalled');
   });
 

@@ -255,13 +255,29 @@ describe('dockerShellCommand', () => {
     const trap = parts[2]!;
 
     assert.ok(preflight.includes('{{.Id}}'), preflight);
-    assert.ok(preflight.includes('docker rm -f "$cid"'), preflight);
+    assert.ok(preflight.includes('docker rm -f -v "$cid"'), preflight);
     assert.ok(!preflight.includes('docker rm -f db-container'), 'must not remove by name');
 
     // The exit trap removes our own container the same way.
     assert.ok(trap.includes('{{.Id}}'), trap);
-    assert.ok(trap.includes('docker rm -f "$cid"'), trap);
+    assert.ok(trap.includes('docker rm -f -v "$cid"'), trap);
     assert.ok(!trap.includes('docker rm -f db-container'), 'the trap must not remove by name either');
+  });
+
+  it('takes the stale container\'s anonymous volumes with it', () => {
+    // An image VOLUME (postgres, redis) gives every container a fresh anonymous
+    // volume. `--rm` removes it on a clean exit, but a plain `docker rm -f`
+    // leaves it behind, so each forced removal leaked one.
+    const service = makeService({
+      port: 5432,
+      docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },
+    });
+    const parts = dockerShellCommand(makeConfig({ api: service }), service, {}, new Set(), assignment, assignments).split(' && ');
+
+    for (const removal of [parts[1]!, parts[2]!]) {
+      assert.match(removal, /docker rm -f -v "\$cid"/);
+      assert.doesNotMatch(removal, /docker rm -f "\$cid"/);
+    }
   });
 
   it('forwards only composed env keys and never inherited host PORTLER controls or internal defaults', () => {

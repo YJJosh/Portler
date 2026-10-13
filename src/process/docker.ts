@@ -181,6 +181,7 @@ const SPLIT_IDENTITY = 'cid=${info%% *}; owner=${info#* }';
  * Remove a leftover container with our name, but ONLY if it is labelled as
  * ours, and then BY ID. `docker rm -f <name>` on a name collision would destroy
  * an unrelated container (and its data), so a foreign owner aborts the start.
+ * `-v` takes our container's anonymous volumes along, as `--rm` would have.
  */
 function preflightRemoveContainer(config: PortlerConfig, containerName: string): string {
   const name = shellQuote(containerName);
@@ -196,7 +197,7 @@ function preflightRemoveContainer(config: PortlerConfig, containerName: string):
         'Rename it, remove it yourself, or set container_name.',
     )} >&2; ` +
     'exit 1; fi; ' +
-    'docker rm -f "$cid" >/dev/null 2>&1 || true; fi'
+    'docker rm -f -v "$cid" >/dev/null 2>&1 || true; fi'
   );
 }
 
@@ -209,7 +210,7 @@ function trapRemoveContainer(config: PortlerConfig, containerName: string): stri
   return (
     `if info=$(docker inspect --type container --format ${template} ${name} 2>/dev/null); then ` +
     `${SPLIT_IDENTITY}; ` +
-    `if [ "$owner" = ${project} ]; then docker rm -f "$cid" >/dev/null 2>&1 || true; fi; fi`
+    `if [ "$owner" = ${project} ]; then docker rm -f -v "$cid" >/dev/null 2>&1 || true; fi; fi`
   );
 }
 

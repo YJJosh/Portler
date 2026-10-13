@@ -176,10 +176,12 @@ async function removeOwned(
 /**
  * Remove a Docker container only when it carries this project's label, and only
  * by the ID captured while checking that label. A foreign container with a
- * colliding name is left strictly alone.
+ * colliding name is left strictly alone. `-v` drops the container's anonymous
+ * volumes with it, as `docker run --rm` would have on a clean exit (an image
+ * VOLUME such as postgres' data dir); named volumes are never touched.
  */
 export function removeOwnedContainer(name: string, projectDir: string, run: CommandRunner = runCommand): Promise<RemovalOutcome> {
-  return removeOwned('container', name, projectDir, (id) => ['rm', '-f', id], run);
+  return removeOwned('container', name, projectDir, (id) => ['rm', '-f', '-v', id], run);
 }
 
 export type ContainerLiveness =
