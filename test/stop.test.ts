@@ -697,6 +697,51 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('counts a removed container stopped when its tokenless leader is left a zombie', { timeout: 15_000 }, async () => {
+    // Under a PID 1 that does not reap, the exited shell stays a zombie: kill(pid, 0)
+    // still answers, so an entry without a start token (older Portler, or a token
+    // that could not be read) verifies as unverifiable. The container was removed
+    // and nothing in the group can run, so it is stopped, signalled by nobody and
+    // without a warning.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, undefined), dockerContainer: 'c-db' } });
+
+    const signals: NodeJS.Signals[] = [];
+    const warnings: string[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        pidRunning: () => true, // a zombie leader still answers kill(pid, 0)
+        pidAlive: () => false, // ...but it is a zombie
+        groupState: () => 'gone', // and nothing runnable is left in its group
+        readStartToken: async () => 'Mon Oct 12 20:48:05 2026 4242',
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'nothing is signalled');
+      assert.deepEqual(warnings.filter((line) => line.includes('warning')), [], 'and nothing is warned about');
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('does not call an already-exited container stopped, only prunes its entry', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker, { running: false });

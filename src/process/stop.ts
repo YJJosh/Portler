@@ -477,7 +477,19 @@ export async function stopServices(
   }
   const settled = new Set(settling.filter((target) => probes.groupState(target.info.pid) === 'gone'));
 
-  const termRound = await signalRound(probes, targets, 'SIGTERM', true);
+  // A settled service has nothing left to signal or identify: its running
+  // container was ours by label and is gone, its leader is not runnable, and its
+  // group holds nothing runnable either. Verifying the leader's identity again
+  // could only fail for reasons that no longer matter (an entry without a start
+  // token whose leader is now a zombie reads as unverifiable), so it skips the
+  // signal rounds and counts as stopped.
+  for (const target of settled) stopped.push(target.name);
+  const termRound = await signalRound(
+    probes,
+    targets.filter((target) => !settled.has(target)),
+    'SIGTERM',
+    true,
+  );
   const termed: Target[] = [];
 
   // Bookkeeping policy for everything we did not signal:
@@ -491,6 +503,7 @@ export async function stopServices(
   // - the kill itself failed (EPERM): a live group we are not allowed to signal.
   //   That is a failure, not a stop.
   for (const target of targets) {
+    if (settled.has(target)) continue;
     const result = termRound.get(target)!;
 
     if (result.status === 'signalled') {
@@ -502,13 +515,6 @@ export async function stopServices(
       process.stderr.write(`[portler] warning: ${result.message}\n`);
       failures.push(`could not stop service "${target.name}": ${result.message}`);
       keep.add(target.name);
-      continue;
-    }
-
-    // Its running container was removed above and its group is now confirmed
-    // gone: that removal stopped it.
-    if (settled.has(target) && result.verdict === 'gone' && result.group === 'gone') {
-      stopped.push(target.name);
       continue;
     }
 
