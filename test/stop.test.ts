@@ -232,9 +232,12 @@ describe('stopServices', () => {
 
     await writePidsFile({ api: pidInfo(pid, token) });
 
-    // The process exits; the pid entry now points at nothing.
+    // The process exits; the pid entry now points at nothing. Wait for Node to
+    // reap it (its own child), not just for it to stop running: an unreaped
+    // zombie would still answer to its pid and start token.
+    const reaped = new Promise((resolve) => original.once('exit', resolve));
     process.kill(pid, 'SIGKILL');
-    await waitForExit(pid);
+    await reaped;
 
     const result = await stopServices(projectDir);
 
@@ -815,6 +818,47 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.completed, ['db']);
       assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
       assert.deepEqual(signals, [], 'the stranger is never signalled');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('counts a removed container stopped when its group exits right after the settle wait', { timeout: 15_000 }, async () => {
+    // The shell was gone when the container was removed, and the client it left
+    // stays alive through the whole settle wait, including the last check. It
+    // exits before the signal round looks, so that round sees a plain stale
+    // entry. The container was still removed by us, so the service was stopped.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
+
+    let roundStarted = false;
+    const signals: NodeJS.Signals[] = [];
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    try {
+      const result = await stopServices(projectDir, ['db'], {}, {
+        graceMs: 20,
+        confirmMs: 200,
+        // only verifyPid calls this, and a settling target first meets it in the signal round
+        pidRunning: () => {
+          roundStarted = true;
+          return false;
+        },
+        pidAlive: () => false,
+        groupState: () => (roundStarted ? 'gone' : 'alive'),
+        readStartToken: async () => null,
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+          return { status: 'sent' };
+        },
+      });
+      assert.deepEqual(result.stopped, ['db']);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.completed, ['db']);
+      assert.equal((await readPids(projectDir))?.services.db, undefined, 'the entry is pruned');
+      assert.deepEqual(signals, [], 'nothing is signalled');
     } finally {
       process.env.PATH = savedPath;
     }

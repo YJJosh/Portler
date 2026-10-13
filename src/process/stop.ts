@@ -622,5 +622,13 @@ export async function stopServices(
   const remaining = selectedNames.filter((name) => keep.has(name));
   if (completed.length > 0) await removePidEntries(projectDir, completed);
 
+  // Removing a service's running container is what stops it. Whatever the
+  // signal rounds made of its leader afterwards (a group that exited between the
+  // last settle check and the round reads as plain stale), a service whose
+  // running container we removed and whose entry is now pruned was stopped.
+  for (const name of completed) {
+    if (containerCleanup.removed.has(name) && !stopped.includes(name)) stopped.push(name);
+  }
+
   return { stopped, unverified, failures, completed, remaining };
 }
