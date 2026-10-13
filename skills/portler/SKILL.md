@@ -49,7 +49,7 @@ When an app uses a database, **prefer a separate volume set per checkout/task or
 - Keep separate, reproducible **scenario templates** for difficult app behavior: legacy schemas, partial migrations, unusual/invalid records, large datasets, or permission edge cases. Prepare these on forks, record the seed/setup steps and compatible app/schema version, then fork the scenario again for each test so the original reproduction stays intact. Use synthetic or approved sanitized data.
 - Before forking, cleanly stop the database and all writers using the source, including those in other checkouts; coordinate before interrupting someone else's services. `volumes fork` copies files, not a database-aware snapshot, so a live copy can be inconsistent. If stopping is not possible, use the database's supported backup/restore mechanism instead.
 
-Example for a managed volume declared as `@postgres-data:...` (replace names and use the project's usual local/Docker run mode):
+Example for a managed volume declared as `@postgres-data:...` (replace names and use the project's usual local/Docker run mode). For production volumes, add `--prod` to every `volumes` and `up` command below: without it they work on the development volumes, so a production fork is never made and `up --prod` starts that volume empty. `down` takes no `--prod`; it stops what was recorded.
 
 ```bash
 portler volumes list
