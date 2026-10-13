@@ -19,7 +19,7 @@ Run `portler init` in your project root to generate a starter config:
 portler init
 ```
 
-It writes this `portler.yml` (the same sample shown by `portler --help`):
+It writes this `portler.yml` (shown here without its comment lines):
 
 ```yaml
 use_env: .env
