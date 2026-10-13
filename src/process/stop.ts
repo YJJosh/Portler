@@ -64,6 +64,12 @@ export interface StopResult {
   completed: string[];
   /** Targets deliberately kept in pids.json; their reservations must remain. */
   remaining: string[];
+  /**
+   * Services whose running container this call removed. Removing it is what takes a
+   * Docker service away, so whatever depends on it has lost it, even when its entry is
+   * kept because a leftover `docker run` client still holds the group.
+   */
+  containersRemoved: string[];
 }
 
 /** 'alive' also covers EPERM: the group exists, it is simply not ours to signal. */
@@ -450,7 +456,7 @@ export async function stopServices(
 ): Promise<StopResult> {
   const probes = resolveHooks(hooks);
   const pids = await readPids(projectDir);
-  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [] };
+  if (!pids) return { stopped: [], unverified: [], failures: [], completed: [], remaining: [], containersRemoved: [] };
 
   const targetSet = serviceNames ? new Set(serviceNames) : null;
   const targets: Target[] = Object.entries(pids.services)
@@ -722,5 +728,6 @@ export async function stopServices(
     if (containerCleanup.removed.has(name) && !stopped.includes(name)) stopped.push(name);
   }
 
-  return { stopped, unverified, failures, completed, remaining };
+  const containersRemoved = selectedNames.filter((name) => containerCleanup.removed.has(name));
+  return { stopped, unverified, failures, completed, remaining, containersRemoved };
 }

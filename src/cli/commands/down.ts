@@ -7,9 +7,10 @@ import { shellQuote } from '../../process/docker.ts';
 import { liveServiceNames, readPids, stopServices } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
-import type { PidServiceInfo, PidsFile, PortlerConfig } from '../../types/index.ts';
+import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { parseRunMode, servicesWithPorts } from '../services.ts';
+import { legacyMountCandidates } from './restart.ts';
 
 /**
  * Like selectServiceNames, but also accepts "proxy" as a target when a proxy
@@ -57,16 +58,33 @@ function releasableTargets(config: PortlerConfig, selectedNames: string[] | unde
 }
 
 /**
+ * The volume set a stopped service's `@` volumes were on, as far as its entry says: the
+ * set (`''` for the base volumes) when it recorded one, undefined when it mounts no `@`
+ * volume in the mode it ran in, and null when it does but its entry (written by an older
+ * Portler) does not say which set.
+ */
+export function recordedVolumeSet(service: ServiceConfig | undefined, launch: PidServiceInfo | undefined): string | null | undefined {
+  if (launch === undefined) return undefined;
+  if (launch.volumeSet !== undefined) return launch.volumeSet;
+  if (launch.dockerContainer === undefined) return undefined;
+  return legacyMountCandidates(service, launch).length > 0 ? null : undefined;
+}
+
+/**
  * The `up` that starts the stopped services again the way they were started: the mode,
- * `--prod`, `--no-setup` and image pins their PID entries recorded (Kubernetes mode when
- * this down deleted them from the cluster), and this invocation's `--file`. Undefined when
- * they were started in different ways, since no single `up` brings all of them back.
+ * `--prod`, `--no-setup`, image pins and volume set their PID entries recorded (Kubernetes
+ * mode when this down deleted them from the cluster), and this invocation's `--file`.
+ * Undefined when no single `up` would do that: they were started in different ways, an
+ * entry does not say which volume set it was on, or they were on the base volumes while
+ * PORTLER_VOLUME_SET would make a plain `up` pick another set.
  */
 export function upSuggestion(
   serviceNames: readonly string[],
   launches: ReadonlyArray<PidServiceInfo | undefined>,
   mode: RunMode,
   file: string | undefined,
+  volumeSets: ReadonlyArray<string | null | undefined> = [],
+  envVolumeSet: string | undefined = process.env.PORTLER_VOLUME_SET,
 ): string | undefined {
   const modes = new Set<RunMode>();
   const prods = new Set<boolean>();
@@ -80,6 +98,11 @@ export function upSuggestion(
     if (launch?.image !== undefined) images.push(`${serviceName}=${launch.image}`);
   });
   if (modes.size !== 1 || prods.size !== 1 || setups.size !== 1) return undefined;
+  if (volumeSets.some((set) => set === null)) return undefined;
+  const sets = new Set(volumeSets.filter((set): set is string => typeof set === 'string'));
+  if (sets.size > 1) return undefined;
+  const [volumeSet] = sets;
+  if (volumeSet === '' && (envVolumeSet ?? '').trim() !== '') return undefined;
 
   const [runMode] = modes;
   const parts = ['portler', 'up'];
@@ -89,6 +112,7 @@ export function upSuggestion(
   if (prods.has(true)) parts.push('--prod');
   if (setups.has(false)) parts.push('--no-setup');
   for (const image of images) parts.push('--image', shellQuote(image));
+  if (volumeSet) parts.push('--volume-set', shellQuote(volumeSet));
   return parts.join(' ');
 }
 
@@ -120,7 +144,9 @@ async function warnAboutDependents(
 
   const back = stoppedNames.filter((name) => name !== PROXY_SERVICE_NAME);
   const them = back.length === 1 ? 'it' : 'them';
-  const command = back.length > 0 ? upSuggestion(back, back.map((name) => before?.services[name]), mode, file) : undefined;
+  const launches = back.map((name) => before?.services[name]);
+  const volumeSets = back.map((name, index) => recordedVolumeSet(config.services[name], launches[index]));
+  const command = back.length > 0 ? upSuggestion(back, launches, mode, file, volumeSets) : undefined;
   const fix =
     back.length === 0
       ? 'Stop them too.'
@@ -178,8 +204,14 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     }
     // A Kubernetes service without a port has no port-forward for stopServices to stop, but
     // deleting it from the cluster takes it away from its dependents all the same.
+    // So does removing a Docker service's running container, even when its entry is kept
+    // because a leftover `docker run` client still holds the group.
     const takenAway = [
-      ...new Set([...result.stopped, ...(deletedFromCluster && selectedNames ? selectedNames.filter((name) => name !== PROXY_SERVICE_NAME) : [])]),
+      ...new Set([
+        ...result.stopped,
+        ...result.containersRemoved,
+        ...(deletedFromCluster && selectedNames ? selectedNames.filter((name) => name !== PROXY_SERVICE_NAME) : []),
+      ]),
     ];
     if (selectedNames && takenAway.length > 0) await warnAboutDependents(config, takenAway, before, mode, args.file);
 

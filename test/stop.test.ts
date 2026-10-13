@@ -340,6 +340,7 @@ describe('stopServices', () => {
       failures: [],
       completed: [],
       remaining: [],
+      containersRemoved: [],
     });
   });
 
@@ -673,6 +674,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.unverified, []);
       assert.deepEqual(result.failures, []);
       assert.deepEqual(result.completed, ['db']);
+      assert.deepEqual(result.containersRemoved, ['db']);
       assert.equal((await readPids(projectDir))?.services.db, undefined);
       assert.ok(await waitForExit(member), 'the member exited when its container was removed');
     } finally {
@@ -1192,6 +1194,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.stopped, []);
       assert.deepEqual(result.unverified, []);
       assert.deepEqual(result.failures, []);
+      assert.deepEqual(result.containersRemoved, [], 'an exited container was not running, so removing it took nothing away');
       assert.equal((await readPids(projectDir))?.services.db, undefined, 'the stale entry is pruned');
     } finally {
       process.env.PATH = savedPath;
@@ -1302,6 +1305,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       assert.deepEqual(result.stopped, []);
       assert.deepEqual(result.unverified, ['db']);
       assert.deepEqual(result.completed, []);
+      assert.deepEqual(result.containersRemoved, ['db'], 'the container is gone even though the entry is kept');
       assert.ok((await readPids(projectDir))?.services.db, 'the entry is kept');
       assert.ok(isPidRunning(member), 'nothing was signalled');
     } finally {

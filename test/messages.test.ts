@@ -5,12 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { upSuggestion } from '../src/cli/commands/down.ts';
+import { recordedVolumeSet, upSuggestion } from '../src/cli/commands/down.ts';
 import { restartSuggestion } from '../src/cli/commands/up.ts';
 import { ensureNoOverlap } from '../src/cli/services.ts';
 import { assertRequiredEnv } from '../src/env/index.ts';
 import { readProcessStartToken, writePids } from '../src/process/index.ts';
-import type { PidServiceInfo } from '../src/types/index.ts';
+import type { PidServiceInfo, ServiceConfig } from '../src/types/index.ts';
 import { projectHash } from '../src/util/hash.ts';
 
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
@@ -187,9 +187,102 @@ describe('the up a dependents warning suggests', () => {
     assert.equal(upSuggestion(['db', 'cache'], [entry({ runMode: 'docker' }), entry({ runMode: 'local' })], 'local', undefined), undefined);
     assert.equal(upSuggestion(['db', 'cache'], [entry({ prod: true }), entry({})], 'local', undefined), undefined);
   });
+
+  it('repeats the volume set the services were on, and only when it can', () => {
+    const docker = entry({ runMode: 'docker', dockerContainer: 'c-db' });
+    assert.equal(upSuggestion(['db'], [docker], 'local', undefined, ['branch'], undefined), 'portler up docker -d db --volume-set branch');
+    assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [''], undefined), 'portler up docker -d db');
+    // No @ volume, no say.
+    assert.equal(upSuggestion(['db', 'cache'], [docker, docker], 'local', undefined, ['branch', undefined], undefined), 'portler up docker -d db cache --volume-set branch');
+    // Different sets, or an entry that cannot say which: no single up brings them back.
+    assert.equal(upSuggestion(['db', 'cache'], [docker, docker], 'local', undefined, ['branch', ''], undefined), undefined);
+    assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [null], undefined), undefined);
+    // Base volumes cannot be asked for by flag, so PORTLER_VOLUME_SET would make a plain up pick another set.
+    assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [''], 'branch'), undefined);
+    // A set on the command line wins over the variable.
+    assert.equal(upSuggestion(['db'], [docker], 'local', undefined, ['branch'], 'other'), 'portler up docker -d db --volume-set branch');
+  });
+
+  it('reads the volume set from the entry, or says when an older entry cannot tell', () => {
+    const service = (volumes: string[]): ServiceConfig =>
+      ({ dependsOn: [], env: {}, docker: { image: 'postgres:16-alpine', volumes } }) as unknown as ServiceConfig;
+    assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: 'branch' })), 'branch');
+    assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: '' })), '');
+    // Written before entries recorded the set, by a container that mounts an @ volume: unknown.
+    assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), null);
+    // No @ volume in the mode it ran in, or no container at all: the set does not matter.
+    assert.equal(recordedVolumeSet(service(['./data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), undefined);
+    assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local' })), undefined);
+    assert.equal(recordedVolumeSet(service(['@data:/data']), undefined), undefined);
+  });
 });
 
 describe('down warns from what is running, not from an edited portler.yml', () => {
+  it('warns when down removes a running container whose entry it has to keep', { timeout: 20_000 }, async (t) => {
+    if (process.platform === 'win32') return t.skip('needs a POSIX shell script as docker');
+    const projectDir = await project(
+      [
+        'services:',
+        '  db:',
+        '    docker:',
+        '      image: postgres:16-alpine',
+        '  api:',
+        '    command: node -e "setInterval(() => {}, 1000)"',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+    );
+    const bin = path.join(path.dirname(projectDir), 'bin');
+    await fs.mkdir(bin);
+    const inspected = JSON.stringify({ id: 'sha256:c', labels: { 'portler.project': projectDir }, running: true });
+    await fs.writeFile(
+      path.join(bin, 'docker'),
+      ['#!/bin/sh', 'case "$1" in', '  rm) exit 0 ;;', `  inspect) printf '%s\\n' '${inspected}' ;;`, '  *) echo "Error: No such object" >&2; exit 1 ;;', 'esac', ''].join('\n'),
+      { mode: 0o755 },
+    );
+
+    // db: its `docker run` shell has exited, but a client it started still holds the group,
+    // so down removes the container and has to keep the entry. api depends on it.
+    const memberFile = path.join(path.dirname(projectDir), 'member');
+    const leaderScript =
+      `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});` +
+      `c.unref();require('fs').writeFileSync(${JSON.stringify(memberFile)},String(c.pid));process.exit(0)`;
+    const leader = spawn(process.execPath, ['-e', leaderScript], { detached: true, stdio: 'ignore' });
+    await new Promise((resolve) => leader.once('exit', resolve));
+    const member = Number(await fs.readFile(memberFile, 'utf8'));
+    const api = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    t.after(() => {
+      for (const pid of [member, api.pid!]) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const now = new Date().toISOString();
+    await writePids(projectDir, {
+      version: 1,
+      project: projectDir,
+      startedAt: now,
+      services: {
+        db: { pid: leader.pid!, command: 'docker run', cwd: projectDir, startedAt: now, runMode: 'docker', dockerContainer: 'c-db' },
+        api: {
+          pid: api.pid!,
+          command: 'node',
+          cwd: projectDir,
+          startedAt: now,
+          startToken: (await readProcessStartToken(api.pid!)) ?? undefined,
+          runMode: 'local',
+          dependsOn: ['db'],
+        },
+      },
+    });
+
+    const down = portlerWith(projectDir, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` }, 'down', 'db');
+    assert.equal(down.status, 1, 'the entry is kept, so down reports it did not finish');
+    assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up docker -d db"\./);
+  });
+
   it('uses the dependencies each running service recorded when it started', async () => {
     const service = (name: string, port: number, deps?: string) =>
       [`  ${name}:`, '    command: node server.js', `    port: ${port}`, '    port_env: PORT', ...(deps ? [`    depends_on: [${deps}]`] : [])];
