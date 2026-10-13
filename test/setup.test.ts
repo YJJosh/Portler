@@ -987,15 +987,17 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
   });
 
   it('startPhase notices a kept pid-backed dependency that exits while another is still being inspected', async () => {
-    // api writes a marker once its readiness check connects; from then on the fake
-    // docker below kills cache partway through its inspect of db.
+    // api writes a marker as it starts, before it listens, so the marker exists before
+    // its readiness check can connect; from then on the fake docker below kills cache
+    // partway through its inspect of db. The only inspect of db before api starts is the
+    // one that selects what to start, and that one sees no marker. (Writing the marker in
+    // the server's connection handler raced the readiness check on slow runners.)
     const marker = path.join(dir, 'api-ready');
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
 import http from 'node:http';
-const server = http.createServer((req, res) => res.end('ok'));
-server.once('connection', () => fs.writeFileSync(${JSON.stringify(marker)}, ''));
-server.listen(Number(process.env.PORT), '127.0.0.1');
+fs.writeFileSync(${JSON.stringify(marker)}, '');
+http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
 `);
     const loaded = await config(`services:
   cache:
