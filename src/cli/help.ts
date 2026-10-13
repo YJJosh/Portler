@@ -15,7 +15,7 @@ Usage:
   ${PACKAGE_NAME} ps [service...]
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports
-  ${PACKAGE_NAME} env [service] [--prod] [--reveal]
+  ${PACKAGE_NAME} env [docker|k8s] [service] [--prod] [--reveal]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
   ${PACKAGE_NAME} volumes [list] [--prod]
   ${PACKAGE_NAME} volumes fork <volume> <new-set> [--prod]
@@ -27,7 +27,8 @@ Options:
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
       --prod              Use production overrides for setup, start, up, restart, env and volumes
-      --reveal            For "env --prod": print secret-looking values instead of ***
+      --reveal            For "env --prod" (or a service started with --prod): print
+                          secret-looking values instead of ***
       --drain-ms <ms>     For "start": after the shell exits, wait up to <ms> for the rest
                           of its process group before returning (default 10000)
       --setup             For "up" and "restart": run setup steps again, ignoring their receipts

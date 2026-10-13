@@ -15,7 +15,7 @@ portler up [service...] -d                # run setup, allocate ports, start ser
 portler up docker|k8s [service...] -d     # Docker / Kubernetes run mode
 portler ps [service...]                   # status, pid, port, URL, container
 portler logs [service...] [--follow]      # output of detached services
-portler env [service]                     # resolved env for a service
+portler env [service]                     # resolved env for a service, as it was started (mode, --prod)
 portler ports                             # current allocations
 portler restart [service...]              # restart in the background with the same ports and launch flags
 portler down [docker|k8s] [service...]    # stop services and release ports

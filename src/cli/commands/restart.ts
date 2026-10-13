@@ -7,7 +7,7 @@ import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type Mounte
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
-import { expandAndOrderServices, parseRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
 export interface RestartLaunch {
@@ -105,21 +105,9 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     );
   }
 
-  // Entries without runMode predate the field. One without a container was a local
-  // process. A container of a service whose docker: block only applies under
-  // `up docker` must have come from docker mode; one the service also runs under
-  // plain `up` (a top-level image:) counts as local, the conservative reading. A
-  // container of a service no longer in the config says neither, since plain `up`
-  // runs a top-level image: in one too, so that entry has no say in the run mode.
+  // Entries without runMode predate the field; recordedRunMode infers it from the container.
   const localConfig = configForRunMode(rawConfig, 'local');
-  const recordedMode = (name: string): RunMode | undefined => {
-    const info = entry(name);
-    if (info.runMode !== undefined) return info.runMode;
-    if (info.dockerContainer === undefined) return 'local';
-    const service = localConfig.services[name];
-    if (service === undefined) return undefined;
-    return service.docker === undefined ? 'docker' : 'local';
-  };
+  const recordedMode = (name: string): RunMode | undefined => recordedRunMode(localConfig, name, entry(name));
   const modeWord = (prod: boolean): string => (prod ? 'production' : 'development');
 
   let prod: boolean;

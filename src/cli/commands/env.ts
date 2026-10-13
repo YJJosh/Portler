@@ -1,5 +1,5 @@
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { loadBaseEnv, loadConfig } from '../../config/index.ts';
+import { configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
@@ -9,7 +9,7 @@ import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { servicesWithPorts } from '../services.ts';
+import { parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
 
 /**
  * Return the current port assignments plus their generated env, allocating
@@ -47,24 +47,55 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
   return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
 }
 
+/** The `up` command line for a launch, as the env notices name it. */
+function upCommand(mode: RunMode, prod: boolean): string {
+  return `portler up${mode === 'local' ? '' : ` ${mode}`}${prod ? ' --prod' : ''}`;
+}
+
 export async function commandEnv(args: ParsedArgs): Promise<number> {
-  if (args.reveal && !args.prod) {
-    throw new Error('--reveal applies to "env --prod": the development view prints config values, not the deployment\'s secrets');
-  }
-  if (args.positionals.length > 1) throw new Error('env accepts at most one service name');
-  const config = applyProduction(productionServices(await loadConfig(process.cwd(), args.file), args.prod, args.positionals), args.prod);
+  const { mode: requestedMode, requested } = parseRunMode(args.positionals);
+  const modeExplicit = requested.length < args.positionals.length;
+  if (requested.length > 1) throw new Error('env accepts at most one service name');
+  const loadedConfig = await loadConfig(process.cwd(), args.file);
 
-  const serviceName = args.positionals[0];
-  const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
-  if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
+  const serviceName = requested[0];
+  if (serviceName && !loadedConfig.services[serviceName]) throw new Error(`unknown service "${serviceName}"`);
 
-  return withLifecycleLock(config.projectDir, async () => {
+  return withLifecycleLock(loadedConfig.projectDir, async () => {
+    // A service with a pids.json entry, live or stale, is shown as it was started: in its
+    // run mode and, if it was started with --prod, in production. A typed mode token or
+    // --prod wins over the record, as it does for restart, and a notice says so.
+    const recorded = serviceName ? (await readPids(loadedConfig.projectDir))?.services[serviceName] : undefined;
+    const recordedMode = recorded && recordedRunMode(configForRunMode(loadedConfig, 'local'), serviceName!, recorded);
+    const recordedProd = recorded?.prod === true;
+    const mode: RunMode = modeExplicit ? requestedMode : recordedMode ?? 'local';
+    const prod = args.prod === true || recordedProd;
+    if (mode === 'k8s' && prod) {
+      throw new Error(`--prod does not apply to k8s mode${modeExplicit ? '' : `, and ${serviceName} was started with "portler up k8s"`}`);
+    }
+    if (args.reveal && !prod) {
+      throw new Error('--reveal applies to "env --prod" (or a service started with --prod): the development view prints config values, not the deployment\'s secrets');
+    }
+    if (recordedMode) {
+      const started = upCommand(recordedMode, recordedProd);
+      if (mode !== recordedMode || prod !== recordedProd) {
+        process.stderr.write(`[portler] ${serviceName} was started with "${started}"; this shows what "${upCommand(mode, prod)}" would give it instead\n`);
+      } else if (mode !== 'local' || prod) {
+        process.stderr.write(`[portler] ${serviceName} was started with "${started}"; this shows the environment it got\n`);
+      }
+    }
+
+    const config = applyProduction(configForRunMode(productionServices(loadedConfig, prod, requested), mode), prod);
+    const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
+    if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
+    if (modeExplicit && mode === 'docker' && service) validateDockerMode(config, [service.name]);
+
     const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);
 
-    if (!args.prod) {
+    if (!prod) {
       process.stdout.write(formatDotEnv(buildPrintableEnv(config, service, generatedEnv, assignments)));
       return 0;
     }
