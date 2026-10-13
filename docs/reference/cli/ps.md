@@ -10,7 +10,7 @@ portler ps [service...]
 
 Prints one row per running service with:
 
-- **mode** — `local` or `docker`, with `(prod)` when the service was started with `--prod`
+- **mode** — `local`, `docker`, or `k8s` for a port-forward started by `up k8s`, with `(prod)` when the service was started with `--prod`
 - **pid** — the process id
 - **status** — whether the service is still alive (below)
 - **port / URL** — the assigned port and generated URL
