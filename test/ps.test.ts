@@ -231,3 +231,31 @@ describe('portler ps', () => {
     assert.deepEqual(await liveServiceNames(dir, null), []);
   });
 });
+
+describe('container-aware lifecycle guards', () => {
+  for (const container of ['c-running', 'c-unreachable']) {
+    for (const flags of [[], ['--ports']]) {
+      it(`clean ${flags.join(' ')} refuses ${container} after its supervisor exits`, async () => {
+        const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-clean-live-')));
+        cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+        await fs.writeFile(path.join(dir, 'portler.yml'), 'services: {worker: {image: alpine:3.20}}\n');
+        await writePids(dir, {
+          version: 1, project: dir, startedAt: new Date().toISOString(),
+          services: { worker: { pid: await exitedPid(), command: 'docker run', cwd: dir, startedAt: new Date().toISOString(), dockerContainer: container } },
+        });
+        const pidsPath = path.join(dir, '.portler', 'pids.json');
+        const before = await fs.readFile(pidsPath, 'utf8');
+        const docker = await fakeDocker(dir, dir);
+        const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'clean', ...flags], {
+          cwd: dir,
+          env: { ...process.env, PATH: `${docker.bin}${path.delimiter}${process.env.PATH ?? ''}`, PORTLER_GLOBAL_DIR: path.join(dir, 'global') },
+          encoding: 'utf8',
+        });
+        assert.equal(result.status, 1, 'plain clean must refuse rather than stop a container');
+        assert.match(result.stderr, /services are still running: worker/);
+        assert.equal(await fs.readFile(pidsPath, 'utf8'), before, 'the only record of the container is retained');
+        assert.ok((await docker.calls()).every((call) => call.startsWith('inspect ')), 'refusal does not remove any Docker resource');
+      });
+    }
+  }
+});

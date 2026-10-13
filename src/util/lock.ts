@@ -73,6 +73,11 @@ export interface LockOptions {
   waitMs: number;
   /** Used in the timeout message, e.g. "global port registry". */
   description: string;
+  /**
+   * Stop waiting (rejecting with the signal's reason) once this is aborted. It
+   * is checked before every attempt, so an aborted wait never takes the lock.
+   */
+  signal?: AbortSignal;
   /** Tests only: how the lock directory's metadata is read (defaults to fs.stat). */
   stat?: (target: string) => Promise<LockDirStat>;
 }
@@ -278,6 +283,7 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
   let takeoverError: NodeJS.ErrnoException | null = null;
 
   for (;;) {
+    options.signal?.throwIfAborted();
     try {
       await fs.mkdir(lockDir);
     } catch (error) {

@@ -147,6 +147,45 @@ describe('withDirLock', () => {
     assert.equal(maxConcurrent, 1, 'the lock must admit exactly one holder at a time');
   });
 
+  it('stops waiting for a held lock as soon as its signal is aborted', async () => {
+    const lockDir = path.join(dir, 'test.lock');
+    let release!: () => void;
+    const holder = withDirLock(lockDir, OPTIONS, () => new Promise<void>((resolve) => { release = resolve; }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const controller = new AbortController();
+    let entered = false;
+    const waiter = withDirLock(lockDir, { ...OPTIONS, signal: controller.signal }, async () => { entered = true; });
+    setTimeout(() => controller.abort(), 150);
+    const startedAt = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await assert.rejects(
+        Promise.race([
+          waiter,
+          new Promise((resolve) => { timer = setTimeout(resolve, 2_000, 'still waiting'); }),
+        ]),
+        { name: 'AbortError' },
+      );
+      assert.ok(Date.now() - startedAt < 1_500, 'the wait ends promptly');
+      assert.equal(entered, false, 'an aborted wait never enters the critical section');
+    } finally {
+      clearTimeout(timer);
+      release();
+      await holder;
+      await waiter.catch(() => undefined);
+    }
+  });
+
+  it('does not take a free lock with an already aborted signal', async () => {
+    const lockDir = path.join(dir, 'test.lock');
+    const controller = new AbortController();
+    controller.abort();
+    let entered = false;
+    await assert.rejects(withDirLock(lockDir, { ...OPTIONS, signal: controller.signal }, async () => { entered = true; }), { name: 'AbortError' });
+    assert.equal(entered, false);
+    assert.equal(await fs.access(lockDir).then(() => true, () => false), false);
+  });
+
   it('releases the lock when the critical section throws', async () => {
     const lockDir = path.join(dir, 'test.lock');
 

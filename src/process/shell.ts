@@ -4,6 +4,8 @@ import type { EnvMap } from '../types/index.ts';
 import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
 
 export interface ShellOptions {
+  /** Cancel this owned shell tree, with a bounded wait even if it ignores signals. */
+  signal?: AbortSignal;
   /** Called with every signal that is forwarded to the command's process group. */
   onSignal?: (signal: NodeJS.Signals) => void;
   /**
@@ -16,6 +18,7 @@ export interface ShellOptions {
 
 /** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
 export async function runShell(command: string, cwd: string, env: EnvMap, options: ShellOptions = {}): Promise<number> {
+  options.signal?.throwIfAborted();
   const child = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
   const forward = (signal: NodeJS.Signals): void => {
     options.onSignal?.(signal);
@@ -28,17 +31,31 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   };
   const interrupt = (): void => forward('SIGINT');
   const terminate = (): void => forward('SIGTERM');
-  process.on('SIGINT', interrupt);
-  process.on('SIGTERM', terminate);
+  let killTimer: NodeJS.Timeout | undefined;
+  const abort = (): void => {
+    forward(options.signal?.reason === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
+    // We still hold this child: cancellation may stop its whole process group.
+    killTimer = setTimeout(() => forward('SIGKILL'), 2000);
+  };
+  options.signal?.addEventListener('abort', abort, { once: true });
+  // A startup controller already handles process signals. Do not forward the
+  // same signal twice (or send SIGTERM as well as SIGINT on a single Ctrl-C).
+  if (!options.signal) {
+    process.on('SIGINT', interrupt);
+    process.on('SIGTERM', terminate);
+  }
   try {
     const code = await new Promise<number>((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
     // Signals keep being forwarded while the rest of the group drains.
-    if (options.drainMs !== undefined && child.pid) await drainGroup(child.pid, options.drainMs);
+    const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
+    if (drainMs !== undefined && child.pid) await drainGroup(child.pid, drainMs);
     return code;
   } finally {
+    clearTimeout(killTimer);
+    options.signal?.removeEventListener('abort', abort);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', terminate);
   }

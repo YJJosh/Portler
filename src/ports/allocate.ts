@@ -113,6 +113,7 @@ export async function allocateAssignments(
   state: StateFile | null,
   reserveServices: string[],
   runningServiceNames: ReadonlySet<string>,
+  options: { signal?: AbortSignal } = {},
 ): Promise<Assignments> {
   return withRegistryLock(async () => {
     const registry = await readRegistry();
@@ -190,7 +191,7 @@ export async function allocateAssignments(
 
     await writeRegistry(registry);
     return assignments;
-  });
+  }, { signal: options.signal });
 }
 
 /**

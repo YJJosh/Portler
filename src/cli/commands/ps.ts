@@ -40,6 +40,9 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   printTable(headers, rows);
   entries.forEach(([serviceName, info], index) => {
     const entry = liveness[index]!;
+    if (entry.status === 'running' && entry.via === 'group') {
+      process.stderr.write(`[portler] warning: ${serviceName}: ${entry.message}\n`);
+    }
     if (entry.status === 'unknown') {
       process.stderr.write(`[portler] warning: could not inspect container "${info.dockerContainer}" of ${serviceName}: ${entry.message}\n`);
     }
@@ -63,7 +66,7 @@ function modeLabel(info: PidServiceInfo): string {
  * is still serving: "running (container)", not dead.
  */
 function statusLabel(liveness: ServiceLiveness): string {
-  if (liveness.status === 'running') return liveness.via === 'pid' ? 'running' : 'running (container)';
+  if (liveness.status === 'running') return liveness.via === 'pid' ? 'running' : `running (${liveness.via})`;
   if (liveness.status === 'unknown') return 'unknown';
   return 'dead (stale)';
 }

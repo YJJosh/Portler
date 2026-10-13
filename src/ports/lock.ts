@@ -13,13 +13,17 @@ export async function ensureGlobalDir(): Promise<void> {
   await fs.mkdir(globalPortlerDir(), { recursive: true });
 }
 
-/** Run `fn` while holding the global registry lock, releasing it afterwards. */
-export async function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Run `fn` while holding the global registry lock, releasing it afterwards.
+ * `signal` ends the WAIT for the lock (see LockOptions.signal); once held, `fn`
+ * runs to completion.
+ */
+export async function withRegistryLock<T>(fn: () => Promise<T>, options: { signal?: AbortSignal } = {}): Promise<T> {
   await ensureGlobalDir();
 
   return withDirLock(
     registryLockDir(),
-    { staleMs: LOCK_STALE_MS, waitMs: LOCK_WAIT_MS, description: 'global port registry' },
+    { staleMs: LOCK_STALE_MS, waitMs: LOCK_WAIT_MS, description: 'global port registry', signal: options.signal },
     fn,
   );
 }

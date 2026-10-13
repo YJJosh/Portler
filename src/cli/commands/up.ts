@@ -162,6 +162,8 @@ export interface StartOptions {
   setup?: boolean;
   /** Start services in the background instead of attaching to them. */
   detach: boolean;
+  /** Foreground startup cancellation; rollback runs before the lifecycle lock is released. */
+  signal?: AbortSignal;
   /** Skip already-running services instead of failing (used by restart). */
   skipRunning?: boolean;
   /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
@@ -237,6 +239,7 @@ type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status:
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
   const liveness = await serviceLiveness(projectDir, info);
   if (liveness.status === 'running' && liveness.via === 'pid') return { status: 'alive', reason: 'its PID entry belongs to another run' };
+  if (liveness.status === 'running' && liveness.via === 'group') return { status: 'alive', reason: liveness.message };
   if (liveness.status === 'running') {
     return { status: 'alive', reason: `its container "${info.dockerContainer}" is still running under another run` };
   }
@@ -324,6 +327,7 @@ export async function startPhase(
   requestedRootNames: string[],
   options: StartOptions,
 ): Promise<StartedStack> {
+  options.signal?.throwIfAborted();
   // Under --prod only prod.services run; dependencies on left-out services are dropped.
   const { raw, modeConfig, config } = launchConfig(rawConfig, mode, { prod: options.prod, images: options.images });
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
@@ -334,7 +338,7 @@ export async function startPhase(
   // that container. One that cannot be inspected is taken as running too.
   const runningNames = new Set(
     await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
-      process.stderr.write(`[portler] warning: could not inspect ${serviceName}'s container (${message}); treating it as running\n`);
+      process.stderr.write(`[portler] warning: ${serviceName}: ${message}; treating it as running\n`);
     }),
   );
 
@@ -378,7 +382,10 @@ export async function startPhase(
   const reserveNames = servicesWithPorts(config, selectedNames);
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
   const readinessNames = servicesNeedingReadiness(config, selectedNames, requestedRootNames);
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames);
+  // Ctrl-C may end the wait for another project's hold on the port registry: nothing
+  // is reserved or started yet. Later waits are not cancellable on purpose: the pid
+  // entry written after each spawn is how the rollback finds what to stop.
+  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { signal: options.signal });
   const generatedEnv = buildGeneratedEnv(assignments);
   const baseEnv = await loadBaseEnv(config, { allowMissing: options.prod });
 
@@ -519,6 +526,7 @@ export async function startPhase(
   };
 
   try {
+    options.signal?.throwIfAborted();
     // prod.require: a deployment that forgot a value fails here, before setup runs or
     // anything is spawned, naming the key instead of failing somewhere inside the app.
     if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
@@ -540,7 +548,7 @@ export async function startPhase(
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);
     if (options.setup !== false) {
-      await runSetupStep(config, null, projectEnv, setupMode, options.setup);
+      await runSetupStep(config, null, projectEnv, setupMode, options.setup, options.signal);
     }
 
     // Start level by level: services within a level are independent, so they
@@ -613,11 +621,13 @@ export async function startPhase(
       const readinessWaits: Array<() => Promise<void>> = [];
 
       for (const serviceName of level) {
+        options.signal?.throwIfAborted();
         const service = config.services[serviceName]!;
         const { env: serviceEnv, explicitKeys } = serviceEnvs.get(serviceName)!;
         if (options.setup !== false) {
-          await runSetupStep(config, service, serviceEnv, setupMode, options.setup);
+          await runSetupStep(config, service, serviceEnv, setupMode, options.setup, options.signal);
         }
+        options.signal?.throwIfAborted();
         let childExited = false;
         const logFilePath = options.detach ? serviceLogPath(config.projectDir, serviceName) : undefined;
         const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath);
@@ -645,6 +655,7 @@ export async function startPhase(
               () => childExited,
               service.docker ? DOCKER_TCP_HOLD_MS : 0,
               logFilePath,
+              options.signal,
             ),
           );
         }
@@ -660,10 +671,12 @@ export async function startPhase(
       // Catch a member of an earlier level that died while this one was
       // starting, before the next level, or the proxy, builds on it.
       await assertMembersAlive();
+      options.signal?.throwIfAborted();
     }
 
     // The proxy starts last so every routed service already listens; it
     // tolerates down targets anyway by answering 502.
+    options.signal?.throwIfAborted();
     if (proxy && startProxy) {
       let proxyExited = false;
       const child = spawnProxy(proxy, assignments, !options.detach);
@@ -686,10 +699,14 @@ export async function startPhase(
         assignments,
         assignments[PROXY_SERVICE_NAME],
         () => proxyExited,
+        0,
+        undefined,
+        options.signal,
       );
       // The proxy's wait took time too; a service that died meanwhile would
       // otherwise sit behind a printed project URL.
       await assertMembersAlive();
+      options.signal?.throwIfAborted();
     }
   } catch (error) {
     process.stderr.write(
@@ -742,17 +759,69 @@ export async function startServices(
   requestedRootNames: string[],
   options: StartOptions,
 ): Promise<number> {
-  const stack = await withLifecycleLock(rawConfig.projectDir, () =>
-    startPhase(rawConfig, mode, requestedRootNames, options),
-  );
+  // Detached startup deliberately retains its existing signal behavior. Foreground
+  // handlers must exist before startPhase can spawn anything, not only once ready.
+  const cancellation = options.detach ? undefined : new AbortController();
+  let signalCode: number | undefined;
+  const cancel = (signal: 'SIGINT' | 'SIGTERM'): void => {
+    if (signalCode !== undefined) return;
+    signalCode = signal === 'SIGINT' ? 130 : 143;
+    process.stderr.write(`[portler] received ${signal}, stopping services...\n`);
+    // Like the running supervisor: a second Ctrl-C during the rollback gets the
+    // default handling, so a stuck rollback can still be interrupted.
+    unlisten();
+    // Carry the original signal through to an active setup shell.
+    cancellation!.abort(signal);
+  };
+  const interrupt = (): void => cancel('SIGINT');
+  const terminate = (): void => cancel('SIGTERM');
+  const unlisten = (): void => {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', terminate);
+  };
+  if (cancellation) {
+    process.on('SIGINT', interrupt);
+    process.on('SIGTERM', terminate);
+  }
+  try {
+    // The signal also ends a wait for a lock another command holds, so Ctrl-C
+    // exits before entering the critical section instead of after it.
+    const stack = await withLifecycleLock(rawConfig.projectDir, async () => {
+      const stack = await startPhase(rawConfig, mode, requestedRootNames, {
+        ...options,
+        ...(cancellation ? { signal: cancellation.signal } : {}),
+      });
+      // A signal can arrive after the last startup check while state/lock I/O
+      // completes. Still roll back under this same lock, never racing a start.
+      if (cancellation?.signal.aborted) {
+        await stack.teardown({ keepAdopted: false });
+        cancellation.signal.throwIfAborted();
+      }
+      return stack;
+    }, { signal: cancellation?.signal });
 
-  if (stack.detached) return 0;
+    if (stack.detached) return 0;
+    if (cancellation?.signal.aborted) {
+      // The lock's release also awaits I/O; this narrow handoff still belongs
+      // to startup, but now needs the normal teardown lock again.
+      await withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown({ keepAdopted: false }));
+      return signalCode!;
+    }
 
-  return waitForForegroundServices(
-    stack.children,
-    (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
-    { dependentsAlive: stack.dependentsAlive },
-  );
+    // No await between removing our handlers and the supervisor installing its
+    // own: post-start identity/adoption behavior remains exactly as before.
+    unlisten();
+    return waitForForegroundServices(
+      stack.children,
+      (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
+      { dependentsAlive: stack.dependentsAlive },
+    );
+  } catch (error) {
+    if (signalCode !== undefined) return signalCode;
+    throw error;
+  } finally {
+    unlisten();
+  }
 }
 
 export async function commandUp(args: ParsedArgs): Promise<number> {
