@@ -63,8 +63,9 @@ async function writePortForwardPid(
   serviceName: string,
   child: ChildProcess,
   assignment: ServiceAssignment,
+  image: string | undefined,
 ): Promise<void> {
-  const info = await portForwardPidInfo(config, config.services[serviceName]!, child, assignment);
+  const info = await portForwardPidInfo(config, config.services[serviceName]!, child, assignment, image);
 
   await updatePids(config.projectDir, (pids) => {
     pids.services[serviceName] = info;
@@ -262,7 +263,7 @@ async function startK8sPhase(
         children.set(serviceName, child);
         if (args.detach) child.unref();
 
-        await writePortForwardPid(config, serviceName, child, assignment);
+        await writePortForwardPid(config, serviceName, child, assignment, args.images?.[serviceName]);
         // k8s mode never has command healthchecks (applyK8sMode strips them),
         // so the readiness env is not consulted.
         readinessWaits.push(waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited));

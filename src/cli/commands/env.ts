@@ -12,7 +12,7 @@ import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
+import { expandAndOrderServices, parseRunMode, recordedRunMode, servicesWithPorts, validateDockerMode } from '../services.ts';
 import { validateK8sMode } from './up-k8s.ts';
 
 /**
@@ -52,7 +52,9 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 }
 
 /**
- * The `--image` pins of the containers that still run in `mode`. state.json normally
+ * The `--image` pins of the containers that still run in `mode` (a Docker container's entry,
+ * or a Kubernetes service's port-forward; only a service with a port has an image to show).
+ * state.json normally
  * carries the pinned image from that `up`, but when it is missing or incomplete the
  * assignments are rebuilt from the config, and without the pins `PORTLER_<SERVICE>_IMAGE`
  * and `${service.image}` would name the image in portler.yml instead of the one the
@@ -161,9 +163,11 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
     if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
     // A typed mode token must describe a launch that could happen: refuse what `up docker`
-    // or `up k8s` would refuse instead of printing an environment no launch could get.
-    if (modeExplicit && mode === 'docker' && service) validateDockerMode(config, [service.name]);
-    if (modeExplicit && mode === 'k8s') validateK8sMode(config, service ? [service.name] : []);
+    // or `up k8s` would refuse instead of printing an environment no launch could get. Like
+    // `up`, check the service together with everything it depends on.
+    const launched = service ? expandAndOrderServices(config, [service.name]) : [];
+    if (modeExplicit && mode === 'docker') validateDockerMode(config, launched);
+    if (modeExplicit && mode === 'k8s') validateK8sMode(config, launched);
 
     const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a

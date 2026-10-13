@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
+import { K8S_FORWARD_COMMAND } from '../src/k8s/kubectl.ts';
 import { writePids } from '../src/process/pids.ts';
 import type { PidServiceInfo } from '../src/types/index.ts';
 
@@ -92,6 +93,15 @@ describe('env for a running service', () => {
     assert.equal(value(result.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend@sha256:pinned');
   });
 
+  it('rebuilds missing state with the --image pin a running Kubernetes service was started from', async () => {
+    // up k8s records a ported service through its port-forward entry, which carries the pin.
+    await record({ runMode: 'k8s', command: `${K8S_FORWARD_COMMAND} (kubectl port-forward service/backend 4000:4000)`, image: 'example/backend@sha256:k8s-pin' });
+    const result = run('backend');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(value(result.stdout, 'PORTLER_BACKEND_IMAGE'), 'example/backend@sha256:k8s-pin');
+    assert.match(result.stderr, /backend was started with "portler up k8s"; this shows the environment it got/);
+  });
+
   it('infers Docker mode for an entry written before runMode was recorded', async () => {
     await record({ dockerContainer: 'c-backend' });
     const result = run('backend');
@@ -154,6 +164,24 @@ describe('env for a running service', () => {
     const backend = run('k8s', 'backend');
     assert.equal(backend.status, 0, backend.stderr);
     assert.equal(value(backend.stdout, 'MODE'), 'docker');
+  });
+
+  it('refuses a typed mode when a dependency could not run in it, as up does', async () => {
+    // backend has container config, but it now depends on cache, which has none.
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), CONFIG.replace('depends_on: [postgres]', 'depends_on: [postgres, cache]') + `  cache:
+    command: redis-server
+    port: 6379
+`, 'utf8');
+    const docker = run('docker', 'backend');
+    assert.equal(docker.status, 1);
+    assert.match(docker.stderr, /service "cache" has no Docker config/);
+    assert.equal(docker.stdout, '');
+    const k8s = run('k8s', 'backend');
+    assert.equal(k8s.status, 1);
+    assert.match(k8s.stderr, /service "cache" has no container config for Kubernetes/);
+    assert.equal(k8s.stdout, '');
+    // Without a typed mode, the development view of backend is still available.
+    assert.equal(run('backend').status, 0);
   });
 
   it('refuses --prod for a service started with "up k8s", which has no production mode', async () => {

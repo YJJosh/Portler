@@ -598,6 +598,7 @@ export async function portForwardPidInfo(
   service: ServiceConfig,
   child: ChildProcess,
   assignment: ServiceAssignment,
+  image?: string,
 ): Promise<PidServiceInfo> {
   if (child.pid === undefined) {
     throw new Error(`port-forward for service "${service.name}" did not start with a process id`);
@@ -612,5 +613,7 @@ export async function portForwardPidInfo(
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
     runMode: 'k8s',
+    // The --image pin, as a container entry records it: `env` rebuilds state from it.
+    ...(image !== undefined ? { image } : {}),
   };
 }

@@ -152,6 +152,15 @@ describe('Kubernetes proxy lifecycle (fake kubectl)', () => {
     assert.deepEqual(stopped.completed.sort(), ['api', 'proxy']);
     await releasePorts(projectDir);
   });
+
+  it('records an --image pin on the port-forward entry, so env can rebuild state from it', async () => {
+    assert.equal(await commandUp(parseArgs(['k8s', '--detach', '--image', 'api=example/api@sha256:pinned'], 'up')), 0);
+    const pids = await readPids(projectDir);
+    assert.equal(pids?.services.api?.image, 'example/api@sha256:pinned');
+    assert.equal(pids?.services.api?.runMode, 'k8s');
+    await stopServices(projectDir);
+    await releasePorts(projectDir);
+  });
 });
 
 describe('foreground teardown after the config grew (fake kubectl)', () => {
