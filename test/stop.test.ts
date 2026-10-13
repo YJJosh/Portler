@@ -1132,6 +1132,55 @@ describe('stopServices: a container whose docker run shell is gone', () => {
     }
   });
 
+  it('judges each held-back container at its own deadline, not at the last one', { timeout: 15_000 }, async () => {
+    // db's shell had exited before down started, so db spends the settle wait;
+    // cache's shell exits just before the signal round and gets its own window
+    // after it. Neither group ever goes. db must be judged when its window ends,
+    // not held on until cache's later one ends too.
+    const marker = path.join(projectDir, 'removed');
+    const bin = await fakeDocker(projectDir, marker);
+    const token = 'Mon Oct 12 20:48:05 2026 5252';
+    await writePidsFile({
+      db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' },
+      cache: { ...pidInfo(5252, token), dockerContainer: 'c-cache' },
+    });
+
+    let cacheVerifies = 0;
+    let cacheExited = false;
+    const dbProbes: number[] = [];
+    const savedWrite = process.stderr.write.bind(process.stderr);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    const confirmMs = 500;
+    try {
+      const result = await stopServices(projectDir, ['db', 'cache'], {}, {
+        graceMs: 20,
+        confirmMs,
+        pidRunning: (pid) => {
+          if (pid === 4242) return false; // db's leader exited before down started
+          cacheVerifies += 1; // first: the reuse check before the round; second: the round
+          if (cacheVerifies >= 2) cacheExited = true;
+          return !cacheExited;
+        },
+        pidAlive: (pid) => (pid === 4242 ? false : !cacheExited),
+        readStartToken: async (pid) => (pid === 5252 && !cacheExited ? token : null),
+        groupState: (pid) => {
+          if (pid === 4242) dbProbes.push(Date.now());
+          return 'alive'; // neither group ever goes
+        },
+        sendSignal: () => ({ status: 'sent' }),
+      });
+      assert.deepEqual(result.stopped, []);
+      assert.deepEqual([...result.unverified].sort(), ['cache', 'db']);
+      const span = dbProbes[dbProbes.length - 1]! - dbProbes[0]!;
+      assert.ok(span < confirmMs * 1.6, `db's group was watched for ${span} ms, about one ${confirmMs} ms window`);
+    } finally {
+      process.stderr.write = savedWrite;
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('still keeps the entry when the group outlives its removed container', { timeout: 15_000 }, async () => {
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);

@@ -579,21 +579,17 @@ export async function stopServices(
   // group seen gone is stopped, whatever a later look at that pid number finds.
   // A service that already sat through the settle wait keeps that wait's
   // deadline instead of getting a second window, so no service waits longer
-  // than one confirm window in all.
+  // than one confirm window in all. Each one is judged as soon as its own
+  // deadline passes or its group goes, not when the last of them is done.
   const lateStart = Date.now();
   const lateDeadlineFor = (target: Target): number =>
     settling.includes(target) ? settleDeadline : lateStart + probes.confirmMs;
-  while (
-    lateSettling.some((target) => Date.now() < lateDeadlineFor(target) && probes.groupState(target.info.pid) === 'alive')
-  ) {
-    await sleep(POLL_MS);
-  }
-  for (const target of lateSettling) {
+  const judgeLate = async (target: Target): Promise<void> => {
     const verdict = await verifyPid(probes, target.info);
     const groupGone = probes.groupState(target.info.pid) === 'gone';
     if (verdict === 'reused' || (groupGone && (verdict === 'gone' || (await leaderNotRunnable(probes, target.info))))) {
       stopped.push(target.name);
-      continue;
+      return;
     }
     const result = termRound.get(target)!;
     if (result.status === 'refused' && result.verdict === 'unverifiable') {
@@ -603,6 +599,15 @@ export async function stopServices(
     }
     unverified.push(target.name);
     keep.add(target.name);
+  };
+  const pendingLate = [...lateSettling];
+  while (pendingLate.length > 0) {
+    for (const target of [...pendingLate]) {
+      if (Date.now() < lateDeadlineFor(target) && probes.groupState(target.info.pid) === 'alive') continue;
+      pendingLate.splice(pendingLate.indexOf(target), 1);
+      await judgeLate(target);
+    }
+    if (pendingLate.length > 0) await sleep(POLL_MS);
   }
 
   // "Gone" is LATCHED the moment it is observed. A group that has exited cannot
