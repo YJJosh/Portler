@@ -85,7 +85,7 @@ For both ordinary HTTP and WebSocket upgrades, Portler applies the same policy:
 | `X-Forwarded-For` | Preserve a comma-separated chain only if **every** entry is a plain IPv4/IPv6 literal (no ports, brackets, scope identifiers, quotes, or `unknown`), then append the socket peer IP. Multiple header lines are treated as one chain. If any entry is invalid, discard the whole incoming chain and use only the socket peer. |
 | `Forwarded`, `X-Real-IP`, other `X-Forwarded-*` | Always removed, even from trusted peers; only the three supported headers above are rebuilt. Portler does not parse RFC `Forwarded` or infer scheme from an unsupported header. |
 
-Validation/fallback is independent for each supported header. Forwarding values named by a request's hop-by-hop `Connection` header are not trusted. Untrusted peers get socket/Host-derived metadata regardless of what they send; configuring `allowed_hosts` does **not** grant forwarding trust. Malformed transport `Host` authorities are refused with `403`, not forwarded.
+Validation/fallback is independent for each supported header. Forwarding values named by a request's hop-by-hop `Connection` header are not trusted. Untrusted peers get socket/Host-derived metadata regardless of what they send; configuring `allowed_hosts` does **not** grant forwarding trust. Malformed or repeated transport `Host` authorities are refused with `403`, not forwarded. The single checked transport `Host` is preserved even if a caller nominates it in `Connection`.
 
 ## Lifecycle
 

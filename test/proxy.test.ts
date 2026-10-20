@@ -292,6 +292,23 @@ describe('proxy forwarding trust boundary (real HTTP and WebSocket upgrades)', (
       }
     });
 
+    it(`${protocol}: rejects duplicate transport Host instead of relaying an unchecked authority`, async () => {
+      const port = await stack([]);
+      // send() supplies Host: edge.internal first. Node keeps that first value
+      // in req.headers, but a raw upgrade must not relay a second, unchecked one.
+      const result = await send(port, upgrade, { Host: 'evil.example' });
+      assert.equal(result.status, 403);
+    });
+
+    it(`${protocol}: preserves the checked transport Host even if nominated as hop-by-hop`, async () => {
+      const port = await stack([]);
+      const { headers } = await send(port, upgrade, {
+        Connection: `${upgrade ? 'Upgrade' : 'close'}, Host`,
+      });
+      assert.equal(headers.host, 'edge.internal');
+      assert.equal(headers['x-forwarded-host'], 'edge.internal');
+    });
+
     it(`${protocol}: preserves a trusted HTTPS secure origin and validated client chain`, async () => {
       const port = await stack(['::ffff:127.0.0.1']);
       const { status, headers } = await send(port, upgrade, original);

@@ -104,6 +104,17 @@ export function isAllowedHost(hostHeader: string | undefined, allowedHosts: read
   return false;
 }
 
+/** Reject ambiguous authorities before either HTTP or upgrade forwarding. */
+function hasAllowedRequestHost(req: IncomingMessage, allowedHosts: readonly string[]): boolean {
+  // REVIEW: Node keeps only the first Host in req.headers; raw WebSocket heads
+  // used to relay unchecked later values to upstreams with different parsers.
+  let count = 0;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index]!.toLowerCase() === 'host') count += 1;
+  }
+  return count <= 1 && isAllowedHost(req.headers.host, allowedHosts);
+}
+
 function rejectForbiddenHost(hostHeader: string | undefined): string {
   return (
     `portler proxy: refusing request with Host "${hostHeader ?? ''}".\n` +
@@ -209,6 +220,10 @@ function forwardedRequestHeaders(req: IncomingMessage, options: ProxyServerOptio
     headers[name] = value;
   }
 
+  // REVIEW: Host is routing identity, not an optional connection extension.
+  // Preserve the checked authority even when Connection nominates it; otherwise
+  // http.request synthesizes the private upstream authority instead.
+  if (req.headers.host !== undefined) headers.host = req.headers.host;
   return { ...headers, ...forwardingHeaders(req, options) };
 }
 
@@ -229,7 +244,7 @@ function badGatewayMessage(route: ProxyTarget, error: Error): string {
 }
 
 function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: ServerResponse): void {
-  if (!isAllowedHost(req.headers.host, options.allowedHosts)) {
+  if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(rejectForbiddenHost(req.headers.host));
     return;
@@ -282,9 +297,12 @@ function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): stri
   // nominates our newly generated forwarding metadata as hop-by-hop upstream.
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
     const name = req.rawHeaders[index]!.toLowerCase();
-    if (isForwardingHeader(name) || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
+    if (name === 'host' || isForwardingHeader(name) || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
     lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
   }
+  // Use the same single checked Host as HTTP, never a raw duplicate or omission
+  // introduced by Connection: Host.
+  if (req.headers.host !== undefined) lines.push(`Host: ${req.headers.host}`);
   lines.push('Connection: Upgrade', `Upgrade: ${req.headers.upgrade}`);
   for (const [name, value] of Object.entries(forwardingHeaders(req, options))) lines.push(`${name}: ${value}`);
 
@@ -296,7 +314,7 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
 
   // WebSockets are not protected by the same-origin policy, so an unchecked
   // Host here would reopen exactly the rebinding hole the request path closes.
-  if (!isAllowedHost(req.headers.host, options.allowedHosts)) {
+  if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;
   }
