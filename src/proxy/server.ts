@@ -160,14 +160,17 @@ function isForwardingHeader(name: string): boolean {
 }
 
 /** A single authority, not a URL, comma-separated list, userinfo or scoped IP. */
+// REVIEW: underscores are not valid in public DNS names, but internal/container
+// names such as `my_app` were explicitly allowlisted before this check existed.
+// Keep them allowed; the goal is rejecting lists, userinfo and URL syntax.
 function isValidAuthority(value: string): boolean {
-  const match = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?$/.exec(value);
+  const match = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9._-]+)(?::([0-9]+))?$/.exec(value);
   if (!match) return false;
   if (match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > 65535)) return false;
   const hostname = match[1]!;
   if (hostname.startsWith('[')) return net.isIP(hostname.slice(1, -1)) === 6;
   return hostname.length <= 253 && hostname.replace(/\.$/, '').split('.').every(
-    (label) => label.length <= 63 && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label),
+    (label) => label.length <= 63 && /^[a-zA-Z0-9_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?$/.test(label),
   );
 }
 

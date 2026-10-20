@@ -31,6 +31,10 @@ describe('isAllowedHost', () => {
   it('allows the project url_host and any configured extra hosts', () => {
     assert.equal(isAllowedHost('myapp.test', ['myapp.test']), true);
     assert.equal(isAllowedHost('MyApp.Test:52001', ['myapp.test']), true);
+    // Allowlisted internal names with underscores worked before authority validation.
+    assert.equal(isAllowedHost('my_app:52001', ['my_app']), true);
+    assert.equal(isAllowedHost('my_app, evil.test', ['my_app']), false);
+    assert.equal(isAllowedHost('user@my_app', ['my_app']), false);
   });
 
   it('BLOCKS a DNS-rebinding request carrying an attacker hostname', () => {
