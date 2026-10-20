@@ -269,6 +269,25 @@ describe('proxy forwarding trust boundary (real HTTP and WebSocket upgrades)', (
       assertDropped(headers);
     });
 
+    it(`${protocol}: drops proxy credentials and nominated hop headers while retaining app auth`, async () => {
+      const port = await stack([]);
+      const { headers } = await send(port, upgrade, {
+        Connection: `${upgrade ? 'Upgrade' : 'close'}, X-Private-Hop`,
+        'Proxy-Authorization': 'Basic proxy-secret',
+        'Proxy-Authenticate': 'Basic realm="proxy"',
+        'X-Private-Hop': 'hop-secret',
+        Authorization: 'Bearer app-token',
+      });
+      assert.equal(headers['proxy-authorization'], undefined);
+      assert.equal(headers['proxy-authenticate'], undefined);
+      assert.equal(headers['x-private-hop'], undefined);
+      assert.equal(headers.authorization, 'Bearer app-token');
+      if (upgrade) {
+        assert.equal(headers.connection?.toLowerCase(), 'upgrade');
+        assert.equal(headers.upgrade, 'websocket');
+      }
+    });
+
     it(`${protocol}: preserves a trusted HTTPS secure origin and validated client chain`, async () => {
       const port = await stack(['::ffff:127.0.0.1']);
       const { status, headers } = await send(port, upgrade, original);

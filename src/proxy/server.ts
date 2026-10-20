@@ -269,18 +269,20 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
   req.pipe(upstream);
 }
 
-/**
- * Rebuild the raw HTTP head of an upgrade request from rawHeaders so the
- * hop-by-hop Connection/Upgrade handshake headers survive verbatim.
- */
+/** Rebuild an upgrade head, retaining only the required upgrade hop. */
 function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): string {
   const lines = [`${req.method} ${req.url ?? '/'} HTTP/${req.httpVersion}`];
+  const connectionListed = connectionListedHeaders(req.headers.connection);
 
+  // REVIEW: Upgrades must sanitize the same proxy credentials and nominated
+  // hop headers as HTTP. Relaying the raw Connection list also incorrectly
+  // nominates our newly generated forwarding metadata as hop-by-hop upstream.
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
-    if (isForwardingHeader(req.rawHeaders[index]!.toLowerCase())) continue;
+    const name = req.rawHeaders[index]!.toLowerCase();
+    if (isForwardingHeader(name) || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
     lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
   }
-
+  lines.push('Connection: Upgrade', `Upgrade: ${req.headers.upgrade}`);
   for (const [name, value] of Object.entries(forwardingHeaders(req, options))) lines.push(`${name}: ${value}`);
 
   return `${lines.join('\r\n')}\r\n\r\n`;
