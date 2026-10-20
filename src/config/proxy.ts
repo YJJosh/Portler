@@ -1,5 +1,6 @@
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS, PROXY_SERVICE_NAME } from '../constants.ts';
 import { isPort } from '../util/guards.ts';
+import { normalizeIpAddress } from '../util/ip.ts';
 import { isObject, normalizeStringArray, optionalString } from './scalars.ts';
 import type { PortlerConfig, ProxyConfig, ProxyRoute, ServiceConfig, UnknownMap } from '../types/index.ts';
 
@@ -58,7 +59,18 @@ export function normalizeProxyConfig(root: UnknownMap, services: Record<string, 
 
   routes.sort((a, b) => b.prefix.length - a.prefix.length);
 
+  const host = optionalString(rawProxy.host, 'proxy.host');
+  if (host !== undefined && (!host || host.trim() !== host)) {
+    throw new Error('proxy.host must be a non-empty bind address without surrounding whitespace');
+  }
+  const trustedProxies = rawProxy.trusted_proxies ?? [];
+  if (!Array.isArray(trustedProxies) || !trustedProxies.every((ip) => typeof ip === 'string' && normalizeIpAddress(ip) !== undefined)) {
+    throw new Error('proxy.trusted_proxies must be an array of exact IPv4 or IPv6 addresses (no hostnames, wildcards or CIDRs)');
+  }
+
   return {
+    host,
+    trustedProxies: trustedProxies.map((ip) => normalizeIpAddress(ip)!),
     port: normalizeProxyPort(rawProxy.port),
     routes,
     allowedHosts: normalizeStringArray(rawProxy.allowed_hosts ?? rawProxy.allowedHosts, 'proxy.allowed_hosts'),
@@ -76,7 +88,7 @@ export function proxyServiceConfig(config: PortlerConfig, proxy: ProxyConfig): S
     port: proxy.port,
     portEnv: [],
     env: {},
-    host: config.host,
+    host: proxy.host ?? config.host,
     urlHost: config.urlHost,
     protocol: config.protocol,
     preferDeclaredPort: proxy.port !== undefined,

@@ -40,6 +40,7 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
     // unconditionally by isAllowedHost; anything else must be opted into via
     // proxy.allowed_hosts.
     allowedHosts: [assignment.urlHost, ...proxy.allowedHosts],
+    trustedProxies: proxy.trustedProxies,
   };
 }
 

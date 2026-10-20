@@ -129,6 +129,10 @@ export interface ProxyRoute {
 }
 
 export interface ProxyConfig {
+  /** Independent bind address; defaults to the root host. */
+  host?: string;
+  /** Exact IP addresses of edges allowed to supply forwarding metadata. */
+  trustedProxies: string[];
   /** Declared port; undefined means `auto` (Portler picks a free port). */
   port?: number;
   /** Routes sorted longest-prefix-first, ready for first-match routing. */
