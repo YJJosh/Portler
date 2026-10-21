@@ -105,6 +105,8 @@ beforeEach(async () => {
     PORTLER_GLOBAL_DIR: path.join(tempDir, 'global'),
     FAKE_KUBECTL_DIR: fakeDir,
     FAKE_KUBECTL_PROJECT: projectHash(projectDir),
+    // The record names the kubeconfig `up k8s` read; the fake kubectl ignores it.
+    KUBECONFIG: path.join(tempDir, 'kubeconfig'),
   };
   delete env.MODE;
 });
@@ -144,11 +146,11 @@ async function takeCalls(): Promise<string[][]> {
 const pinnedTo = (calls: string[][], context: string) => calls.filter((call) => call[0] === '--context' && call[1] === context);
 const mutating = (calls: string[][]) => calls.filter((call) => call.includes('apply') || call.includes('delete') || call.includes('create'));
 
-async function writeRecord(context: string): Promise<void> {
+async function writeRecord(context: string, kubeconfig = env.KUBECONFIG!): Promise<void> {
   await fs.mkdir(path.dirname(launchContextPath(projectDir)), { recursive: true });
   await fs.writeFile(
     launchContextPath(projectDir),
-    JSON.stringify({ version: 1, project: projectDir, context, recordedAt: new Date().toISOString() }),
+    JSON.stringify({ version: 1, project: projectDir, context, kubeconfig, recordedAt: new Date().toISOString() }),
     'utf8',
   );
 }
@@ -213,6 +215,18 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.ok(pinnedTo(await takeCalls(), 'kind-a').some((call) => call.includes('deployment')), 'asked kind-a first');
   });
 
+  // REVIEW: a full `down k8s` there would still delete it by label, so it still runs there.
+  it('counts a Deployment of a service since removed from portler.yml as still running there', async () => {
+    await writeRecord('kind-a');
+    await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['retired']), 'utf8');
+    await setContexts(['kind-a', 'kind-b'], 'kind-b');
+    const up = portler('up', 'k8s', '-d', 'cron');
+    assert.equal(up.status, 1, up.output);
+    assert.match(up.stderr, /still runs in kubectl context "kind-a" \(retired\)/);
+    assert.deepEqual(mutating(await takeCalls()), []);
+    assert.equal(await readLaunchContext(projectDir), 'kind-a');
+  });
+
   it('keeps up k8s from starting elsewhere while that cluster cannot be asked', async () => {
     await writeRecord('kind-a');
     await setContexts(['kind-a', 'kind-b'], 'kind-b');
@@ -256,5 +270,31 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.equal(up.status, 0, up.output);
     assert.match(up.stderr, /"kind-gone", where "portler up k8s" last started this project, no longer exists; starting in "kind-b"/);
     assert.equal(await readLaunchContext(projectDir), 'kind-b');
+  });
+
+  // REVIEW: a shell with another KUBECONFIG does not see the context, but the stack may
+  // still run there: neither forget it nor start elsewhere.
+  it('is kept when this command reads another kubeconfig than up k8s did', { timeout: 60_000 }, async () => {
+    await writeRecord('kind-other', path.join(tempDir, 'other-kubeconfig'));
+    await setContexts(['kind-b'], 'kind-b');
+
+    const down = portler('down', 'k8s');
+    assert.equal(down.status, 1, down.output);
+    assert.match(down.stderr, /kubectl context "kind-other", where "portler up k8s" started this project, is not in this kubeconfig/);
+    assert.match(down.stderr, new RegExp(`KUBECONFIG=${path.join(tempDir, 'other-kubeconfig')}`));
+    assert.equal(await readLaunchContext(projectDir), 'kind-other');
+
+    const up = portler('up', 'k8s', '-d', 'cron');
+    assert.equal(up.status, 1, up.output);
+    assert.match(up.stderr, /will not start it in "kind-b" as well/);
+    assert.deepEqual(mutating(await takeCalls()), []);
+    assert.equal(await readLaunchContext(projectDir), 'kind-other');
+
+    // Relative KUBECONFIG paths name the same file as up k8s's absolute one.
+    env.KUBECONFIG = path.relative(projectDir, path.join(tempDir, 'other-kubeconfig'));
+    const sameFile = portler('down', 'k8s');
+    assert.equal(sameFile.status, 0, sameFile.output);
+    assert.match(sameFile.stderr, /"kind-other", where "portler up k8s" started this project, no longer exists/);
+    assert.equal(await readLaunchContext(projectDir), null);
   });
 });

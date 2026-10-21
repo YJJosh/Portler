@@ -545,6 +545,27 @@ export async function deployedK8sServices(
   } catch {
     return undefined;
   }
+  const names = await projectDeploymentNames(cluster, config, run);
+  return names?.flatMap((name) => {
+    const service = byK8sName.get(name);
+    return service !== undefined ? [service] : [];
+  });
+}
+
+/**
+ * The Kubernetes names of every Deployment this project has in its namespace, including
+ * one of a service since removed from portler.yml. Undefined when kubectl could not say.
+ *
+ * REVIEW: split out of deployedK8sServices for the `up k8s` context check. That one maps
+ * names back to the services portler.yml has now, so a Deployment of a removed service
+ * (which a full `down k8s` still deletes, by label) did not count as "still runs there",
+ * and two services sharing a Kubernetes name made it refuse as "could not ask".
+ */
+export async function projectDeploymentNames(
+  cluster: ClusterInfo,
+  config: PortlerConfig,
+  run: CommandRunner = runCommand,
+): Promise<string[] | undefined> {
   const listed = await run(
     'kubectl',
     kubectlArgs(cluster, ['get', 'deployment', '--namespace', config.k8sNamespace, '--selector', deleteSelector(config), '-o', 'name']),
@@ -554,10 +575,7 @@ export async function deployedK8sServices(
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => /^[\w.-]+\/\S+$/.test(line))
-    .flatMap((resource) => {
-      const service = byK8sName.get(resource.split('/', 2)[1] ?? '');
-      return service !== undefined ? [service] : [];
-    });
+    .map((resource) => resource.split('/', 2)[1]!);
 }
 
 /**

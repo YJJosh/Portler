@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { portlerDir } from '../state/index.ts';
 import { runCommand } from '../util/exec.ts';
@@ -7,7 +8,7 @@ import { isObject, isString } from '../util/guards.ts';
 import { readValidatedJsonFile, writeJsonFile } from '../util/json-file.ts';
 import { clusterForContext, contextExists, detectCluster } from './cluster.ts';
 import type { ClusterInfo } from './cluster.ts';
-import { deployedK8sServices } from './kubectl.ts';
+import { projectDeploymentNames } from './kubectl.ts';
 import type { PortlerConfig } from '../types/index.ts';
 
 /**
@@ -20,6 +21,8 @@ interface LaunchContextFile {
   version: 1;
   project: string;
   context: string;
+  /** The kubeconfig `up k8s` read the context from (see kubeconfigInUse). */
+  kubeconfig: string;
   recordedAt: string;
 }
 
@@ -28,18 +31,60 @@ export function launchContextPath(projectDir: string): string {
 }
 
 function isLaunchContextFile(value: unknown): value is LaunchContextFile {
-  return isObject(value) && value.version === 1 && isString(value.project) && isString(value.context) && value.context !== '';
+  return (
+    isObject(value) &&
+    value.version === 1 &&
+    isString(value.project) &&
+    isString(value.context) &&
+    value.context !== '' &&
+    isString(value.kubeconfig)
+  );
 }
 
-/** The recorded context, or null when no `up k8s` recorded one (or a full `down k8s` has since cleared it). */
-export async function readLaunchContext(projectDir: string): Promise<string | null> {
+function readLaunchRecord(projectDir: string): Promise<LaunchContextFile | null> {
   // A copied checkout may carry the source project's `.portler/`; never act on its cluster.
-  const file = await readValidatedJsonFile(
+  return readValidatedJsonFile(
     launchContextPath(projectDir),
     'Portler Kubernetes context file',
     (value): value is LaunchContextFile => isLaunchContextFile(value) && value.project === projectDir,
   );
-  return file?.context ?? null;
+}
+
+/** The recorded context, or null when no `up k8s` recorded one (or a full `down k8s` has since cleared it). */
+export async function readLaunchContext(projectDir: string): Promise<string | null> {
+  return (await readLaunchRecord(projectDir))?.context ?? null;
+}
+
+/**
+ * The kubeconfig kubectl reads here: KUBECONFIG with each path made absolute (kubectl
+ * resolves them against the working directory), or its default, ~/.kube/config.
+ */
+function kubeconfigInUse(): string {
+  const paths = (process.env.KUBECONFIG ?? '').split(path.delimiter).filter((entry) => entry !== '');
+  if (paths.length === 0) return path.join(os.homedir(), '.kube', 'config');
+  return paths.map((entry) => path.resolve(entry)).join(path.delimiter);
+}
+
+/**
+ * REVIEW: a context missing from the kubeconfig was always taken as gone for good, so
+ * `down k8s` forgot it and released the ports, and `up k8s` started in the active
+ * context as well, while the stack still ran there. That is what a shell with another
+ * KUBECONFIG (a direnv per-directory one, a CI-style temp file) sees. Now only a context
+ * missing from the kubeconfig `up k8s` read counts as gone; from another one this refuses,
+ * which keeps the record and, in `down k8s`, the reservations.
+ *
+ * The error for a recorded context that is not in this kubeconfig, or undefined when it
+ * is missing from the one `up k8s` read too, so it is gone.
+ */
+function outOfSight(record: LaunchContextFile, refusal: string): Error | undefined {
+  const here = kubeconfigInUse();
+  if (record.kubeconfig === here) return undefined;
+  return new Error(
+    `kubectl context "${record.context}", where "portler up k8s" started this project, is not in this kubeconfig ` +
+      `(${here}); "portler up k8s" read it from ${record.kubeconfig}. ${refusal} Run this again with ` +
+      `KUBECONFIG=${record.kubeconfig}. If that cluster is gone for good, "portler clean" forgets it, along with the ` +
+      "rest of this checkout's runtime state.",
+  );
 }
 
 export async function forgetLaunchContext(projectDir: string): Promise<void> {
@@ -52,7 +97,7 @@ export type LaunchCluster =
   | { source: 'recorded'; cluster: ClusterInfo }
   /** Nothing recorded (no `up k8s` since the last full `down k8s`, or one from an older Portler): the active context. */
   | { source: 'active'; cluster: ClusterInfo }
-  /** The recorded context is no longer in the kubeconfig, so nothing can reach that cluster through it. */
+  /** The recorded context is no longer in the kubeconfig `up k8s` read it from, so nothing can reach that cluster through it. */
   | { source: 'gone'; context: string };
 
 /**
@@ -60,9 +105,14 @@ export type LaunchCluster =
  * checks as the active one does, and a failure names it: it may not be the active one.
  */
 export async function launchCluster(projectDir: string, run: CommandRunner = runCommand): Promise<LaunchCluster> {
-  const context = await readLaunchContext(projectDir);
-  if (context === null) return { source: 'active', cluster: await detectCluster(run) };
-  if ((await contextExists(context, run)) === false) return { source: 'gone', context };
+  const record = await readLaunchRecord(projectDir);
+  if (record === null) return { source: 'active', cluster: await detectCluster(run) };
+  const { context } = record;
+  if ((await contextExists(context, run)) === false) {
+    const error = outOfSight(record, 'Portler cannot reach that cluster from here, and will not act on another one.');
+    if (error) throw error;
+    return { source: 'gone', context };
+  }
   try {
     return { source: 'recorded', cluster: await clusterForContext(context, run) };
   } catch (error) {
@@ -74,16 +124,20 @@ export async function launchCluster(projectDir: string, run: CommandRunner = run
  * Record `cluster` as where this project runs, before `up k8s` touches it. A project runs
  * in one cluster at a time: while it still has Deployments in another recorded context,
  * refuse, since `env` and `down k8s` could then only reach one of the two. A recorded
- * context with nothing deployed, or one the kubeconfig no longer has, is replaced.
+ * context with nothing deployed, or one the kubeconfig `up k8s` read no longer has, is
+ * replaced.
  */
 export async function recordLaunchContext(
   config: PortlerConfig,
   cluster: ClusterInfo,
   run: CommandRunner = runCommand,
 ): Promise<void> {
-  const recorded = await readLaunchContext(config.projectDir);
-  if (recorded !== null && recorded !== cluster.context) {
+  const record = await readLaunchRecord(config.projectDir);
+  if (record !== null && record.context !== cluster.context) {
+    const recorded = record.context;
     if ((await contextExists(recorded, run)) === false) {
+      const error = outOfSight(record, `Portler will not start it in "${cluster.context}" as well while it may still run there.`);
+      if (error) throw error;
       process.stderr.write(
         `[portler] kubectl context "${recorded}", where "portler up k8s" last started this project, no longer exists; ` +
           `starting in "${cluster.context}"\n`,
@@ -92,7 +146,7 @@ export async function recordLaunchContext(
       let deployed: string[] | undefined;
       let reason = 'kubectl could not list its Deployments';
       try {
-        deployed = await deployedK8sServices(await clusterForContext(recorded, run), config, run);
+        deployed = await projectDeploymentNames(await clusterForContext(recorded, run), config, run);
       } catch (error) {
         reason = (error as Error).message;
       }
@@ -119,6 +173,7 @@ export async function recordLaunchContext(
     version: 1,
     project: config.projectDir,
     context: cluster.context,
+    kubeconfig: kubeconfigInUse(),
     recordedAt: new Date().toISOString(),
   };
   await writeJsonFile(launchContextPath(config.projectDir), file);
