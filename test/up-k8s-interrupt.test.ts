@@ -52,6 +52,7 @@ if (args.includes('current-context')) {
     forever();
   }
 } else if (args.includes('get') && args.includes('namespace')) {
+  fs.writeFileSync(path.join(dir, 'namespace.checked'), 'yes');
   // REVIEW: cancellation must reach API reads too, not just rollouts and sleeps.
   const phase = args.some((arg) => arg.includes('jsonpath'));
   const phaseMarker = path.join(dir, 'phase-read');
@@ -159,6 +160,9 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
         await waitFor(path.join(fakeDir, marker), run);
         const hung = Number(await fs.readFile(path.join(fakeDir, marker), 'utf8'));
         tracked.add(hung);
+        // REVIEW: a spawned kubectl does not prove the parent's asynchronous pid
+        // write finished; wait for that observable state rather than racing it.
+        if (scenario === 'forward') await waitFor(path.join(projectDir, '.portler', 'pids.json'), run);
         for (const info of Object.values((await readPids(projectDir))?.services ?? {})) tracked.add(info.pid);
         if (scenario === 'forward') assert.ok(tracked.size > 1, `the port-forward supervisor was recorded:\n${run.output}`);
         assert.deepEqual(await deployed(), ['api']);
@@ -195,16 +199,16 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
 }
 
 it('foreground up k8s stops waiting for a held lifecycle lock on SIGINT', { timeout: 20_000 }, async () => {
-  const { dir, projectDir, env, calls } = await fixture('portler-k8s-interrupt-lock-');
+  const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-lock-');
+  // REVIEW: hold the lock before launching; synchronize on a startup API read,
+  // not a fixed sleep that can signal before handlers exist on a busy CI host.
+  const lockDir = path.join(projectDir, '.portler', 'lifecycle.lock');
+  await fs.mkdir(lockDir, { recursive: true });
+  const owner = { pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token: 'held-by-test' };
+  await fs.writeFile(path.join(lockDir, 'owner'), JSON.stringify(owner));
   const run = startUp(projectDir, env);
   try {
-    // Another live command (this test process) holds the lock.
-    const lockDir = path.join(projectDir, '.portler', 'lifecycle.lock');
-    await fs.mkdir(lockDir, { recursive: true });
-    const owner = { pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token: 'held-by-test' };
-    await fs.writeFile(path.join(lockDir, 'owner'), JSON.stringify(owner));
-    // Long enough for the CLI to check the cluster and start waiting.
-    await sleep(2_000);
+    await waitFor(path.join(fakeDir, 'namespace.checked'), run);
     assert.equal(run.child.exitCode, null, run.output);
     const sentAt = Date.now();
     run.child.kill('SIGINT');
