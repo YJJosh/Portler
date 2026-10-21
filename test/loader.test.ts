@@ -258,3 +258,36 @@ describe('loadBaseEnv', () => {
     assert.deepEqual(await loadBaseEnv(config, { allowMissing: true }), { PRESENT: '1' });
   });
 });
+
+describe('proxy bind and trust configuration', () => {
+  const services = 'services:\n  web:\n    command: node server.js\n    port: 3000\n';
+
+  it('defaults to the root host and trusts no peers', async () => {
+    const dir = await makeProject({ 'portler.yml': `${services}host: 127.0.0.1\nproxy:\n  routes: {/: web}\n` });
+    const config = await loadConfig(dir);
+    assert.equal(config.proxy?.host, undefined);
+    assert.deepEqual(config.proxy?.trustedProxies, []);
+  });
+
+  it('loads an independent bind and canonical exact-IP trust allowlist', async () => {
+    const dir = await makeProject({ 'portler.yml': `${services}host: 127.0.0.1\nproxy:\n  host: 0.0.0.0\n  trusted_proxies: [127.0.0.1, "::ffff:192.0.2.1", "2001:0db8:0:0::1"]\n  routes: {/: web}\n` });
+    const config = await loadConfig(dir);
+    assert.equal(config.proxy?.host, '0.0.0.0');
+    assert.equal(config.services.web?.host, '127.0.0.1');
+    assert.deepEqual(config.proxy?.trustedProxies, ['127.0.0.1', '192.0.2.1', '2001:db8::1']);
+  });
+
+  it('rejects non-IP trust entries and non-array allowlists', async () => {
+    for (const value of ['["*"]', '[localhost]', '[127.0.0.0/8]', '["::1/128"]', '["[::1]"]', '["fe80::1%lo0"]', '["127.0.0.1:443"]', '[" 127.0.0.1"]', '[42]', '127.0.0.1', 'true']) {
+      const dir = await makeProject({ 'portler.yml': `${services}proxy:\n  routes: {/: web}\n  trusted_proxies: ${value}\n` });
+      await assert.rejects(loadConfig(dir), /proxy.trusted_proxies must be an array of exact IPv4 or IPv6 addresses/, value);
+    }
+  });
+
+  it('rejects empty and non-string proxy bind addresses', async () => {
+    for (const value of ['""', '42', '" 0.0.0.0 "']) {
+      const dir = await makeProject({ 'portler.yml': `${services}proxy:\n  routes: {/: web}\n  host: ${value}\n` });
+      await assert.rejects(loadConfig(dir), /proxy.host must be/);
+    }
+  });
+});
