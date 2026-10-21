@@ -16,14 +16,18 @@ import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNam
 import { validateK8sMode } from './up-k8s.ts';
 
 /**
- * A cached assignment as a fresh allocation for this config would give it: a service that
- * is no container here gets no container name or image. state.json keeps whichever run mode
- * last allocated (an `env docker` view, or an `up docker` that has since stopped), and the
- * local view must not name that container.
+ * A cached assignment as a fresh allocation for this config would give it: only the port
+ * comes from state.json, the container fields from this config. state.json keeps whichever
+ * run mode last allocated (an `env docker` view, or an `up docker` that has since stopped):
+ * the local view must not name that container, and a service with both a top-level `image`
+ * and a `docker.image` keeps one container name in both modes, so the cache check below
+ * passes with the other mode's image. A partial `up` also rewrites state.json with only its
+ * own `--image` pins; a caller that shows a running container's pin applies it to `config`.
  */
 function asAllocatedFor(config: PortlerConfig, name: string, assignment: ServiceAssignment): ServiceAssignment {
   const service = config.services[name];
-  if (!service || service.docker) return assignment;
+  if (!service) return assignment;
+  if (service.docker) return { ...assignment, containerName: service.docker.containerName, image: service.docker.image };
   const copy = { ...assignment };
   delete copy.containerName;
   delete copy.image;
@@ -197,18 +201,9 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
       else validateK8sMode(config, launched);
     }
 
-    // Only the ports come from state.json. Its container fields can belong to another view: a
-    // service with both a top-level `image` and a `docker.image` keeps one container name in
-    // both modes, so the cache check passes with the other mode's image, and a partial `up`
-    // rewrites state.json with only its own pins. Show what a fresh allocation for this view
-    // would hold; `config` already carries the running containers' pins.
-    const { assignments: cached } = await ensureAssignments(config);
-    const assignments: Assignments = Object.assign(Object.create(null) as Assignments, cached);
-    for (const name of Object.keys(assignments)) {
-      const docker = config.services[name]?.docker;
-      if (docker) assignments[name] = { ...assignments[name], containerName: docker.containerName, image: docker.image };
-    }
-    const generatedEnv = buildGeneratedEnv(assignments);
+    // `config` already carries the running containers' pins, so the assignments name the
+    // images they run.
+    const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);

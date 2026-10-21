@@ -223,6 +223,54 @@ describe('env for a running service', () => {
     assert.equal(value(plain.stdout, 'PORTLER_API_CONTAINER'), value(docker.stdout, 'PORTLER_API_CONTAINER'));
   });
 
+  describe('setup and k8s render after another view cached the image', () => {
+    // api keeps one container name in every view, so state.json passes the cache check
+    // with whichever image the last allocation stored.
+    const IMAGES = `services:
+  api:
+    image: example/api-base
+    port: 5000
+    docker:
+      image: example/api-docker
+  app:
+    command: node app.js
+    env: {API_IMAGE: "\${api.image}"}
+    docker: {image: example/app}
+    setup:
+      - echo "$PORTLER_API_IMAGE $API_IMAGE" > seen
+`;
+    const portler = (...args: string[]) =>
+      spawnSync(process.execPath, ['--experimental-strip-types', cli, ...args], { cwd: projectDir, env, encoding: 'utf8' });
+
+    beforeEach(async () => {
+      await fs.writeFile(path.join(projectDir, 'portler.yml'), IMAGES, 'utf8');
+    });
+
+    for (const [mode, cachedBy, expected] of [
+      ['local', 'docker', 'example/api-base'],
+      ['docker', 'local', 'example/api-docker'],
+    ] as const) {
+      it(`setup ${mode} resolves the ${mode} image after env ${cachedBy} cached the other one`, async () => {
+        const cached = portler('env', ...(cachedBy === 'docker' ? ['docker'] : []), 'api');
+        assert.equal(cached.status, 0, cached.stderr);
+        assert.notEqual(value(cached.stdout, 'PORTLER_API_IMAGE'), expected);
+        const setup = portler('setup', ...(mode === 'docker' ? ['docker'] : []), 'app');
+        assert.equal(setup.status, 0, setup.stderr);
+        assert.equal(await fs.readFile(path.join(projectDir, 'seen'), 'utf8'), `${expected} ${expected}\n`);
+      });
+    }
+
+    it('k8s render resolves the k8s image after env cached the plain one', async () => {
+      const cached = portler('env', 'api');
+      assert.equal(value(cached.stdout, 'PORTLER_API_IMAGE'), 'example/api-base');
+      const render = portler('k8s', 'render', 'app');
+      assert.equal(render.status, 0, render.stderr);
+      assert.match(render.stdout, /name: API_IMAGE\n\s+value: example\/api-docker\n/);
+      assert.match(render.stdout, /name: PORTLER_API_IMAGE\n\s+value: example\/api-docker\n/);
+      assert.doesNotMatch(render.stdout, /api-base/);
+    });
+  });
+
   it('refuses a typed k8s mode for a service that up k8s would refuse', async () => {
     await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
     command: node api.js
