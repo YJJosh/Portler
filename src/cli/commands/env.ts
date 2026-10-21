@@ -4,7 +4,7 @@ import { applyProduction, productionServices } from '../../config/production.ts'
 import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
-import { deployedK8sServices, detectCluster, k8sManifestDir, k8sServiceNames, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
+import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
 import { liveServiceNames, readPids, serviceLiveness } from '../../process/index.ts';
@@ -16,14 +16,18 @@ import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNam
 import { validateK8sMode } from './up-k8s.ts';
 
 /**
- * A cached assignment as a fresh allocation for this config would give it: a service that
- * is no container here gets no container name or image. state.json keeps whichever run mode
- * last allocated (an `env docker` view, or an `up docker` that has since stopped), and the
- * local view must not name that container.
+ * A cached assignment as a fresh allocation for this config would give it: only the port
+ * comes from state.json, the container fields from this config. state.json keeps whichever
+ * run mode last allocated (an `env docker` view, or an `up docker` that has since stopped):
+ * the local view must not name that container, and a service with both a top-level `image`
+ * and a `docker.image` keeps one container name in both modes, so the cache check below
+ * passes with the other mode's image. A partial `up` also rewrites state.json with only its
+ * own `--image` pins; a caller that shows a running container's pin applies it to `config`.
  */
 function asAllocatedFor(config: PortlerConfig, name: string, assignment: ServiceAssignment): ServiceAssignment {
   const service = config.services[name];
-  if (!service || service.docker) return assignment;
+  if (!service) return assignment;
+  if (service.docker) return { ...assignment, containerName: service.docker.containerName, image: service.docker.image };
   const copy = { ...assignment };
   delete copy.containerName;
   delete copy.image;
@@ -110,10 +114,11 @@ function upCommand(mode: RunMode, prod: boolean): string {
  * Whether the cluster runs a service that pids.json does not show as running. `up k8s`
  * records a service only through its port-forward, so one without a port leaves no
  * entry, and an older entry that has stopped (a local launch that exited) says nothing
- * about a later `up k8s`: the cluster is the only witness. kubectl is only asked when
- * this checkout has rendered Kubernetes manifests (every render writes the namespace
- * file), so a project that never used k8s mode never waits on it. Undefined when the
- * cluster could not be asked.
+ * about a later `up k8s`: the cluster is the only witness. That is the cluster `up k8s`
+ * deployed to, not whichever context is active now. kubectl is only asked when this
+ * checkout has rendered Kubernetes manifests (every render writes the namespace file),
+ * so a project that never used k8s mode never waits on it. Undefined when the cluster
+ * could not be asked, including when its recorded context no longer exists.
  */
 async function deployedInCluster(config: PortlerConfig, serviceName: string): Promise<boolean | undefined> {
   if (!existsSync(path.join(k8sManifestDir(config.projectDir), NAMESPACE_MANIFEST_FILE))) return false;
@@ -123,7 +128,9 @@ async function deployedInCluster(config: PortlerConfig, serviceName: string): Pr
     return false;
   }
   try {
-    const deployed = await deployedK8sServices(await detectCluster(), config);
+    const launch = await launchCluster(config.projectDir);
+    if (launch.source === 'gone') return undefined;
+    const deployed = await deployedK8sServices(launch.cluster, config);
     return deployed === undefined ? undefined : deployed.includes(serviceName);
   } catch {
     return undefined;
@@ -197,18 +204,9 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
       else validateK8sMode(config, launched);
     }
 
-    // Only the ports come from state.json. Its container fields can belong to another view: a
-    // service with both a top-level `image` and a `docker.image` keeps one container name in
-    // both modes, so the cache check passes with the other mode's image, and a partial `up`
-    // rewrites state.json with only its own pins. Show what a fresh allocation for this view
-    // would hold; `config` already carries the running containers' pins.
-    const { assignments: cached } = await ensureAssignments(config);
-    const assignments: Assignments = Object.assign(Object.create(null) as Assignments, cached);
-    for (const name of Object.keys(assignments)) {
-      const docker = config.services[name]?.docker;
-      if (docker) assignments[name] = { ...assignments[name], containerName: docker.containerName, image: docker.image };
-    }
-    const generatedEnv = buildGeneratedEnv(assignments);
+    // `config` already carries the running containers' pins, so the assignments name the
+    // images they run.
+    const { assignments, generatedEnv } = await ensureAssignments(config);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);

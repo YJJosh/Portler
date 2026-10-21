@@ -25,6 +25,13 @@ The override must name the exact context, so a stale `export` cannot silently au
 
 Portler also pins `--context` on every `kubectl` call it makes, so switching contexts while a command is running cannot redirect an apply or a delete to another cluster.
 
+### Later commands use the context `up k8s` deployed to
+
+`up k8s` records the context it deploys to in `.portler/k8s-context.json`. Switching contexts afterwards does not move the project: [`env`](/reference/cli/env) asks that cluster whether a service runs there, and [`down k8s`](/reference/cli/down) deletes there, after the same local-cluster checks as an active context gets. A full `down k8s` clears the record. So does an `up k8s` that stops everything it started (a failed start, Ctrl-C, or the end of a foreground run), unless an earlier `up k8s` recorded the same context. With no record both use the active context, as for a stack started by an older Portler.
+
+A project runs in one cluster at a time. While it still has Deployments in the recorded cluster and namespace (including those of a service since removed from `portler.yml`, or in a namespace `k8s_namespace` no longer names), `up k8s` in another context refuses: `portler down k8s` them there first, or switch back. It also refuses when it cannot ask that cluster; if the cluster is gone for good, `portler clean` forgets it along with the rest of `.portler/`. The record also names the kubeconfig `up k8s` read (`KUBECONFIG`, or `~/.kube/config`). A recorded context that is no longer in that kubeconfig can never be reached through it again, so `up k8s` replaces it and `down k8s` forgets it, with a warning that nothing was deleted there.
+When a command reads another kubeconfig, even one with an identically named context, that name may refer to a different cluster: `env` says it could not ask the cluster, and `up k8s` and `down k8s` refuse and name the `KUBECONFIG` to run them with.
+
 ### The endpoint is checked too, not just the name
 
 A context name is a convention, not a fact: anything can be *named* `minikube`, and `kubectl config rename-context` takes two seconds. So Portler resolves the context's **API server endpoint** and checks that as well. Both gates must pass, and the endpoint gate **fails closed**.
@@ -60,7 +67,7 @@ An endpoint Portler **cannot read** (kubectl reports no server, or an unparseabl
 ## What `up k8s` does
 
 1. **Builds Docker images** for services with a `build` config (same resolution as `up docker`: the service's `docker:` key wins over top-level `image`/`build`).
-2. **Resolves and validates the cluster** from the active kubectl context, then loads locally built images into it (`kind load docker-image` / `k3d image import` / `minikube image load`; Docker Desktop, Rancher Desktop, OrbStack and colima share the host Docker daemon). No registry push is needed. Registry images like `postgres:16-alpine` are pulled by the cluster itself.
+2. **Resolves and validates the cluster** from the active kubectl context and [records it](#later-commands-use-the-context-up-k8s-deployed-to), then loads locally built images into it (`kind load docker-image` / `k3d image import` / `minikube image load`; Docker Desktop, Rancher Desktop, OrbStack and colima share the host Docker daemon). No registry push is needed. Registry images like `postgres:16-alpine` are pulled by the cluster itself.
 3. **Generates manifests** into `.portler/k8s/`: a Namespace, plus a Deployment, a Service (when the service has a `port`), and a PersistentVolumeClaim (when `k8s.volume` is set) per service.
 4. **Applies one dependency level at a time**: a service's manifests are not applied until every dependency's pods have rolled out, stayed stable (ready with no new restarts for a few seconds), and answered through their port-forward — mirroring local and Docker startup ordering.
 5. **Port-forwards each in-cluster Service** to its Portler-assigned localhost port, so generated URLs and env values keep working exactly like local and Docker modes. The supervisor re-establishes the forward when a pod restart kills it (capped backoff, a few retries) and keeps running after `up k8s -d` exits. Before reporting the stack up, Portler re-probes every forwarded port over TCP and fails loudly if one refuses connections.

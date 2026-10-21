@@ -55,8 +55,9 @@ Options:
                           digest reference CI pushed)
   -h, --help              Show help
 
-Foreground "up" (local/Docker): Ctrl-C or SIGTERM during startup cancels setup
-and readiness, stops only this run's services and releases their ports (exit 130/143).
+Foreground "up": Ctrl-C or SIGTERM during startup cancels setup, image builds and
+readiness waits, stops only this run's services (in k8s mode also deleting what it
+applied) and releases their ports (exit 130/143).
 
 "down" only signals a process group whose leader's recorded start token still
 matches, so a recycled pid is never killed. "--force" also signals groups whose
@@ -76,6 +77,11 @@ entries are kept, and "ps" reports "running (group)" with unverified ownership.
 and containers whose liveness cannot be checked; only --force stops them first.
 
 "up k8s" also checks container liveness for overlaps; "env" preserves their ports.
+
+"env" and "down k8s" use the kubectl context "up k8s" deployed to, even after a
+context switch; a full "down k8s" clears it. "up k8s" refuses another context
+while the project still has Deployments there, or that cluster cannot be asked.
+A recorded launch also requires the original KUBECONFIG; names can collide across files.
 
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 

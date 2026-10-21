@@ -258,7 +258,15 @@ export async function detectCluster(run: CommandRunner = runCommand): Promise<Cl
     );
   }
 
-  const context = current.stdout.trim();
+  return clusterForContext(current.stdout.trim(), run);
+}
+
+/**
+ * Verify a named kubectl context the way detectCluster verifies the active one, BY NAME
+ * and BY ENDPOINT, and pin it. Used for the context `up k8s` recorded, which need not be
+ * the active one any more.
+ */
+export async function clusterForContext(context: string, run: CommandRunner = runCommand): Promise<ClusterInfo> {
   const cluster = resolveCluster(context, process.env[CONTEXT_OVERRIDE_ENV]);
   const server = await readContextServer(context, run);
 
@@ -268,27 +276,37 @@ export async function detectCluster(run: CommandRunner = runCommand): Promise<Cl
 }
 
 /**
+ * Whether the kubeconfig still has this context: false only when kubectl lists its
+ * contexts and this one is not among them. Undefined when kubectl could not list them.
+ */
+export async function contextExists(context: string, run: CommandRunner = runCommand): Promise<boolean | undefined> {
+  const listed = await run('kubectl', ['config', 'get-contexts', '-o', 'name']);
+  if (listed.code !== 0) return undefined;
+  return listed.stdout.split('\n').some((line) => line.trim() === context);
+}
+
+/**
  * Make a locally built Docker image visible to the cluster. kind/k3d/minikube
  * run their own container runtime, so images must be loaded explicitly; Docker
  * Desktop, Rancher Desktop, OrbStack and colima share the host Docker daemon,
  * so nothing is needed. No registry push is ever required.
  */
-export async function loadImageIntoCluster(cluster: ClusterInfo, image: string): Promise<void> {
+export async function loadImageIntoCluster(cluster: ClusterInfo, image: string, signal?: AbortSignal): Promise<void> {
   switch (cluster.type) {
     case 'kind': {
       const args = ['load', 'docker-image', image];
       if (cluster.name) args.push('--name', cluster.name);
-      await runStreaming('kind', args, 'portler');
+      await runStreaming('kind', args, 'portler', undefined, signal);
       return;
     }
     case 'k3d': {
       const args = ['image', 'import', image];
       if (cluster.name) args.push('--cluster', cluster.name);
-      await runStreaming('k3d', args, 'portler');
+      await runStreaming('k3d', args, 'portler', undefined, signal);
       return;
     }
     case 'minikube':
-      await runStreaming('minikube', ['image', 'load', image], 'portler');
+      await runStreaming('minikube', ['image', 'load', image], 'portler', undefined, signal);
       return;
     case 'docker-desktop':
     case 'rancher-desktop':

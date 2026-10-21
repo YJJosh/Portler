@@ -22,12 +22,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   const child = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
   const forward = (signal: NodeJS.Signals): void => {
     options.onSignal?.(signal);
-    if (!child.pid) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
+    if (child.pid) signalOwnedProcessGroup(child.pid, signal);
   };
   const interrupt = (): void => forward('SIGINT');
   const terminate = (): void => forward('SIGTERM');
@@ -51,13 +46,29 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     });
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
-    if (drainMs !== undefined && child.pid) await drainGroup(child.pid, drainMs);
+    if (drainMs !== undefined && child.pid) await drainOwnedProcessGroup(child.pid, drainMs);
     return code;
   } finally {
     clearTimeout(killTimer);
     options.signal?.removeEventListener('abort', abort);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', terminate);
+  }
+}
+
+/**
+ * Signal a process group this process spawned and still holds. A group that is gone is
+ * fine, and so is EPERM: macOS returns it for a group whose members are all zombies
+ * waiting for their reaper, which happens when a cancelled command's helper has just
+ * been killed. A throw here would escape a signal handler, an abort listener or a timer
+ * as an uncaught exception and end Portler before its rollback.
+ */
+export function signalOwnedProcessGroup(pgid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pgid, signal);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ESRCH' && code !== 'EPERM') throw error;
   }
 }
 
@@ -73,18 +84,16 @@ function groupAlive(pgid: number): boolean {
  * so a platform that watches our pid does not cut the app off the moment the
  * shell dies; what is still there at the deadline is killed.
  */
-async function drainGroup(pgid: number, deadlineMs: number): Promise<void> {
+// Also drains cancelled startup commands (src/util/exec.ts), whose helpers can outlive
+// kubectl or docker too. Call it only for a group this process spawned.
+export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): Promise<void> {
   if (!groupAlive(pgid)) return;
   const deadline = Date.now() + deadlineMs;
   process.stderr.write(`[portler] waiting up to ${deadlineMs} ms for the rest of the process group to exit\n`);
   while (groupAlive(pgid)) {
     if (Date.now() >= deadline) {
       process.stderr.write('[portler] process group still running at the deadline; killing it\n');
-      try {
-        process.kill(-pgid, 'SIGKILL');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
+      signalOwnedProcessGroup(pgid, 'SIGKILL');
       // SIGKILL is not instant, and under a PID 1 that does not reap orphans a
       // killed member stays in the group as a zombie. Confirm the group is gone
       // before returning, and say so when it is not: the exit code stays the

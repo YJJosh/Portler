@@ -68,7 +68,8 @@ path in the PR description.
   - Portler spawned it in this same process and still holds the child:
     signal forwarding and the drain deadline in `runShell`
     (`src/process/shell.ts`), readiness-command timeouts
-    (`src/readiness/index.ts`), the port-forward child in
+    (`src/readiness/index.ts`), cancellable startup command trees (kubectl, builds
+    and image loads in `src/util/exec.ts`), the port-forward child in
     `src/k8s/forward-supervisor.ts`.
   - For a recorded service, the leader's start token matches now (`maySignal`
     in `src/process/identity.ts`), or matched earlier in the same stop while

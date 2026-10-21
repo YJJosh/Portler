@@ -743,6 +743,46 @@ export async function startPhase(
   return { children, teardown, dependentsAlive, detached: options.detach };
 }
 
+/** Foreground startup cancellation, as `up` and `up k8s` install it. */
+export interface StartupCancellation {
+  /** Aborted (with the signal's name as reason) on the first SIGINT/SIGTERM; none for detached startup. */
+  signal: AbortSignal | undefined;
+  /** 130 or 143 once a signal arrived. */
+  exitCode: () => number | undefined;
+  /** Remove the handlers; call it right before the foreground supervisor installs its own. */
+  unlisten: () => void;
+}
+
+/**
+ * Detached startup deliberately retains its existing signal behavior. Foreground
+ * handlers must exist before startup can spawn anything, not only once ready.
+ */
+export function listenForStartupCancellation(detach: boolean): StartupCancellation {
+  if (detach) return { signal: undefined, exitCode: () => undefined, unlisten: () => {} };
+  const cancellation = new AbortController();
+  let signalCode: number | undefined;
+  const cancel = (signal: 'SIGINT' | 'SIGTERM'): void => {
+    if (signalCode !== undefined) return;
+    signalCode = signal === 'SIGINT' ? 130 : 143;
+    process.stderr.write(`[portler] received ${signal}, stopping services...\n`);
+    // Like the running supervisor: a second Ctrl-C during the rollback gets the
+    // default handling, so a stuck rollback can still be interrupted.
+    unlisten();
+    // Carry the original signal through to an active setup shell, or to the
+    // docker/kubectl command a Kubernetes start is waiting on.
+    cancellation.abort(signal);
+  };
+  const interrupt = (): void => cancel('SIGINT');
+  const terminate = (): void => cancel('SIGTERM');
+  const unlisten = (): void => {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', terminate);
+  };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
+  return { signal: cancellation.signal, exitCode: () => signalCode, unlisten };
+}
+
 /**
  * `up`/`restart` start engine with the lifecycle lock around each DECISION.
  *
@@ -762,68 +802,47 @@ export async function startServices(
   requestedRootNames: string[],
   options: StartOptions,
 ): Promise<number> {
-  // Detached startup deliberately retains its existing signal behavior. Foreground
-  // handlers must exist before startPhase can spawn anything, not only once ready.
-  const cancellation = options.detach ? undefined : new AbortController();
-  let signalCode: number | undefined;
-  const cancel = (signal: 'SIGINT' | 'SIGTERM'): void => {
-    if (signalCode !== undefined) return;
-    signalCode = signal === 'SIGINT' ? 130 : 143;
-    process.stderr.write(`[portler] received ${signal}, stopping services...\n`);
-    // Like the running supervisor: a second Ctrl-C during the rollback gets the
-    // default handling, so a stuck rollback can still be interrupted.
-    unlisten();
-    // Carry the original signal through to an active setup shell.
-    cancellation!.abort(signal);
-  };
-  const interrupt = (): void => cancel('SIGINT');
-  const terminate = (): void => cancel('SIGTERM');
-  const unlisten = (): void => {
-    process.off('SIGINT', interrupt);
-    process.off('SIGTERM', terminate);
-  };
-  if (cancellation) {
-    process.on('SIGINT', interrupt);
-    process.on('SIGTERM', terminate);
-  }
+  const cancellation = listenForStartupCancellation(options.detach);
+  const { signal } = cancellation;
   try {
     // The signal also ends a wait for a lock another command holds, so Ctrl-C
     // exits before entering the critical section instead of after it.
     const stack = await withLifecycleLock(rawConfig.projectDir, async () => {
       const stack = await startPhase(rawConfig, mode, requestedRootNames, {
         ...options,
-        ...(cancellation ? { signal: cancellation.signal } : {}),
+        ...(signal ? { signal } : {}),
       });
       // A signal can arrive after the last startup check while state/lock I/O
       // completes. Still roll back under this same lock, never racing a start.
-      if (cancellation?.signal.aborted) {
+      if (signal?.aborted) {
         await stack.teardown({ keepAdopted: false });
-        cancellation.signal.throwIfAborted();
+        signal.throwIfAborted();
       }
       return stack;
-    }, { signal: cancellation?.signal });
+    }, { signal });
 
     if (stack.detached) return 0;
-    if (cancellation?.signal.aborted) {
+    if (signal?.aborted) {
       // The lock's release also awaits I/O; this narrow handoff still belongs
       // to startup, but now needs the normal teardown lock again.
       await withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown({ keepAdopted: false }));
-      return signalCode!;
+      return cancellation.exitCode()!;
     }
 
     // No await between removing our handlers and the supervisor installing its
     // own: post-start identity/adoption behavior remains exactly as before.
-    unlisten();
+    cancellation.unlisten();
     return waitForForegroundServices(
       stack.children,
       (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
       { dependentsAlive: stack.dependentsAlive },
     );
   } catch (error) {
-    if (signalCode !== undefined) return signalCode;
+    const exitCode = cancellation.exitCode();
+    if (exitCode !== undefined) return exitCode;
     throw error;
   } finally {
-    unlisten();
+    cancellation.unlisten();
   }
 }
 

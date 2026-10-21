@@ -7,7 +7,8 @@
  * means "nothing to remove". Injecting a CommandRunner also lets the tests
  * assert the exact argv and drive the control flow without a real daemon.
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { drainOwnedProcessGroup, signalOwnedProcessGroup } from '../process/shell.ts';
 
 export interface CommandResult {
   /** Exit code; -1 when the binary could not be executed at all. */
@@ -16,12 +17,44 @@ export interface CommandResult {
   stderr: string;
 }
 
-export type CommandRunner = (command: string, args: string[], input?: string) => Promise<CommandResult>;
+export type CommandRunner = (command: string, args: string[], input?: string, signal?: AbortSignal) => Promise<CommandResult>;
 
-/** Run a command, capturing its output. Never rejects — failures come back as a result. */
-export const runCommand: CommandRunner = (command, args, input) => {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+/**
+ * On abort, signal the child's whole process group, then SIGKILL it after 2 s. Not just
+ * the leader: a credential helper can keep kubectl's pipes open after kubectl exits, and a
+ * build helper must be over before the rollback starts. Callers that pass a signal spawn
+ * the child as the leader of its own group, and we still hold it, so the group is ours.
+ * The returned cleanup keeps the SIGKILL armed until the cancelled group has drained.
+ */
+export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => Promise<void> {
+  if (!signal) return async () => {};
+  const forward = (name: NodeJS.Signals): void => {
+    if (child.pid) signalOwnedProcessGroup(child.pid, name);
+  };
+  let killTimer: NodeJS.Timeout | undefined;
+  const abort = (): void => {
+    forward(signal.reason === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
+    killTimer = setTimeout(() => forward('SIGKILL'), 2_000);
+  };
+  signal.addEventListener('abort', abort, { once: true });
+  return async () => {
+    signal.removeEventListener('abort', abort);
+    try {
+      // A helper may close its inherited pipes yet keep running. Do not finish a
+      // cancelled command (and begin rollback) until those group members stop too.
+      if (signal.aborted && child.pid) await drainOwnedProcessGroup(child.pid, 2_000);
+    } finally {
+      clearTimeout(killTimer);
+    }
+  };
+}
+
+/** Run a command, capturing output. Failures are results; only cancellation rejects, after exit. */
+export const runCommand: CommandRunner = (command, args, input, signal) => {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { detached: signal !== undefined, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const cleanup = stopChildOnAbort(child, signal);
     let stdout = '';
     let stderr = '';
 
@@ -32,8 +65,20 @@ export const runCommand: CommandRunner = (command, args, input) => {
       stderr += chunk.toString();
     });
 
-    child.on('error', (error) => resolve({ code: -1, stdout: '', stderr: `failed to run ${command}: ${error.message}` }));
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on('error', (error) => {
+      void cleanup().then(
+        () => rejectOrResolve({ code: -1, stdout: '', stderr: `failed to run ${command}: ${error.message}` }),
+        reject,
+      );
+    });
+    child.on('close', (code) => {
+      void cleanup().then(() => rejectOrResolve({ code: code ?? 1, stdout, stderr }), reject);
+    });
+
+    function rejectOrResolve(result: CommandResult): void {
+      if (signal?.aborted) reject(signal.reason);
+      else resolve(result);
+    }
 
     if (input !== undefined && child.stdin) {
       child.stdin.on('error', () => {

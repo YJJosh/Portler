@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { prefixStream } from '../process/index.ts';
+import { stopChildOnAbort } from '../util/exec.ts';
 
 export { runCommand } from '../util/exec.ts';
 export type { CommandResult, CommandRunner } from '../util/exec.ts';
@@ -10,27 +11,38 @@ function commandLine(command: string, args: string[]): string {
 
 /**
  * Run a command streaming its output with a `[prefix]` per line (like service
- * logs), rejecting when it exits non-zero.
+ * logs), rejecting when it exits non-zero. An aborted `signal` stops it, and the
+ * promise rejects with the signal's reason once it and its process group have exited: a
+ * cancelled apply must be over before a rollback deletes what it applied.
  */
-export function runStreaming(command: string, args: string[], prefix: string, cwd?: string): Promise<void> {
+export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, detached: signal !== undefined, stdio: ['ignore', 'pipe', 'pipe'] });
+    const cleanup = stopChildOnAbort(child, signal);
 
     if (child.stdout) prefixStream(prefix, child.stdout, process.stdout);
     if (child.stderr) prefixStream(prefix, child.stderr, process.stderr);
 
-    child.on('error', (error) => reject(new Error(`failed to run ${command}: ${error.message}`)));
-    child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}`));
+    child.on('error', (error) => {
+      void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
+    });
+    child.on('close', (code) => {
+      void cleanup().then(() => {
+        if (signal?.aborted) reject(signal.reason);
+        else if (code === 0) resolve();
+        else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}`));
+      }, reject);
     });
   });
 }
 
-/** Run a command and capture its trimmed stdout, rejecting on non-zero exit. */
-export function captureOutput(command: string, args: string[]): Promise<string> {
+/** Run a command and capture its trimmed stdout, rejecting on non-zero exit. `signal` as for runStreaming. */
+export function captureOutput(command: string, args: string[], signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { detached: signal !== undefined, stdio: ['ignore', 'pipe', 'pipe'] });
+    const cleanup = stopChildOnAbort(child, signal);
     let stdout = '';
     let stderr = '';
 
@@ -41,10 +53,15 @@ export function captureOutput(command: string, args: string[]): Promise<string> 
       stderr += chunk.toString();
     });
 
-    child.on('error', (error) => reject(new Error(`failed to run ${command}: ${error.message}`)));
-    child.on('exit', (code) => {
-      if (code === 0) resolve(stdout.trim());
-      else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}\n${stderr.trim()}`));
+    child.on('error', (error) => {
+      void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
+    });
+    child.on('close', (code) => {
+      void cleanup().then(() => {
+        if (signal?.aborted) reject(signal.reason);
+        else if (code === 0) resolve(stdout.trim());
+        else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}\n${stderr.trim()}`));
+      }, reject);
     });
   });
 }
