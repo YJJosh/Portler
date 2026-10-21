@@ -196,6 +196,8 @@ if (args.includes('config') && args.includes('current-context')) {
     conditions: [{type: 'Ready', status: 'True'}],
     containerStatuses: [{restartCount: 0}],
   }}]}));
+} else if (args.includes('rollout') && args.includes('deployment/' + process.env.FAKE_KUBECTL_HANG_ROLLOUT)) {
+  setInterval(() => {}, 1000);
 } else if (args.includes('get') && args.includes('deployment')) {
   for (const name of load()) console.log('deployment.apps/' + name);
 } else if (args.includes('apply')) {
@@ -360,5 +362,74 @@ describe('the kubectl context of the launch (fake kubectl)', () => {
     const second = portler(switched, 'up', 'k8s', 'api', '--detach');
     assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
     assert.equal(await savedContext(), 'kind-other');
+  });
+});
+
+describe('Ctrl-C during up k8s startup (fake kubectl)', () => {
+  it('rolls back what the run started when interrupted while a rollout is still waiting', async () => {
+    const stateFile = path.join(tempDir, 'objects.json');
+    const callsFile = path.join(tempDir, 'calls.log');
+    await fs.writeFile(path.join(tempDir, 'bin', 'kubectl'), statefulKubectl, { mode: 0o755 });
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      [
+        'port_range: {start: 56200, end: 56299}',
+        'services:',
+        '  db:',
+        '    image: example/db:latest',
+        '    port: 5432',
+        '  api:',
+        '    image: example/api:latest',
+        '    port: 8080',
+        '    depends_on: [db]',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    let output = '';
+    const foreground = spawn(process.execPath, ['--experimental-strip-types', cli(), 'up', 'k8s'], {
+      cwd: projectDir,
+      // api's rollout never finishes, so the run is still starting when the signal comes.
+      env: { ...cliEnv(stateFile, callsFile), FAKE_KUBECTL_HANG_ROLLOUT: 'api' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    foreground.stdout.on('data', (chunk) => (output += chunk));
+    foreground.stderr.on('data', (chunk) => (output += chunk));
+    const exited = new Promise<number | null>((resolve) => foreground.once('exit', resolve));
+
+    try {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const calls = await fs.readFile(callsFile, 'utf8').catch(() => '');
+        if (calls.includes('"deployment/api"')) break;
+        assert.equal(foreground.exitCode, null, `up k8s exited early:\n${output}`);
+        assert.ok(Date.now() < deadline, `up k8s never reached api's rollout:\n${output}`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // db is up behind its port-forward; api is applied and rolling out.
+      assert.deepEqual(Object.keys((await readPids(projectDir))?.services ?? {}), ['db']);
+
+      // Only Portler gets the signal (as from `kill`), not the hanging kubectl next to it.
+      foreground.kill('SIGINT');
+      assert.equal(await exited, 130, output);
+    } finally {
+      if (foreground.exitCode === null && foreground.signalCode === null) foreground.kill('SIGKILL');
+    }
+
+    assert.match(output, /received SIGINT, stopping services/);
+    const deletes = (await fs.readFile(callsFile, 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+      .filter((call) => call.includes('delete'));
+    assert.equal(deletes.length, 1, JSON.stringify(deletes));
+    assert.match(deletes[0]![deletes[0]!.indexOf('--selector') + 1]!, /,app in \(db,api\)$/);
+    assert.deepEqual(JSON.parse(await fs.readFile(stateFile, 'utf8')), []);
+    assert.equal(await readPids(projectDir).then((pids) => Object.keys(pids?.services ?? {}).length), 0);
+    const registry = JSON.parse(await fs.readFile(path.join(tempDir, 'global', 'ports.json'), 'utf8')) as {
+      ports: Record<string, { project: string }>;
+    };
+    assert.deepEqual(Object.values(registry.ports).filter((entry) => entry.project === projectDir), []);
   });
 });

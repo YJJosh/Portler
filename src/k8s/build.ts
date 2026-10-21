@@ -33,7 +33,12 @@ function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignme
  * must be loaded into the cluster (registry images are pulled by the cluster
  * itself).
  */
-export async function buildServiceImages(config: PortlerConfig, selectedNames: string[], assignments: Assignments): Promise<string[]> {
+export async function buildServiceImages(
+  config: PortlerConfig,
+  selectedNames: string[],
+  assignments: Assignments,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const builtImages: string[] = [];
 
   for (const serviceName of selectedNames) {
@@ -42,7 +47,7 @@ export async function buildServiceImages(config: PortlerConfig, selectedNames: s
     if (!args) continue;
 
     process.stdout.write(`[portler] building image ${service.docker!.image} for ${serviceName}...\n`);
-    await runStreaming('docker', args, serviceName, config.projectDir);
+    await runStreaming('docker', args, serviceName, config.projectDir, signal);
     builtImages.push(service.docker!.image);
   }
 

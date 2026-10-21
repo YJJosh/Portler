@@ -756,25 +756,33 @@ export async function startPhase(
  * is nested: startPhase's own failure path runs while the lock is held and uses
  * the raw, unlocked teardown.
  */
-export async function startServices(
-  rawConfig: PortlerConfig,
-  mode: RunMode,
-  requestedRootNames: string[],
-  options: StartOptions,
-): Promise<number> {
-  // Detached startup deliberately retains its existing signal behavior. Foreground
-  // handlers must exist before startPhase can spawn anything, not only once ready.
-  const cancellation = options.detach ? undefined : new AbortController();
-  let signalCode: number | undefined;
+/** Ctrl-C and SIGTERM during a foreground startup, as an abort signal (see startupCancellation). */
+export interface StartupCancellation {
+  signal: AbortSignal;
+  /** 130 or 143 once a signal arrived; undefined until then. */
+  exitCode: () => number | undefined;
+  /** Remove the handlers. Safe to call more than once. */
+  unlisten: () => void;
+}
+
+/**
+ * Install Ctrl-C/SIGTERM handlers for a foreground startup. They must exist before
+ * anything is spawned, not only once the stack is ready: a signal aborts the startup,
+ * whose rollback stops only what this run started. Detached startups keep the default
+ * handling and do not call this.
+ */
+export function startupCancellation(): StartupCancellation {
+  const controller = new AbortController();
+  let exitCode: number | undefined;
   const cancel = (signal: 'SIGINT' | 'SIGTERM'): void => {
-    if (signalCode !== undefined) return;
-    signalCode = signal === 'SIGINT' ? 130 : 143;
+    if (exitCode !== undefined) return;
+    exitCode = signal === 'SIGINT' ? 130 : 143;
     process.stderr.write(`[portler] received ${signal}, stopping services...\n`);
     // Like the running supervisor: a second Ctrl-C during the rollback gets the
     // default handling, so a stuck rollback can still be interrupted.
     unlisten();
     // Carry the original signal through to an active setup shell.
-    cancellation!.abort(signal);
+    controller.abort(signal);
   };
   const interrupt = (): void => cancel('SIGINT');
   const terminate = (): void => cancel('SIGTERM');
@@ -782,10 +790,19 @@ export async function startServices(
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', terminate);
   };
-  if (cancellation) {
-    process.on('SIGINT', interrupt);
-    process.on('SIGTERM', terminate);
-  }
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
+  return { signal: controller.signal, exitCode: () => exitCode, unlisten };
+}
+
+export async function startServices(
+  rawConfig: PortlerConfig,
+  mode: RunMode,
+  requestedRootNames: string[],
+  options: StartOptions,
+): Promise<number> {
+  // Detached startup deliberately retains its existing signal behavior.
+  const cancellation = options.detach ? undefined : startupCancellation();
   try {
     // The signal also ends a wait for a lock another command holds, so Ctrl-C
     // exits before entering the critical section instead of after it.
@@ -808,22 +825,23 @@ export async function startServices(
       // The lock's release also awaits I/O; this narrow handoff still belongs
       // to startup, but now needs the normal teardown lock again.
       await withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown({ keepAdopted: false }));
-      return signalCode!;
+      return cancellation.exitCode()!;
     }
 
     // No await between removing our handlers and the supervisor installing its
     // own: post-start identity/adoption behavior remains exactly as before.
-    unlisten();
+    cancellation?.unlisten();
     return waitForForegroundServices(
       stack.children,
       (teardownOptions) => withLifecycleLockForTeardown(rawConfig.projectDir, () => stack.teardown(teardownOptions)),
       { dependentsAlive: stack.dependentsAlive },
     );
   } catch (error) {
-    if (signalCode !== undefined) return signalCode;
+    const exitCode = cancellation?.exitCode();
+    if (exitCode !== undefined) return exitCode;
     throw error;
   } finally {
-    unlisten();
+    cancellation?.unlisten();
   }
 }
 

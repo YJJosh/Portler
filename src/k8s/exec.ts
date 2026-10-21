@@ -10,11 +10,11 @@ function commandLine(command: string, args: string[]): string {
 
 /**
  * Run a command streaming its output with a `[prefix]` per line (like service
- * logs), rejecting when it exits non-zero.
+ * logs), rejecting when it exits non-zero. `signal` stops the command and rejects.
  */
-export function runStreaming(command: string, args: string[], prefix: string, cwd?: string): Promise<void> {
+export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
 
     if (child.stdout) prefixStream(prefix, child.stdout, process.stdout);
     if (child.stderr) prefixStream(prefix, child.stderr, process.stderr);
@@ -27,10 +27,10 @@ export function runStreaming(command: string, args: string[], prefix: string, cw
   });
 }
 
-/** Run a command and capture its trimmed stdout, rejecting on non-zero exit. */
-export function captureOutput(command: string, args: string[]): Promise<string> {
+/** Run a command and capture its trimmed stdout, rejecting on non-zero exit (or once `signal` aborts). */
+export function captureOutput(command: string, args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { signal, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
 
