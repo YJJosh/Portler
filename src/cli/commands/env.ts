@@ -4,7 +4,7 @@ import { applyProduction, productionServices } from '../../config/production.ts'
 import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
-import { deployedK8sServices, detectCluster, k8sManifestDir, k8sServiceNames, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
+import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
 import { liveServiceNames, readPids, serviceLiveness } from '../../process/index.ts';
@@ -114,10 +114,11 @@ function upCommand(mode: RunMode, prod: boolean): string {
  * Whether the cluster runs a service that pids.json does not show as running. `up k8s`
  * records a service only through its port-forward, so one without a port leaves no
  * entry, and an older entry that has stopped (a local launch that exited) says nothing
- * about a later `up k8s`: the cluster is the only witness. kubectl is only asked when
- * this checkout has rendered Kubernetes manifests (every render writes the namespace
- * file), so a project that never used k8s mode never waits on it. Undefined when the
- * cluster could not be asked.
+ * about a later `up k8s`: the cluster is the only witness. That is the cluster `up k8s`
+ * deployed to, not whichever context is active now. kubectl is only asked when this
+ * checkout has rendered Kubernetes manifests (every render writes the namespace file),
+ * so a project that never used k8s mode never waits on it. Undefined when the cluster
+ * could not be asked, including when its recorded context no longer exists.
  */
 async function deployedInCluster(config: PortlerConfig, serviceName: string): Promise<boolean | undefined> {
   if (!existsSync(path.join(k8sManifestDir(config.projectDir), NAMESPACE_MANIFEST_FILE))) return false;
@@ -127,7 +128,9 @@ async function deployedInCluster(config: PortlerConfig, serviceName: string): Pr
     return false;
   }
   try {
-    const deployed = await deployedK8sServices(await detectCluster(), config);
+    const launch = await launchCluster(config.projectDir);
+    if (launch.source === 'gone') return undefined;
+    const deployed = await deployedK8sServices(launch.cluster, config);
     return deployed === undefined ? undefined : deployed.includes(serviceName);
   } catch {
     return undefined;

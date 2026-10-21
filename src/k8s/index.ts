@@ -3,7 +3,9 @@ export {
   checkEndpointLocality,
   classifyApiEndpoint,
   classifyContext,
+  clusterForContext,
   CONTEXT_OVERRIDE_ENV,
+  contextExists,
   detectCluster,
   ENDPOINT_OVERRIDE_ENV,
   loadImageIntoCluster,
@@ -37,6 +39,8 @@ export {
   waitForStablePods,
 } from './kubectl.ts';
 export type { DeleteK8sOptions, K8sDeleteResult, NamespaceOwnership, NamespaceRead } from './kubectl.ts';
+export { forgetLaunchContext, launchCluster, launchContextPath, readLaunchContext, recordLaunchContext } from './launch-context.ts';
+export type { LaunchCluster } from './launch-context.ts';
 export { k8sServiceNames } from './manifests.ts';
 export { k8sManifestDir, NAMESPACE_MANIFEST_FILE, renderManifests, writeManifestFiles } from './render.ts';
 export type { RenderedManifests } from './render.ts';

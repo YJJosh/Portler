@@ -75,6 +75,10 @@ and containers whose liveness cannot be checked; only --force stops them first.
 
 "up k8s" also checks container liveness for overlaps; "env" preserves their ports.
 
+"env" and "down k8s" use the kubectl context "up k8s" deployed to, even after a
+context switch; a full "down k8s" clears it. "up k8s" refuses another context
+while the project still has Deployments there.
+
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 
 Documentation: https://yjjosh.github.io/Portler

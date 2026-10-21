@@ -258,13 +258,31 @@ export async function detectCluster(run: CommandRunner = runCommand): Promise<Cl
     );
   }
 
-  const context = current.stdout.trim();
+  return clusterForContext(current.stdout.trim(), run);
+}
+
+/**
+ * Verify a named kubectl context the way detectCluster verifies the active one, BY NAME
+ * and BY ENDPOINT, and pin it. Used for the context `up k8s` recorded, which need not be
+ * the active one any more.
+ */
+export async function clusterForContext(context: string, run: CommandRunner = runCommand): Promise<ClusterInfo> {
   const cluster = resolveCluster(context, process.env[CONTEXT_OVERRIDE_ENV]);
   const server = await readContextServer(context, run);
 
   checkEndpointLocality(context, server, process.env[ENDPOINT_OVERRIDE_ENV]);
 
   return server === null ? cluster : { ...cluster, server };
+}
+
+/**
+ * Whether the kubeconfig still has this context: false only when kubectl lists its
+ * contexts and this one is not among them. Undefined when kubectl could not list them.
+ */
+export async function contextExists(context: string, run: CommandRunner = runCommand): Promise<boolean | undefined> {
+  const listed = await run('kubectl', ['config', 'get-contexts', '-o', 'name']);
+  if (listed.code !== 0) return undefined;
+  return listed.stdout.split('\n').some((line) => line.trim() === context);
 }
 
 /**

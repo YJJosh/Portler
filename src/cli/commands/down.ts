@@ -1,6 +1,6 @@
 import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { deleteK8sResources, deployedK8sServices, detectCluster, type K8sDeleteResult } from '../../k8s/index.ts';
+import { type ClusterInfo, deleteK8sResources, deployedK8sServices, forgetLaunchContext, type K8sDeleteResult, launchCluster } from '../../k8s/index.ts';
 import { releasePorts } from '../../ports/index.ts';
 import type { RunMode } from '../../config/index.ts';
 import { shellQuote } from '../../process/docker.ts';
@@ -300,18 +300,35 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
 
     // Deleting cluster resources DOES touch a cluster, so it is gated on the
     // context being a recognized local one, and every kubectl call is pinned
-    // to it. PVCs (and the namespace) survive unless --volumes was passed, so
+    // to it. That is the context `up k8s` recorded, not whichever one is active
+    // now. PVCs (and the namespace) survive unless --volumes was passed, so
     // a database's data outlives an ordinary down/up cycle. If this fails, keep
     // every reservation: releasing ports while the requested teardown is only
     // half complete is the false all-clear the registry is meant to prevent.
     let deletedFromCluster: K8sDeleteResult = { deleted: false, services: [] };
-    const cluster = mode === 'k8s' ? await detectCluster() : undefined;
-    if (cluster) {
-      deletedFromCluster = await deleteK8sResources(cluster, config, {
-        serviceNames: selectedNames,
-        deleteVolumes: args.volumes,
-        awaitNamespace: true,
-      });
+    let cluster: ClusterInfo | undefined;
+    if (mode === 'k8s') {
+      const launch = await launchCluster(config.projectDir);
+      if (launch.source === 'gone') {
+        // No kubectl call can reach that cluster through this kubeconfig any more.
+        process.stderr.write(
+          `[portler] warning: kubectl context "${launch.context}", where "portler up k8s" started this project, no longer ` +
+            'exists, so nothing was deleted from a cluster; forgetting it\n',
+        );
+        await forgetLaunchContext(config.projectDir);
+      } else {
+        cluster = launch.cluster;
+        if (launch.source === 'recorded') {
+          process.stdout.write(`[portler] kubectl context: ${cluster.context} (${cluster.type}), where "portler up k8s" started this project\n`);
+        }
+        deletedFromCluster = await deleteK8sResources(cluster, config, {
+          serviceNames: selectedNames,
+          deleteVolumes: args.volumes,
+          awaitNamespace: true,
+        });
+        // The whole project is gone from that cluster: the next `up k8s` may start anywhere.
+        if (!selectedNames) await forgetLaunchContext(config.projectDir);
+      }
     }
 
     await releasePorts(config.projectDir, releasableTargets(config, selectedNames, result));

@@ -15,6 +15,7 @@ import {
   loadImageIntoCluster,
   k8sServiceNames,
   portForwardPidInfo,
+  recordLaunchContext,
   renderManifests,
   spawnPortForward,
   waitForNamespaceDeleted,
@@ -148,6 +149,10 @@ async function startK8sPhase(
   const pids = await readPids(config.projectDir);
   const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
   ensureNoOverlap(runningNames, selectedNames);
+  // Before anything touches the cluster: `env` and `down k8s` reach it through this
+  // record, whatever context is active by then. A failed start leaves it in place, since
+  // the rollback can fail to delete what it applied.
+  await recordLaunchContext(config, cluster);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
