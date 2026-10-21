@@ -176,6 +176,7 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
         assert.deepEqual(Object.keys((await readPids(projectDir))?.services ?? {}), [], run.output);
         const registry = JSON.parse(await fs.readFile(path.join(dir, 'global', 'ports.json'), 'utf8'));
         assert.deepEqual(registry.ports, {}, 'startup reservations released');
+        await assert.rejects(fs.access(path.join(projectDir, '.portler', 'k8s-context.json')), 'a complete rollback forgets the context it recorded');
         await assert.rejects(fs.access(path.join(projectDir, '.portler', 'lifecycle.lock')), 'rollback released the lifecycle lock');
       } finally {
         if (run.child.exitCode === null && run.child.signalCode === null) {

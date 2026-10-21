@@ -160,11 +160,11 @@ async function startK8sPhase(
   const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
   ensureNoOverlap(runningNames, selectedNames);
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
-  // record, whatever context is active by then. A failed start leaves it in place, since
-  // the rollback can fail to delete what it applied. Its kubectl reads are cancellable
+  // record, whatever context is active by then. Only a complete teardown takes it back,
+  // since a rollback can fail to delete what it applied. Its kubectl reads are cancellable
   // like every startup call; the rollback's are not, since it must finish.
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
-  await recordLaunchContext(config, cluster, run);
+  const forgetOwnRecord = await recordLaunchContext(config, cluster, run);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
@@ -172,7 +172,13 @@ async function startK8sPhase(
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
   // As in up.ts: Ctrl-C may end the wait for another project's hold on the port
   // registry, before anything is reserved.
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services, signal });
+  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services, signal }).catch(
+    async (error: unknown) => {
+      // Nothing is reserved or applied yet.
+      await forgetOwnRecord();
+      throw error;
+    },
+  );
   const generatedEnv = buildGeneratedEnv(assignments);
 
   await writeState(config.projectDir, assignments);
@@ -226,6 +232,7 @@ async function startK8sPhase(
     if (resourceCleanupError) {
       throw new Error(`did not finish deleting this run's Kubernetes resources: ${resourceCleanupError.message}`);
     }
+    await forgetOwnRecord();
   };
 
   try {

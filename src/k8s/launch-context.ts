@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,19 +58,28 @@ export async function readLaunchContext(projectDir: string): Promise<string | nu
 
 /**
  * The kubeconfig kubectl reads here: KUBECONFIG with each path made absolute (kubectl
- * resolves them against the working directory), or its default, ~/.kube/config.
+ * resolves them against the working directory), or its default, ~/.kube/config. Symlinks
+ * are resolved, so two spellings of one file (/tmp and /private/tmp on macOS) match.
  */
 function kubeconfigInUse(): string {
   const paths = (process.env.KUBECONFIG ?? '').split(path.delimiter).filter((entry) => entry !== '');
-  if (paths.length === 0) return path.join(os.homedir(), '.kube', 'config');
-  return paths.map((entry) => path.resolve(entry)).join(path.delimiter);
+  if (paths.length === 0) paths.push(path.join(os.homedir(), '.kube', 'config'));
+  return paths.map((entry) => realPath(path.resolve(entry))).join(path.delimiter);
+}
+
+function realPath(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch {
+    return file;
+  }
 }
 
 /**
- * REVIEW: A context name is scoped to its kubeconfig, not globally unique. Refuse a
- * different kubeconfig even when it has the same name: it may point at another local
- * cluster, so deleting there or replacing the record could leave the real stack running.
- * Requiring the original config is simpler than copying credentials or guessing identity.
+ * The error for a command reading another kubeconfig than `up k8s` did, or undefined.
+ * A context name is only unique within its kubeconfig: the same name in another one (every
+ * Docker Desktop has "docker-desktop") may be another cluster, so deleting there, or
+ * replacing the record, could leave the real stack running.
  */
 function differentKubeconfig(record: LaunchContextFile, refusal: string): Error | undefined {
   const here = kubeconfigInUse();
@@ -121,12 +131,17 @@ export async function launchCluster(projectDir: string, run: CommandRunner = run
  * refuse, since `env` and `down k8s` could then only reach one of the two. A recorded
  * context with nothing deployed, or one the kubeconfig `up k8s` read no longer has, is
  * replaced.
+ *
+ * Returns a function that takes the record back, for a start whose teardown removed
+ * everything it started: a stale record would make a later `up k8s` in another context or
+ * kubeconfig refuse. It keeps a record an earlier `up k8s` wrote for this context, whose
+ * services may still run there, and one a later `up k8s` has rewritten since.
  */
 export async function recordLaunchContext(
   config: PortlerConfig,
   cluster: ClusterInfo,
   run: CommandRunner = runCommand,
-): Promise<void> {
+): Promise<() => Promise<void>> {
   const record = await readLaunchRecord(config.projectDir);
   if (record !== null) {
     const error = differentKubeconfig(record, `Portler will not start it in "${cluster.context}" as well while it may still run there.`);
@@ -145,7 +160,7 @@ export async function recordLaunchContext(
       try {
         deployed = await projectDeploymentNames(await clusterForContext(recorded, run), config, run);
       } catch (error) {
-        reason = (error as Error).message;
+        reason = error instanceof Error ? error.message : String(error);
       }
       const switchBack = `or switch back with "kubectl config use-context ${recorded}"`;
       if (deployed === undefined) {
@@ -174,4 +189,11 @@ export async function recordLaunchContext(
     recordedAt: new Date().toISOString(),
   };
   await writeJsonFile(launchContextPath(config.projectDir), file);
+
+  if (record !== null && record.context === cluster.context) return async () => {};
+  return async () => {
+    // Best effort: a record left behind only makes later commands more careful.
+    const current = await readLaunchRecord(config.projectDir).catch(() => null);
+    if (current?.recordedAt === file.recordedAt) await forgetLaunchContext(config.projectDir);
+  };
 }

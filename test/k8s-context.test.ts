@@ -16,7 +16,8 @@ import { projectHash } from '../src/util/hash.ts';
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 
 // The current context and the kubeconfig's contexts come from files the test rewrites;
-// every call is logged. A context named in FAKE_KUBECTL_BROKEN answers nothing.
+// every call is logged. A context named in FAKE_KUBECTL_BROKEN answers nothing, and
+// FAKE_KUBECTL_FAIL_APPLY makes every apply fail.
 const kubectl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -58,6 +59,9 @@ if (rest[0] === 'config' && rest[1] === 'current-context') {
   const names = deployed();
   if (names.length === 0) console.log('No resources found');
   for (const name of names) console.log('deployment.apps/' + name);
+} else if (rest[0] === 'apply' && process.env.FAKE_KUBECTL_FAIL_APPLY) {
+  console.error('error: the server rejected the manifest');
+  process.exit(1);
 } else if (rest[0] === 'apply') {
   const names = new Set(deployed());
   rest.forEach((arg, index) => { if (arg === '-f') names.add(path.basename(rest[index + 1], '.yml')); });
@@ -298,8 +302,8 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.equal(await readLaunchContext(projectDir), null);
   });
 
-  // REVIEW: Both kubeconfigs can contain kind-a while pointing it at different clusters.
-  // Name presence (including an unchanged active name) must not authorize a delete or start.
+  // Both kubeconfigs can have a kind-a that points at different clusters: the name being
+  // there (even as the active context) must not let a delete or a start through.
   for (const active of ['kind-a', 'kind-b']) {
     it(`refuses another kubeconfig with the recorded context present (active ${active})`, async () => {
       await writeRecord('kind-a', path.join(tempDir, 'original-kubeconfig'));
@@ -319,4 +323,22 @@ describe('the kubectl context up k8s deployed to', () => {
     });
   }
 
+  it('is taken back by a start that removes all it started, unless an earlier start recorded it', { timeout: 60_000 }, async () => {
+    await setContexts(['kind-a', 'kind-b'], 'kind-a');
+    env.FAKE_KUBECTL_FAIL_APPLY = '1';
+    const failed = portler('up', 'k8s', '-d', 'cron');
+    assert.equal(failed.status, 1, failed.output);
+    assert.equal(await readLaunchContext(projectDir), null, 'a stale record would block up k8s elsewhere');
+
+    delete env.FAKE_KUBECTL_FAIL_APPLY;
+    assert.equal(portler('up', 'k8s', '-d', 'worker').status, 0);
+    env.FAKE_KUBECTL_FAIL_APPLY = '1';
+    const again = portler('up', 'k8s', '-d', 'cron');
+    assert.equal(again.status, 1, again.output);
+    assert.equal(await readLaunchContext(projectDir), 'kind-a', 'worker still runs there');
+    assert.deepEqual(await deployedIn('kind-a'), ['worker']);
+
+    delete env.FAKE_KUBECTL_FAIL_APPLY;
+    assert.equal(portler('down', 'k8s').status, 0);
+  });
 });
