@@ -291,22 +291,22 @@ export async function contextExists(context: string, run: CommandRunner = runCom
  * Desktop, Rancher Desktop, OrbStack and colima share the host Docker daemon,
  * so nothing is needed. No registry push is ever required.
  */
-export async function loadImageIntoCluster(cluster: ClusterInfo, image: string): Promise<void> {
+export async function loadImageIntoCluster(cluster: ClusterInfo, image: string, signal?: AbortSignal): Promise<void> {
   switch (cluster.type) {
     case 'kind': {
       const args = ['load', 'docker-image', image];
       if (cluster.name) args.push('--name', cluster.name);
-      await runStreaming('kind', args, 'portler');
+      await runStreaming('kind', args, 'portler', undefined, signal);
       return;
     }
     case 'k3d': {
       const args = ['image', 'import', image];
       if (cluster.name) args.push('--cluster', cluster.name);
-      await runStreaming('k3d', args, 'portler');
+      await runStreaming('k3d', args, 'portler', undefined, signal);
       return;
     }
     case 'minikube':
-      await runStreaming('minikube', ['image', 'load', image], 'portler');
+      await runStreaming('minikube', ['image', 'load', image], 'portler', undefined, signal);
       return;
     case 'docker-desktop':
     case 'rancher-desktop':

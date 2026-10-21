@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { formatYamlDocuments } from '../parse/yaml-format.ts';
 import { prefixStream, readProcessStartToken } from '../process/index.ts';
 import { runCommand } from '../util/exec.ts';
 import type { CommandRunner } from '../util/exec.ts';
-import { sleep } from '../util/sleep.ts';
 import type { ClusterInfo } from './cluster.ts';
 import { captureOutput, runStreaming } from './exec.ts';
 import type { ForwardSpec } from './forward-supervisor.ts';
@@ -27,19 +27,31 @@ function kubectlArgs(cluster: ClusterInfo, args: string[]): string[] {
   return ['--context', cluster.context, ...args];
 }
 
-/** Apply a set of generated manifest files (or a whole directory). */
-export async function applyManifestFiles(cluster: ClusterInfo, paths: string[]): Promise<void> {
+/**
+ * Apply a set of generated manifest files (or a whole directory). An aborted `signal`
+ * stops kubectl and rejects once it has exited (see runStreaming), as it does for the
+ * waits below.
+ */
+export async function applyManifestFiles(cluster: ClusterInfo, paths: string[], signal?: AbortSignal): Promise<void> {
   const args = ['apply'];
   for (const manifestPath of paths) args.push('-f', manifestPath);
-  await runStreaming('kubectl', kubectlArgs(cluster, args), 'portler');
+  await runStreaming('kubectl', kubectlArgs(cluster, args), 'portler', undefined, signal);
 }
 
 /** Wait until the service's Deployment has rolled out (pods ready). */
-export async function waitForRollout(cluster: ClusterInfo, config: PortlerConfig, serviceName: string, name: string): Promise<void> {
+export async function waitForRollout(
+  cluster: ClusterInfo,
+  config: PortlerConfig,
+  serviceName: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<void> {
   await runStreaming(
     'kubectl',
     kubectlArgs(cluster, ['rollout', 'status', `deployment/${name}`, '--namespace', config.k8sNamespace, `--timeout=${ROLLOUT_TIMEOUT}`]),
     serviceName,
+    undefined,
+    signal,
   );
 }
 
@@ -49,10 +61,11 @@ interface PodSnapshot {
   restarts: number;
 }
 
-async function podSnapshot(cluster: ClusterInfo, namespace: string, appName: string): Promise<PodSnapshot> {
+async function podSnapshot(cluster: ClusterInfo, namespace: string, appName: string, signal?: AbortSignal): Promise<PodSnapshot> {
   const raw = await captureOutput(
     'kubectl',
     kubectlArgs(cluster, ['get', 'pods', '--namespace', namespace, '--selector', `app=${appName}`, '-o', 'json']),
+    signal,
   );
   const parsed = JSON.parse(raw) as {
     items?: Array<{
@@ -93,14 +106,15 @@ export async function waitForStablePods(
   config: PortlerConfig,
   serviceName: string,
   name: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + STABILITY_TIMEOUT_MS;
-  let baseline = await podSnapshot(cluster, config.k8sNamespace, name);
+  let baseline = await podSnapshot(cluster, config.k8sNamespace, name, signal);
   let windowStart = Date.now();
 
   while (Date.now() < deadline) {
-    await sleep(STABILITY_POLL_MS);
-    const snapshot = await podSnapshot(cluster, config.k8sNamespace, name);
+    await delay(STABILITY_POLL_MS, undefined, { signal });
+    const snapshot = await podSnapshot(cluster, config.k8sNamespace, name, signal);
 
     if (!snapshot.allReady || snapshot.restarts !== baseline.restarts || snapshot.podCount !== baseline.podCount) {
       if (snapshot.restarts > baseline.restarts) {
@@ -221,17 +235,20 @@ export async function getNamespacePhase(
 /**
  * Poll until the namespace is fully gone; true when deleted within the timeout.
  * Deletion must be confirmed POSITIVELY (a NotFound read): an API error is
- * treated as "still there", never as a successful deletion.
+ * treated as "still there", never as a successful deletion. An aborted `signal`
+ * ends the wait with its reason.
  */
 export async function waitForNamespaceDeleted(
   cluster: ClusterInfo,
   namespace: string,
   timeoutMs: number,
   run: CommandRunner = runCommand,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
+    signal?.throwIfAborted();
     const gone = await getNamespacePhase(cluster, namespace, run).then(
       (phase) => phase === null,
       () => false,
@@ -239,7 +256,7 @@ export async function waitForNamespaceDeleted(
     if (gone) return true;
     if (Date.now() >= deadline) return false;
 
-    await sleep(1_000);
+    await delay(1_000, undefined, { signal });
   }
 }
 

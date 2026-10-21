@@ -26,7 +26,7 @@ portler volumes list|fork|remove          # manage Portler-managed "@name" Docke
 
 ## Working in a checkout
 
-- Start services with `portler up -d`. A foreground `up` blocks your shell and stops the stack when it exits. For local/Docker starts, Ctrl-C or SIGTERM during setup/readiness rolls back only what that invocation started (exit 130/143); services from other runs are left alone.
+- Start services with `portler up -d`. A foreground `up` blocks your shell and stops the stack when it exits. Ctrl-C or SIGTERM during startup (setup, readiness, and for `up k8s` builds and rollouts) rolls back only what that invocation started (exit 130/143); services from other runs are left alone.
 - Never hardcode ports: they differ between checkouts and runs. Read them from `portler ps` or `portler env <service>`, or use the `PORTLER_*` variables.
 - `up` refuses services that are already running, including surviving groups whose leader has exited (`ps` shows `running (group)`). Portler keeps these entries and warns that ownership cannot be verified; do not delete the PID entry or start another copy over it. To pick up a change in a running service, use `portler restart <service>`.
 - When something fails, check `portler ps` (`dead (stale)` means the process exited), then `portler logs <service>`. Fix the cause and `restart`. `portler logs <service> --follow` follows captured local log files across restarts, including the new run's startup output.
