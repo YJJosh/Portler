@@ -12,8 +12,8 @@ function commandLine(command: string, args: string[]): string {
 /**
  * Run a command streaming its output with a `[prefix]` per line (like service
  * logs), rejecting when it exits non-zero. An aborted `signal` stops it, and the
- * promise rejects with the signal's reason once it has exited: a cancelled apply must
- * be over before a rollback deletes what it applied.
+ * promise rejects with the signal's reason once it and its process group have exited: a
+ * cancelled apply must be over before a rollback deletes what it applied.
  */
 export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
@@ -27,7 +27,6 @@ export function runStreaming(command: string, args: string[], prefix: string, cw
     child.on('error', (error) => {
       void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
     });
-    // REVIEW: Keep cancellation/escalation active until helper-held pipes close.
     child.on('close', (code) => {
       void cleanup().then(() => {
         if (signal?.aborted) reject(signal.reason);
@@ -57,7 +56,6 @@ export function captureOutput(command: string, args: string[], signal?: AbortSig
     child.on('error', (error) => {
       void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
     });
-    // REVIEW: Keep cancellation/escalation active until helper-held pipes close.
     child.on('close', (code) => {
       void cleanup().then(() => {
         if (signal?.aborted) reject(signal.reason);

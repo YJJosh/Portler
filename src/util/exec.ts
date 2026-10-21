@@ -20,11 +20,11 @@ export interface CommandResult {
 export type CommandRunner = (command: string, args: string[], input?: string, signal?: AbortSignal) => Promise<CommandResult>;
 
 /**
- * REVIEW: Cancel the whole owned command tree, not just kubectl/docker's leader. A
- * credential helper can keep the pipes open after kubectl exits, hanging `close`, and
- * build helpers must finish before rollback. Callers spawn a private process group
- * whenever they supply a signal; we still hold that child, so signalling it is safe.
- * Keep escalation armed until close AND the cancelled group has drained.
+ * On abort, signal the child's whole process group, then SIGKILL it after 2 s. Not just
+ * the leader: a credential helper can keep kubectl's pipes open after kubectl exits, and a
+ * build helper must be over before the rollback starts. Callers that pass a signal spawn
+ * the child as the leader of its own group, and we still hold it, so the group is ours.
+ * The returned cleanup keeps the SIGKILL armed until the cancelled group has drained.
  */
 export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => Promise<void> {
   if (!signal) return async () => {};

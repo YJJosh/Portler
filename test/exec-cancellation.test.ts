@@ -15,8 +15,8 @@ const runners = {
   runStreaming: (args: string[], signal: AbortSignal) => runStreaming(process.execPath, args, 'test', undefined, signal),
 };
 
-// REVIEW: Real kubectl credential/build helpers can inherit pipes OR close them and
-// keep running. Cancel the owned group in both cases, even when its leader exits first.
+// A kubectl credential helper or a build helper may inherit the pipes, or close them and
+// keep running. Cancelling must stop it either way, even when its leader exits first.
 for (const [name, run] of Object.entries(runners)) {
   for (const pipes of ['inherit', 'ignore']) {
     it(`${name} cancellation drains a stubborn helper with ${pipes} stdio`, { timeout: 15_000 }, async () => {

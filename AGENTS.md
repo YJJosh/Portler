@@ -64,7 +64,6 @@ signal or removal it does not cover, assume it is deliberate, read its tests
 and history, and raise it in the PR instead of removing it. Call out any new
 path in the PR description.
 
-<!-- REVIEW: Startup command cancellation now owns and drains a private group, including credential/build helpers. -->
 - Signal a process group only with proof that it is ours. Proof is one of:
   - Portler spawned it in this same process and still holds the child:
     signal forwarding and the drain deadline in `runShell`

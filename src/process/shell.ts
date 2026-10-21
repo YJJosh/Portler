@@ -73,8 +73,8 @@ function groupAlive(pgid: number): boolean {
  * so a platform that watches our pid does not cut the app off the moment the
  * shell dies; what is still there at the deadline is killed.
  */
-// REVIEW: Share the existing owned-tree drain with cancellable kubectl/build commands:
-// their helpers can outlive the leader too. Call only for a group this process spawned.
+// Also drains cancelled startup commands (src/util/exec.ts), whose helpers can outlive
+// kubectl or docker too. Call it only for a group this process spawned.
 export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): Promise<void> {
   if (!groupAlive(pgid)) return;
   const deadline = Date.now() + deadlineMs;
