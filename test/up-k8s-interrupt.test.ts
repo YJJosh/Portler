@@ -53,7 +53,6 @@ if (args.includes('current-context')) {
   }
 } else if (args.includes('get') && args.includes('namespace')) {
   fs.writeFileSync(path.join(dir, 'namespace.checked'), 'yes');
-  // REVIEW: cancellation must reach API reads too, not just rollouts and sleeps.
   const phase = args.some((arg) => arg.includes('jsonpath'));
   const phaseMarker = path.join(dir, 'phase-read');
   const poll = hang === 'namespace-poll' && phase && fs.existsSync(phaseMarker);
@@ -160,8 +159,7 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
         await waitFor(path.join(fakeDir, marker), run);
         const hung = Number(await fs.readFile(path.join(fakeDir, marker), 'utf8'));
         tracked.add(hung);
-        // REVIEW: a spawned kubectl does not prove the parent's asynchronous pid
-        // write finished; wait for that observable state rather than racing it.
+        // A spawned port-forward does not mean its pid entry is written yet.
         if (scenario === 'forward') await waitFor(path.join(projectDir, '.portler', 'pids.json'), run);
         for (const info of Object.values((await readPids(projectDir))?.services ?? {})) tracked.add(info.pid);
         if (scenario === 'forward') assert.ok(tracked.size > 1, `the port-forward supervisor was recorded:\n${run.output}`);
@@ -200,8 +198,8 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
 
 it('foreground up k8s stops waiting for a held lifecycle lock on SIGINT', { timeout: 20_000 }, async () => {
   const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-lock-');
-  // REVIEW: hold the lock before launching; synchronize on a startup API read,
-  // not a fixed sleep that can signal before handlers exist on a busy CI host.
+  // Another live command (this test process) holds the lock before the CLI starts; the
+  // signal goes out once the CLI has checked the cluster, not after a fixed sleep.
   const lockDir = path.join(projectDir, '.portler', 'lifecycle.lock');
   await fs.mkdir(lockDir, { recursive: true });
   const owner = { pid: process.pid, host: os.hostname(), at: new Date().toISOString(), token: 'held-by-test' };
@@ -225,7 +223,7 @@ it('foreground up k8s stops waiting for a held lifecycle lock on SIGINT', { time
   }
 });
 
-// REVIEW: a live but unresponsive API read used to swallow Ctrl-C indefinitely.
+// A hung API read must not swallow the signal.
 for (const scenario of ['namespace-check', 'namespace-phase', 'namespace-poll'] as const) {
   it(`foreground up k8s cancels a hung ${scenario}`, { timeout: 20_000 }, async () => {
     const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-read-');
@@ -258,8 +256,8 @@ it('cancellation while recording a sibling forward does not leave an unhandled r
   const { dir, projectDir, env, deployed } = await fixture('portler-k8s-interrupt-sibling-');
   await fs.appendFile(path.join(projectDir, 'portler.yml'), '  worker:\n    image: example/worker\n    port: 8081\n');
   env.FAKE_KUBECTL_HANG = 'forward';
-  // REVIEW: emulate a slow second atomic pid write. The first readiness probe must
-  // not reject unobserved while startup awaits the sibling's state-file I/O.
+  // A slow pid write for the second forward: the first one's readiness probe must not
+  // reject unobserved meanwhile.
   const marker = path.join(dir, 'writing-sibling');
   const release = path.join(dir, 'finish-write');
   const preload = path.join(dir, 'slow-state.mjs');

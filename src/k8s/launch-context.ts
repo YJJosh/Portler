@@ -66,15 +66,10 @@ function kubeconfigInUse(): string {
 }
 
 /**
- * REVIEW: a context missing from the kubeconfig was always taken as gone for good, so
- * `down k8s` forgot it and released the ports, and `up k8s` started in the active
- * context as well, while the stack still ran there. That is what a shell with another
- * KUBECONFIG (a direnv per-directory one, a CI-style temp file) sees. Now only a context
- * missing from the kubeconfig `up k8s` read counts as gone; from another one this refuses,
- * which keeps the record and, in `down k8s`, the reservations.
- *
  * The error for a recorded context that is not in this kubeconfig, or undefined when it
- * is missing from the one `up k8s` read too, so it is gone.
+ * is missing from the one `up k8s` read too, so it is gone. A shell with another
+ * KUBECONFIG (direnv, a temp file) does not see the context while the stack may still
+ * run there: forgetting it would release the ports and let `up k8s` start a second copy.
  */
 function outOfSight(record: LaunchContextFile, refusal: string): Error | undefined {
   const here = kubeconfigInUse();

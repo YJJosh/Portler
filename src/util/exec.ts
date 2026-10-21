@@ -19,9 +19,9 @@ export interface CommandResult {
 export type CommandRunner = (command: string, args: string[], input?: string, signal?: AbortSignal) => Promise<CommandResult>;
 
 /**
- * REVIEW: share cancellation with the streaming k8s runner so namespace/ownership
- * reads can stop their own child too. No group is signalled: this ChildProcess is
- * the proof of ownership; exit cleanup disarms escalation and removes the listener.
+ * On abort, stop `child` (SIGINT or SIGTERM, as received; SIGKILL after 2s). Only this
+ * ChildProcess is signalled, never a group: holding it is the proof that it is ours. The
+ * returned cleanup, called on exit, disarms the SIGKILL and removes the listener.
  */
 export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => void {
   if (!signal) return () => {};

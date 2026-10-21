@@ -161,9 +161,8 @@ async function startK8sPhase(
   ensureNoOverlap(runningNames, selectedNames);
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
   // record, whatever context is active by then. A failed start leaves it in place, since
-  // the rollback can fail to delete what it applied.
-  // REVIEW: the old cluster probe can hang too; use startup cancellation for every
-  // startup API call, never for the rollback that must finish after cancellation.
+  // the rollback can fail to delete what it applied. Its kubectl reads are cancellable
+  // like every startup call; the rollback's are not, since it must finish.
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   await recordLaunchContext(config, cluster, run);
 
@@ -277,9 +276,9 @@ async function startK8sPhase(
       );
       signal?.throwIfAborted();
 
-      // REVIEW: defer probes until every forward has a pid entry, like local up.
-      // An abort while the next pid write awaits I/O must not reject an earlier
-      // probe before any handler can observe it (Node would exit without rollback).
+      // As in up.ts, probes start only once every forward has a pid entry: an abort
+      // while a sibling's entry is written must not reject an earlier probe before
+      // anything awaits it (Node would exit on the unhandled rejection, skipping rollback).
       const readinessWaits: Array<() => Promise<void>> = [];
 
       // Not cancellable between a spawn and its pid entry: the entry is how the
@@ -381,8 +380,8 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
     // resolved context is then pinned onto every kubectl call below. The namespace
     // ownership check is read-only and also runs before anything is reserved; the
     // namespace itself is created (never applied) inside the start phase.
-    // REVIEW: installing a signal handler without cancelling these reads would
-    // swallow the first Ctrl-C while an unreachable API/credential helper hangs.
+    // These reads are cancellable too: with the signal handler installed, a hung API
+    // server or credential helper would otherwise swallow Ctrl-C.
     const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
     const cluster = await detectCluster(run);
     process.stdout.write(`[portler] kubectl context: ${cluster.context} (${cluster.type})\n`);

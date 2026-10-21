@@ -215,7 +215,7 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.ok(pinnedTo(await takeCalls(), 'kind-a').some((call) => call.includes('deployment')), 'asked kind-a first');
   });
 
-  // REVIEW: a full `down k8s` there would still delete it by label, so it still runs there.
+  // A full `down k8s` there would still delete it by label.
   it('counts a Deployment of a service since removed from portler.yml as still running there', async () => {
     await writeRecord('kind-a');
     await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['retired']), 'utf8');
@@ -272,8 +272,8 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.equal(await readLaunchContext(projectDir), 'kind-b');
   });
 
-  // REVIEW: a shell with another KUBECONFIG does not see the context, but the stack may
-  // still run there: neither forget it nor start elsewhere.
+  // A shell with another KUBECONFIG does not see the context, but the stack may still
+  // run there: neither forget it nor start elsewhere.
   it('is kept when this command reads another kubeconfig than up k8s did', { timeout: 60_000 }, async () => {
     await writeRecord('kind-other', path.join(tempDir, 'other-kubeconfig'));
     await setContexts(['kind-b'], 'kind-b');

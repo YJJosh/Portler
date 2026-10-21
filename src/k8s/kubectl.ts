@@ -223,7 +223,6 @@ export async function getNamespacePhase(
   run: CommandRunner = runCommand,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  // REVIEW: abort the in-flight read as well as the sleep between polls.
   const result = await run('kubectl', kubectlArgs(cluster, ['get', 'namespace', namespace, '-o', 'jsonpath={.status.phase}']), undefined, signal);
 
   if (result.code !== 0) {
@@ -554,12 +553,8 @@ export async function deployedK8sServices(
 
 /**
  * The Kubernetes names of every Deployment this project has in its namespace, including
- * one of a service since removed from portler.yml. Undefined when kubectl could not say.
- *
- * REVIEW: split out of deployedK8sServices for the `up k8s` context check. That one maps
- * names back to the services portler.yml has now, so a Deployment of a removed service
- * (which a full `down k8s` still deletes, by label) did not count as "still runs there",
- * and two services sharing a Kubernetes name made it refuse as "could not ask".
+ * one of a service since removed from portler.yml (a full `down k8s` still deletes it, by
+ * label). Undefined when kubectl could not say.
  */
 export async function projectDeploymentNames(
   cluster: ClusterInfo,
