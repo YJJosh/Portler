@@ -36,7 +36,7 @@ const CONFIG = `services:
       env: {MODE: prod, API_TOKEN: secret-value}
 `;
 
-const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+const cliPath = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 let projectDir: string;
 let env: Record<string, string>;
 
@@ -55,7 +55,7 @@ afterEach(async () => {
 });
 
 function run(...args: string[]) {
-  return spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', ...args], { cwd: projectDir, env, encoding: 'utf8' });
+  return spawnSync(process.execPath, ['--experimental-strip-types', cliPath, 'env', ...args], { cwd: projectDir, env, encoding: 'utf8' });
 }
 
 async function record(backend: Partial<PidServiceInfo>): Promise<void> {
@@ -221,6 +221,36 @@ describe('env for a running service', () => {
     assert.equal(plain.status, 0, plain.stderr);
     assert.equal(value(plain.stdout, 'PORTLER_API_IMAGE'), 'example/api-base');
     assert.equal(value(plain.stdout, 'PORTLER_API_CONTAINER'), value(docker.stdout, 'PORTLER_API_CONTAINER'));
+  });
+
+  it('gives setup and k8s render their own mode\'s image, not the one another view cached', async () => {
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
+    image: example/api-base
+    port: 5000
+    env:
+      API_IMAGE: "\${api.image}"
+    setup:
+      - {run: 'echo "$API_IMAGE $PORTLER_API_IMAGE" > setup-image.txt', always: true}
+    docker:
+      image: example/api-docker
+`, 'utf8');
+    const cli = (...args: string[]) =>
+      spawnSync(process.execPath, ['--experimental-strip-types', cliPath, ...args], { cwd: projectDir, env, encoding: 'utf8' });
+
+    // state.json now holds the Docker view's image, under the container name both views share.
+    const docker = run('docker', 'api');
+    assert.equal(docker.status, 0, docker.stderr);
+    const setup = cli('setup', 'api');
+    assert.equal(setup.status, 0, setup.stderr);
+    assert.equal((await fs.readFile(path.join(projectDir, 'setup-image.txt'), 'utf8')).trim(), 'example/api-base example/api-base');
+
+    // And the other way round: the plain view's image is cached, k8s render runs the Docker one.
+    const plain = run('api');
+    assert.equal(plain.status, 0, plain.stderr);
+    const render = cli('k8s', 'render', 'api');
+    assert.equal(render.status, 0, render.stderr);
+    assert.match(render.stdout, /name: API_IMAGE\s+value: "?example\/api-docker"?/);
+    assert.doesNotMatch(render.stdout, /example\/api-base/);
   });
 
   it('refuses a typed k8s mode for a service that up k8s would refuse', async () => {
