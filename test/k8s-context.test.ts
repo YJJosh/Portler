@@ -284,7 +284,8 @@ describe('the kubectl context up k8s deployed to', () => {
 
     const down = portler('down', 'k8s');
     assert.equal(down.status, 1, down.output);
-    assert.match(down.stderr, /kubectl context "kind-other", where "portler up k8s" started this project, was recorded with a different kubeconfig/);
+    assert.match(down.stderr, /kubectl context "kind-other", where "portler up k8s" started this project, comes from a different kubeconfig/);
+    assert.match(down.stderr, new RegExp(`"portler up k8s" read ${path.join(tempDir, 'other-kubeconfig')}, this command reads `));
     assert.match(down.stderr, new RegExp(`KUBECONFIG=${path.join(tempDir, 'other-kubeconfig')}`));
     assert.equal(await readLaunchContext(projectDir), 'kind-other');
 

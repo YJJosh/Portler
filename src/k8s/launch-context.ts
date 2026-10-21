@@ -85,8 +85,8 @@ function differentKubeconfig(record: LaunchContextFile, refusal: string): Error 
   const here = kubeconfigInUse();
   if (record.kubeconfig === here) return undefined;
   return new Error(
-    `kubectl context "${record.context}", where "portler up k8s" started this project, was recorded with a different kubeconfig ` +
-      `(${here}); "portler up k8s" read it from ${record.kubeconfig}. ${refusal} Run this again with ` +
+    `kubectl context "${record.context}", where "portler up k8s" started this project, comes from a different kubeconfig: ` +
+      `"portler up k8s" read ${record.kubeconfig}, this command reads ${here}. ${refusal} Run this again with ` +
       `KUBECONFIG=${record.kubeconfig}. If that cluster is gone for good, "portler clean" forgets it, along with the ` +
       "rest of this checkout's runtime state.",
   );
