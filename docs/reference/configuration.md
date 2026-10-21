@@ -201,6 +201,8 @@ See [Kubernetes mode](/guide/kubernetes).
 
 ```yaml
 proxy:
+  host: 127.0.0.1             # optional bind override; default: root host
+  trusted_proxies: []          # exact IPv4/IPv6 source IPs of trusted edges; no implicit loopback trust
   port: auto                  # "auto" (or omitted) = Portler picks; a number is preferred when free
   allowed_hosts:              # optional: extra Host headers the proxy answers for
     - myapp.test
@@ -213,6 +215,8 @@ proxy:
 - Longest prefix wins, respecting path segment boundaries; the prefix is **not** stripped before forwarding.
 - Every route must target a known service that declares a `port`.
 - Duplicate prefixes are an error.
+- `host` overrides only the proxy bind address (default: root `host`), not backend binds or advertised URLs. Use root `host: 127.0.0.1` with `proxy.host: 0.0.0.0` to expose one app endpoint while retaining loopback backend assignments. The listener remains plain HTTP; terminate TLS at a separate edge.
+- `trusted_proxies` is an array of exact IPv4/IPv6 peer addresses, default `[]`. No hostnames, wildcards, CIDRs, ports, or scope identifiers; loopback is not implicitly trusted. Equivalent IPv6 and IPv4-mapped IPv6 identities match. Only allowlist controlled edges that **sanitize client forwarding headers**. Trusted peers may supply a single `http`/`https` scheme, a valid allowed hostname authority, and an IP-only client chain. Portler validates each independently, appends the socket IP to a valid chain, and otherwise falls back to socket/checked `Host` metadata. Untrusted incoming metadata is discarded. `Forwarded`, `X-Real-IP`, and unsupported `X-Forwarded-*` headers are always removed, identically for HTTP and WebSocket upgrades. See the [full forwarding/trust policy](/guide/proxy#behind-a-tls-edge) before enabling trust.
 - `allowed_hosts` extends the `Host` headers the proxy accepts. Loopback names (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) and the project's `url_host` are always allowed; everything else gets a `403`. See [DNS-rebinding protection](/guide/proxy#allowed-hosts-dns-rebinding-protection).
 
 See [Proxy: one project URL](/guide/proxy).

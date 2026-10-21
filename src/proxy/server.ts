@@ -11,6 +11,7 @@ import http from 'node:http';
 import net from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isObject, isPort, isString } from '../util/guards.ts';
+import { normalizeIpAddress } from '../util/ip.ts';
 
 export interface ProxyTarget {
   /** Normalized route prefix ('/' or '/api' — no trailing slash otherwise). */
@@ -31,6 +32,8 @@ export interface ProxyServerOptions {
    * not in this list is rejected — see isAllowedHost.
    */
   allowedHosts: string[];
+  /** Exact peer IP allowlist; loopback is not implicitly trusted. */
+  trustedProxies: string[];
 }
 
 function isProxyTarget(value: unknown): value is ProxyTarget {
@@ -46,7 +49,9 @@ export function isProxyServerOptions(value: unknown): value is ProxyServerOption
     value.routes.length > 0 &&
     value.routes.every(isProxyTarget) &&
     Array.isArray(value.allowedHosts) &&
-    value.allowedHosts.every(isString)
+    value.allowedHosts.every(isString) &&
+    Array.isArray(value.trustedProxies) &&
+    value.trustedProxies.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined)
   );
 }
 
@@ -66,7 +71,7 @@ export function hostnameOf(hostHeader: string): string {
 /**
  * DNS-rebinding guard.
  *
- * The proxy listens on a loopback port with no authentication, which is fine
+ * By default the proxy listens on a loopback port with no authentication, which is fine
  * as long as only local clients can reach it. But any web page the developer
  * visits can make their browser send requests to http://127.0.0.1:<port> — and
  * with a DNS rebind (attacker.com briefly resolving to 127.0.0.1) those
@@ -84,6 +89,7 @@ export function isAllowedHost(hostHeader: string | undefined, allowedHosts: read
   // browser rebinding attack, which always sets one.
   if (hostHeader === undefined || hostHeader === '') return true;
 
+  if (!isValidAuthority(hostHeader)) return false;
   const hostname = hostnameOf(hostHeader);
   if (hostname === '') return false;
 
@@ -96,6 +102,17 @@ export function isAllowedHost(hostHeader: string | undefined, allowedHosts: read
   if (net.isIP(hostname) === 4 && Number(hostname.split('.')[0]) === 127) return true;
 
   return false;
+}
+
+/** Reject ambiguous authorities before either HTTP or upgrade forwarding. */
+function hasAllowedRequestHost(req: IncomingMessage, allowedHosts: readonly string[]): boolean {
+  // REVIEW: Node keeps only the first Host in req.headers; raw WebSocket heads
+  // used to relay unchecked later values to upstreams with different parsers.
+  let count = 0;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    if (req.rawHeaders[index]!.toLowerCase() === 'host') count += 1;
+  }
+  return count <= 1 && isAllowedHost(req.headers.host, allowedHosts);
 }
 
 function rejectForbiddenHost(hostHeader: string | undefined): string {
@@ -148,22 +165,66 @@ function connectionListedHeaders(connectionHeader: string | string[] | undefined
   return names;
 }
 
-function forwardedRequestHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
+/** Only these three forwarding headers are supported; never relay competing metadata. */
+function isForwardingHeader(name: string): boolean {
+  return name === 'forwarded' || name === 'x-real-ip' || name.startsWith('x-forwarded-');
+}
+
+/** A single authority, not a URL, comma-separated list, userinfo or scoped IP. */
+// REVIEW: underscores are not valid in public DNS names, but internal/container
+// names such as `my_app` were explicitly allowlisted before this check existed.
+// Keep them allowed; the goal is rejecting lists, userinfo and URL syntax.
+function isValidAuthority(value: string): boolean {
+  const match = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9._-]+)(?::([0-9]+))?$/.exec(value);
+  if (!match) return false;
+  if (match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > 65535)) return false;
+  const hostname = match[1]!;
+  if (hostname.startsWith('[')) return net.isIP(hostname.slice(1, -1)) === 6;
+  return hostname.length <= 253 && hostname.replace(/\.$/, '').split('.').every(
+    (label) => label.length <= 63 && /^[a-zA-Z0-9_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?$/.test(label),
+  );
+}
+
+/** Shared by HTTP and upgrades: trust only a validated, explicitly allowlisted peer. */
+function forwardingHeaders(req: IncomingMessage, options: ProxyServerOptions): Record<string, string> {
+  const remoteAddress = req.socket.remoteAddress ?? 'unknown';
+  const peer = normalizeIpAddress(remoteAddress);
+  const trusted = peer !== undefined && options.trustedProxies.some((ip) => normalizeIpAddress(ip) === peer);
+  const connectionListed = connectionListedHeaders(req.headers.connection);
+  const supported = (name: string): string | undefined => {
+    const value = req.headers[name];
+    return trusted && !connectionListed.has(name) && typeof value === 'string' ? value : undefined;
+  };
+  const proto = supported('x-forwarded-proto');
+  const host = supported('x-forwarded-host');
+  const chain = supported('x-forwarded-for')?.split(',').map((ip) => ip.trim());
+  const validChain = chain && chain.length > 0 && chain.every((ip) => normalizeIpAddress(ip) !== undefined);
+  const headers: Record<string, string> = {
+    'x-forwarded-for': validChain ? `${chain.join(', ')}, ${remoteAddress}` : remoteAddress,
+    'x-forwarded-proto': proto === 'http' || proto === 'https' ? proto : 'http',
+  };
+  if (host && isAllowedHost(host, options.allowedHosts)) {
+    headers['x-forwarded-host'] = host;
+  } else if (req.headers.host) {
+    headers['x-forwarded-host'] = req.headers.host;
+  }
+  return headers;
+}
+
+function forwardedRequestHeaders(req: IncomingMessage, options: ProxyServerOptions): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   const connectionListed = connectionListedHeaders(req.headers.connection);
 
   for (const [name, value] of Object.entries(req.headers)) {
-    if (value === undefined || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
+    if (value === undefined || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name) || isForwardingHeader(name)) continue;
     headers[name] = value;
   }
 
-  const remoteAddress = req.socket.remoteAddress ?? 'unknown';
-  const priorForwardedFor = req.headers['x-forwarded-for'];
-  headers['x-forwarded-for'] = priorForwardedFor ? `${String(priorForwardedFor)}, ${remoteAddress}` : remoteAddress;
-  headers['x-forwarded-proto'] = 'http';
-  if (req.headers.host && !req.headers['x-forwarded-host']) headers['x-forwarded-host'] = req.headers.host;
-
-  return headers;
+  // REVIEW: Host is routing identity, not an optional connection extension.
+  // Preserve the checked authority even when Connection nominates it; otherwise
+  // http.request synthesizes the private upstream authority instead.
+  if (req.headers.host !== undefined) headers.host = req.headers.host;
+  return { ...headers, ...forwardingHeaders(req, options) };
 }
 
 function forwardedResponseHeaders(upstreamRes: IncomingMessage): http.OutgoingHttpHeaders {
@@ -183,7 +244,7 @@ function badGatewayMessage(route: ProxyTarget, error: Error): string {
 }
 
 function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: ServerResponse): void {
-  if (!isAllowedHost(req.headers.host, options.allowedHosts)) {
+  if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(rejectForbiddenHost(req.headers.host));
     return;
@@ -204,7 +265,7 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
     method: req.method,
     // The full original URL — route prefixes are intentionally not stripped.
     path: req.url,
-    headers: forwardedRequestHeaders(req),
+    headers: forwardedRequestHeaders(req, options),
   });
 
   upstream.on('response', (upstreamRes) => {
@@ -226,20 +287,24 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
   req.pipe(upstream);
 }
 
-/**
- * Rebuild the raw HTTP head of an upgrade request from rawHeaders so the
- * hop-by-hop Connection/Upgrade handshake headers survive verbatim.
- */
-function rawUpgradeHead(req: IncomingMessage, remoteAddress: string): string {
+/** Rebuild an upgrade head, retaining only the required upgrade hop. */
+function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): string {
   const lines = [`${req.method} ${req.url ?? '/'} HTTP/${req.httpVersion}`];
+  const connectionListed = connectionListedHeaders(req.headers.connection);
 
+  // REVIEW: Upgrades must sanitize the same proxy credentials and nominated
+  // hop headers as HTTP. Relaying the raw Connection list also incorrectly
+  // nominates our newly generated forwarding metadata as hop-by-hop upstream.
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    const name = req.rawHeaders[index]!.toLowerCase();
+    if (name === 'host' || isForwardingHeader(name) || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
     lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
   }
-
-  if (!req.headers['x-forwarded-for']) lines.push(`X-Forwarded-For: ${remoteAddress}`);
-  if (!req.headers['x-forwarded-proto']) lines.push('X-Forwarded-Proto: http');
-  if (req.headers.host && !req.headers['x-forwarded-host']) lines.push(`X-Forwarded-Host: ${req.headers.host}`);
+  // Use the same single checked Host as HTTP, never a raw duplicate or omission
+  // introduced by Connection: Host.
+  if (req.headers.host !== undefined) lines.push(`Host: ${req.headers.host}`);
+  lines.push('Connection: Upgrade', `Upgrade: ${req.headers.upgrade}`);
+  for (const [name, value] of Object.entries(forwardingHeaders(req, options))) lines.push(`${name}: ${value}`);
 
   return `${lines.join('\r\n')}\r\n\r\n`;
 }
@@ -249,7 +314,7 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
 
   // WebSockets are not protected by the same-origin policy, so an unchecked
   // Host here would reopen exactly the rebinding hole the request path closes.
-  if (!isAllowedHost(req.headers.host, options.allowedHosts)) {
+  if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;
   }
@@ -263,7 +328,7 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   let handshakeSent = false;
   const upstream = net.connect(route.port, route.host, () => {
     handshakeSent = true;
-    upstream.write(rawUpgradeHead(req, socket.remoteAddress ?? 'unknown'));
+    upstream.write(rawUpgradeHead(req, options));
     if (head.length > 0) upstream.write(head);
     upstream.pipe(socket);
     socket.pipe(upstream);

@@ -4,6 +4,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
+import { buildProxyServerOptions } from '../src/proxy/spawn.ts';
+import { startProxyServer } from '../src/proxy/server.ts';
 import { allocateAssignments, releasePorts } from '../src/ports/allocate.ts';
 import { globalPortlerDir, registryPath } from '../src/ports/locations.ts';
 import { pruneRegistry, readRegistry, writeRegistry } from '../src/ports/registry.ts';
@@ -407,5 +409,34 @@ describe('own-port reclaim respects in-flight reservations', () => {
     const owned = Object.values(registry.ports).filter((entry) => entry.project === projectDir);
     assert.equal(owned.length, 2);
     assert.deepEqual(owned.map((entry) => entry.service).sort(), ['api', 'web']);
+  });
+});
+
+describe('independent proxy bind assignment', () => {
+  it('binds only the proxy to proxy.host and carries trust into daemon options', async () => {
+    const config = makeConfig(tempGlobalDir, [makeService('web')]);
+    config.proxy = { host: '0.0.0.0', trustedProxies: ['192.0.2.10'], allowedHosts: ['app.example'], routes: [{ prefix: '/', service: 'web' }] };
+    const assignments = await allocateAssignments(config, null, ['web'], NO_RUNNING);
+    assert.equal(assignments.proxy?.host, '0.0.0.0');
+    assert.equal(assignments.web?.host, '127.0.0.1');
+    assert.equal(assignments.proxy?.urlHost, 'localhost', 'bind override does not change URL metadata');
+    const options = buildProxyServerOptions(config.proxy, assignments);
+    assert.equal(options.host, '0.0.0.0');
+    assert.deepEqual(options.trustedProxies, ['192.0.2.10']);
+    assert.equal(options.routes[0]?.host, '127.0.0.1');
+
+    const server = await startProxyServer(options);
+    try {
+      assert.equal((server.address() as net.AddressInfo).address, '0.0.0.0');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('uses the root host when proxy.host is omitted', async () => {
+    const config = makeConfig(tempGlobalDir, [makeService('web')]);
+    config.proxy = { trustedProxies: [], allowedHosts: [], routes: [{ prefix: '/', service: 'web' }] };
+    const assignments = await allocateAssignments(config, null, ['web'], NO_RUNNING);
+    assert.equal(assignments.proxy?.host, config.host);
   });
 });

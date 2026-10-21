@@ -66,7 +66,9 @@ provably belongs to someone else. Inspect the pid first with
 "ps -o pid,ppid,lstart,command -p <pid>".
 
 With a "proxy:" block in portler.yml, "ps proxy" and "down proxy" select just
-the reverse proxy.
+the reverse proxy. "proxy.host" overrides its bind address without exposing
+backends. "proxy.trusted_proxies" (default []) trusts only exact edge IPs for
+validated forwarding metadata; the edge must sanitize client headers.
 
 "up" also refuses surviving process groups whose leader has exited: their PID
 entries are kept, and "ps" reports "running (group)" with unverified ownership.
