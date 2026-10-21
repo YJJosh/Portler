@@ -303,6 +303,21 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.equal(await readLaunchContext(projectDir), null);
   });
 
+  it('does not mistake an explicit empty kubeconfig path list for the default kubeconfig', async () => {
+    // client-go uses ~/.kube/config only when KUBECONFIG is unset or empty. A
+    // nonempty list of empty entries (":" on Unix) instead loads no files.
+    env.HOME = tempDir;
+    await writeRecord('kind-a', path.join(tempDir, '.kube', 'config'));
+    await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['worker']));
+    env.KUBECONFIG = path.delimiter;
+    const down = portler('down', 'k8s');
+    assert.equal(down.status, 1, down.output);
+    assert.match(down.stderr, /different kubeconfig/);
+    assert.equal(await readLaunchContext(projectDir), 'kind-a');
+    assert.deepEqual(mutating(await takeCalls()), []);
+    assert.deepEqual(await deployedIn('kind-a'), ['worker']);
+  });
+
   // Both kubeconfigs can have a kind-a that points at different clusters: the name being
   // there (even as the active context) must not let a delete or a start through.
   for (const active of ['kind-a', 'kind-b']) {

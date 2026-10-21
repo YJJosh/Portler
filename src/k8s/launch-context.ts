@@ -62,8 +62,12 @@ export async function readLaunchContext(projectDir: string): Promise<string | nu
  * are resolved, so two spellings of one file (/tmp and /private/tmp on macOS) match.
  */
 function kubeconfigInUse(): string {
-  const paths = (process.env.KUBECONFIG ?? '').split(path.delimiter).filter((entry) => entry !== '');
-  if (paths.length === 0) paths.push(path.join(os.homedir(), '.kube', 'config'));
+  const configured = process.env.KUBECONFIG ?? '';
+  const paths = configured.split(path.delimiter).filter((entry) => entry !== '');
+  // REVIEW: Match kubectl/client-go: only an unset/empty variable loads the default.
+  // KUBECONFIG=: is nonempty but loads no files; equating it with the default would
+  // let down forget a real launch merely because this empty config lacks its context.
+  if (configured === '') paths.push(path.join(os.homedir(), '.kube', 'config'));
   return paths.map((entry) => realPath(path.resolve(entry))).join(path.delimiter);
 }
 
