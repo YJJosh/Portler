@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { k8sContextPath, readK8sContext } from '../state/index.ts';
 import { runCommand } from '../util/exec.ts';
 import type { CommandRunner } from '../util/exec.ts';
 import { runStreaming } from './exec.ts';
@@ -258,13 +259,35 @@ export async function detectCluster(run: CommandRunner = runCommand): Promise<Cl
     );
   }
 
-  const context = current.stdout.trim();
+  return clusterForContext(current.stdout.trim(), run);
+}
+
+/** Like detectCluster, for a named context instead of the active one: the same two gates apply. */
+export async function clusterForContext(context: string, run: CommandRunner = runCommand): Promise<ClusterInfo> {
   const cluster = resolveCluster(context, process.env[CONTEXT_OVERRIDE_ENV]);
   const server = await readContextServer(context, run);
 
   checkEndpointLocality(context, server, process.env[ENDPOINT_OVERRIDE_ENV]);
 
   return server === null ? cluster : { ...cluster, server };
+}
+
+/**
+ * The cluster the last `up k8s` deployed this project to (see readK8sContext), or the
+ * active context when none is saved. Commands that act on what is already deployed use
+ * this, so a context switch after `up k8s` cannot point them at another cluster.
+ */
+export async function launchedCluster(projectDir: string, run: CommandRunner = runCommand): Promise<ClusterInfo> {
+  const saved = await readK8sContext(projectDir);
+  if (saved === null) return detectCluster(run);
+  try {
+    return await clusterForContext(saved, run);
+  } catch (error) {
+    throw new Error(
+      `${(error as Error).message}\n"portler up k8s" last deployed this project to kubectl context "${saved}". ` +
+        `If that cluster is gone, delete ${k8sContextPath(projectDir)} to use the active context instead.`,
+    );
+  }
 }
 
 /**

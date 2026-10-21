@@ -1,11 +1,12 @@
 import { loadConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { deleteK8sResources, deployedK8sServices, detectCluster, type K8sDeleteResult } from '../../k8s/index.ts';
+import { deleteK8sResources, deployedK8sServices, launchedCluster, type K8sDeleteResult } from '../../k8s/index.ts';
 import { releasePorts } from '../../ports/index.ts';
 import type { RunMode } from '../../config/index.ts';
 import { shellQuote } from '../../process/docker.ts';
 import { liveServiceNames, readPids, stopServices } from '../../process/index.ts';
 import type { StopResult } from '../../process/index.ts';
+import { clearK8sContext } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -304,14 +305,18 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     // a database's data outlives an ordinary down/up cycle. If this fails, keep
     // every reservation: releasing ports while the requested teardown is only
     // half complete is the false all-clear the registry is meant to prevent.
+    // The cluster is the one `up k8s` deployed to, not whichever context is active now.
     let deletedFromCluster: K8sDeleteResult = { deleted: false, services: [] };
-    const cluster = mode === 'k8s' ? await detectCluster() : undefined;
+    const cluster = mode === 'k8s' ? await launchedCluster(config.projectDir) : undefined;
     if (cluster) {
+      process.stdout.write(`[portler] kubectl context: ${cluster.context} (${cluster.type})\n`);
       deletedFromCluster = await deleteK8sResources(cluster, config, {
         serviceNames: selectedNames,
         deleteVolumes: args.volumes,
         awaitNamespace: true,
       });
+      // Nothing of this project is left on that cluster: the next `up k8s` may use another.
+      if (!selectedNames) await clearK8sContext(config.projectDir);
     }
 
     await releasePorts(config.projectDir, releasableTargets(config, selectedNames, result));

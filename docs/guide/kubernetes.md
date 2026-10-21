@@ -25,6 +25,8 @@ The override must name the exact context, so a stale `export` cannot silently au
 
 Portler also pins `--context` on every `kubectl` call it makes, so switching contexts while a command is running cannot redirect an apply or a delete to another cluster.
 
+`up k8s` saves the context it deployed to in `.portler/k8s-context.json`. `down k8s` and `env` use that context, not the one active when they run, so switching contexts after `up k8s` cannot point a delete at another cluster; both checks below still apply to it. While the project still has Deployments on the saved context, `up k8s` on a different one is refused: run `portler down k8s` first. A full `down k8s` forgets the saved context. If that cluster no longer exists, delete the file to use the active context.
+
 ### The endpoint is checked too, not just the name
 
 A context name is a convention, not a fact: anything can be *named* `minikube`, and `kubectl config rename-context` takes two seconds. So Portler resolves the context's **API server endpoint** and checks that as well. Both gates must pass, and the endpoint gate **fails closed**.

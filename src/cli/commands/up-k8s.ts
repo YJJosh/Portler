@@ -7,7 +7,9 @@ import {
   applyManifestFiles,
   buildServiceImages,
   type ClusterInfo,
+  clusterForContext,
   deleteK8sResources,
+  deployedK8sServices,
   detectCluster,
   ensureNamespace,
   ensureNamespaceClaimable,
@@ -26,7 +28,7 @@ import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { isTcpReady, waitForServiceReady } from '../../readiness/index.ts';
-import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
+import { readK8sContext, readState, writeK8sContext, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { sleep } from '../../util/sleep.ts';
 import type { Assignments, PortlerConfig, ServiceAssignment } from '../../types/index.ts';
@@ -132,6 +134,35 @@ async function verifyForwards(
   }
 }
 
+/**
+ * Save the context this run deploys to, so `env` and `down k8s` ask that cluster later
+ * instead of whichever context is active then. While this project still runs on the context
+ * an earlier `up k8s` saved, starting it on another one would leave `down k8s` no way back
+ * to the first, so that is refused.
+ */
+async function saveLaunchContext(config: PortlerConfig, cluster: ClusterInfo): Promise<void> {
+  const saved = await readK8sContext(config.projectDir);
+  if (saved !== null && saved !== cluster.context) {
+    const deployed = await clusterForContext(saved).then(
+      (previous) => deployedK8sServices(previous, config),
+      () => undefined,
+    );
+    if (deployed && deployed.length > 0) {
+      throw new Error(
+        `this project still runs ${deployed.join(', ')} on kubectl context "${saved}", where an earlier "portler up k8s" ` +
+          `deployed it. Run "portler down k8s" to stop it there first, or switch back to "${saved}"`,
+      );
+    }
+    if (deployed === undefined) {
+      process.stderr.write(
+        `[portler] warning: could not check whether this project still runs on kubectl context "${saved}", where an earlier ` +
+          `"portler up k8s" deployed it; "env" and "down k8s" now use "${cluster.context}"\n`,
+      );
+    }
+  }
+  await writeK8sContext(config.projectDir, cluster.context);
+}
+
 interface K8sStack {
   children: Map<string, ChildProcess>;
   /** UNLOCKED, like the local one (see StartedStack in up.ts): the caller owns the locking. */
@@ -148,6 +179,7 @@ async function startK8sPhase(
   const pids = await readPids(config.projectDir);
   const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
   ensureNoOverlap(runningNames, selectedNames);
+  await saveLaunchContext(config, cluster);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
@@ -331,7 +363,8 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
 
   // Resolve (and validate) the cluster before anything is allocated or spawned:
   // an unrecognized context must abort here, not after ports are reserved. The
-  // resolved context is then pinned onto every kubectl call below. The namespace
+  // resolved context is then pinned onto every kubectl call below, and saved for the
+  // commands that later act on what this run deployed. The namespace
   // ownership check is read-only and also runs before anything is reserved; the
   // namespace itself is created (never applied) inside the start phase.
   const cluster = await detectCluster();

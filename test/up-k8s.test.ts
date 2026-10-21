@@ -163,10 +163,9 @@ describe('Kubernetes proxy lifecycle (fake kubectl)', () => {
   });
 });
 
-describe('foreground teardown after the config grew (fake kubectl)', () => {
-  // A fake kubectl that remembers which Deployments were applied and honours
-  // `delete --selector`, so what a teardown removes can be read back from it.
-  const statefulKubectl = `#!/usr/bin/env node
+// A fake kubectl that remembers which Deployments were applied and honours
+// `delete --selector`, so what a teardown removes can be read back from it.
+const statefulKubectl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
@@ -175,7 +174,7 @@ const stateFile = process.env.FAKE_KUBECTL_STATE;
 const load = () => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : []);
 fs.appendFileSync(process.env.FAKE_KUBECTL_CALLS, JSON.stringify(args) + '\\n');
 if (args.includes('config') && args.includes('current-context')) {
-  console.log('docker-desktop');
+  console.log(process.env.FAKE_KUBECTL_CONTEXT || 'docker-desktop');
 } else if (args.includes('config') && args.includes('view')) {
   console.log('https://127.0.0.1:6443');
 } else if (args.includes('port-forward')) {
@@ -197,6 +196,8 @@ if (args.includes('config') && args.includes('current-context')) {
     conditions: [{type: 'Ready', status: 'True'}],
     containerStatuses: [{restartCount: 0}],
   }}]}));
+} else if (args.includes('get') && args.includes('deployment')) {
+  for (const name of load()) console.log('deployment.apps/' + name);
 } else if (args.includes('apply')) {
   const objects = new Set(load());
   args.forEach((arg, index) => { if (arg === '-f') objects.add(path.basename(args[index + 1], '.yml')); });
@@ -211,14 +212,16 @@ if (args.includes('config') && args.includes('current-context')) {
 }
 `;
 
-  const cli = (): string => path.resolve(previousCwd, 'bin/portler.ts');
-  const cliEnv = (stateFile: string, callsFile: string): NodeJS.ProcessEnv => ({
-    ...process.env,
-    FAKE_KUBECTL_STATE: stateFile,
-    FAKE_KUBECTL_CALLS: callsFile,
-    FAKE_KUBECTL_PROJECT: projectHash(projectDir),
-  });
+const cli = (): string => path.resolve(previousCwd, 'bin/portler.ts');
+const cliEnv = (stateFile: string, callsFile: string, context = 'docker-desktop'): NodeJS.ProcessEnv => ({
+  ...process.env,
+  FAKE_KUBECTL_CONTEXT: context,
+  FAKE_KUBECTL_STATE: stateFile,
+  FAKE_KUBECTL_CALLS: callsFile,
+  FAKE_KUBECTL_PROJECT: projectHash(projectDir),
+});
 
+describe('foreground teardown after the config grew (fake kubectl)', () => {
   it('leaves a newer run\'s services alone when a foreground run that selected the whole config is interrupted', async () => {
     const binDir = path.join(tempDir, 'bin');
     const stateFile = path.join(tempDir, 'objects.json');
@@ -276,5 +279,86 @@ if (args.includes('config') && args.includes('current-context')) {
     assert.deepEqual(JSON.parse(await fs.readFile(stateFile, 'utf8')), ['worker']);
     const pids = await readPids(projectDir);
     assert.deepEqual(Object.keys(pids?.services ?? {}), ['worker']);
+  });
+});
+
+describe('the kubectl context of the launch (fake kubectl)', () => {
+  const config = [
+    'port_range: {start: 56100, end: 56199}',
+    'services:',
+    '  api:',
+    '    image: example/api:latest',
+    '    port: 8080',
+    '  worker:',
+    '    image: example/worker:latest',
+    '',
+  ].join('\n');
+
+  const savedContext = async (): Promise<string | undefined> => {
+    const file = path.join(projectDir, '.portler', 'k8s-context.json');
+    return fs.readFile(file, 'utf8').then((text) => (JSON.parse(text) as { context: string }).context, () => undefined);
+  };
+
+  /** The --context of every recorded kubectl call that contains `verb`. */
+  const contextsOf = async (callsFile: string, verb: string): Promise<string[]> =>
+    (await fs.readFile(callsFile, 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as string[])
+      .filter((call) => call.includes(verb))
+      .map((call) => call[call.indexOf('--context') + 1]!);
+
+  const portler = (env: NodeJS.ProcessEnv, ...args: string[]) =>
+    spawnSync(process.execPath, ['--experimental-strip-types', cli(), ...args], { cwd: projectDir, env, encoding: 'utf8', timeout: 60_000 });
+
+  it('env and down k8s use the context up k8s deployed to, not the one active after a switch', async () => {
+    const stateFile = path.join(tempDir, 'objects.json');
+    const callsFile = path.join(tempDir, 'calls.log');
+    await fs.writeFile(path.join(tempDir, 'bin', 'kubectl'), statefulKubectl, { mode: 0o755 });
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), config, 'utf8');
+
+    const up = portler(cliEnv(stateFile, callsFile), 'up', 'k8s', '--detach');
+    assert.equal(up.status, 0, `${up.stdout}\n${up.stderr}`);
+    assert.equal(await savedContext(), 'docker-desktop');
+
+    const switched = cliEnv(stateFile, callsFile, 'kind-other');
+    await fs.writeFile(callsFile, '');
+    // worker has no port, so no port-forward and no entry: only the cluster knows it runs.
+    const env = portler(switched, 'env', 'worker');
+    assert.equal(env.status, 0, env.stderr);
+    assert.match(env.stderr, /worker was started with "portler up k8s"/);
+    assert.deepEqual(await contextsOf(callsFile, 'deployment'), ['docker-desktop']);
+
+    const down = portler(switched, 'down', 'k8s');
+    assert.equal(down.status, 0, `${down.stdout}\n${down.stderr}`);
+    assert.match(down.stdout, /kubectl context: docker-desktop/);
+    const deletes = await contextsOf(callsFile, 'delete');
+    assert.ok(deletes.length > 0);
+    assert.deepEqual([...new Set(deletes)], ['docker-desktop']);
+    assert.deepEqual(JSON.parse(await fs.readFile(stateFile, 'utf8')), []);
+    assert.equal(await savedContext(), undefined, 'a full down forgets the context');
+  });
+
+  it('refuses up k8s on another context while the project still runs on the saved one', async () => {
+    const stateFile = path.join(tempDir, 'objects.json');
+    const callsFile = path.join(tempDir, 'calls.log');
+    await fs.writeFile(path.join(tempDir, 'bin', 'kubectl'), statefulKubectl, { mode: 0o755 });
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), config, 'utf8');
+
+    const first = portler(cliEnv(stateFile, callsFile), 'up', 'k8s', 'worker', '--detach');
+    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+
+    const switched = cliEnv(stateFile, callsFile, 'kind-other');
+    const refused = portler(switched, 'up', 'k8s', 'api', '--detach');
+    assert.equal(refused.status, 1, refused.stdout);
+    assert.match(refused.stderr, /still runs worker on kubectl context "docker-desktop"/);
+    assert.equal(await savedContext(), 'docker-desktop');
+    assert.equal(await contextsOf(callsFile, 'apply').then((contexts) => contexts.includes('kind-other')), false);
+
+    // Once it is down there, the other context is free to use.
+    assert.equal(portler(switched, 'down', 'k8s').status, 0);
+    const second = portler(switched, 'up', 'k8s', 'api', '--detach');
+    assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+    assert.equal(await savedContext(), 'kind-other');
   });
 });
