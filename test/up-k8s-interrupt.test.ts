@@ -183,7 +183,13 @@ for (const scenario of ['rollout', 'stubborn-rollout', 'forward'] as const) {
           run.child.kill('SIGKILL');
           await run.exited;
         }
-        for (const info of Object.values((await readPids(projectDir).catch(() => null))?.services ?? {})) tracked.add(info.pid);
+        for (const info of Object.values((await readPids(projectDir).catch(() => null))?.services ?? {})) {
+          tracked.add(info.pid);
+          // A supervisor leads its own group; stop the kubectl it may have restarted too.
+          if (info.startToken !== undefined && await readProcessStartToken(info.pid) === info.startToken) {
+            try { process.kill(-info.pid, 'SIGKILL'); } catch { /* Already stopped. */ }
+          }
+        }
         for (const pid of tracked) {
           try {
             process.kill(pid, 'SIGKILL');
