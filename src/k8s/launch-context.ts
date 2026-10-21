@@ -22,6 +22,8 @@ interface LaunchContextFile {
   version: 1;
   project: string;
   context: string;
+  /** The namespace it deployed to: portler.yml or --file may name another one by now. */
+  namespace: string;
   /** The kubeconfig `up k8s` read the context from (see kubeconfigInUse). */
   kubeconfig: string;
   recordedAt: string;
@@ -38,6 +40,8 @@ function isLaunchContextFile(value: unknown): value is LaunchContextFile {
     isString(value.project) &&
     isString(value.context) &&
     value.context !== '' &&
+    isString(value.namespace) &&
+    value.namespace !== '' &&
     isString(value.kubeconfig)
   );
 }
@@ -161,7 +165,7 @@ export async function recordLaunchContext(
       let deployed: string[] | undefined;
       let reason = 'kubectl could not list its Deployments';
       try {
-        deployed = await projectDeploymentNames(await clusterForContext(recorded, run), config, run);
+        deployed = await projectDeploymentNames(await clusterForContext(recorded, run), config, run, record.namespace);
       } catch (error) {
         reason = error instanceof Error ? error.message : String(error);
       }
@@ -188,6 +192,7 @@ export async function recordLaunchContext(
     version: 1,
     project: config.projectDir,
     context: cluster.context,
+    namespace: config.k8sNamespace,
     kubeconfig: kubeconfigInUse(),
     recordedAt: new Date().toISOString(),
   };

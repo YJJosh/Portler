@@ -16,8 +16,9 @@ import { projectHash } from '../src/util/hash.ts';
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 
 // The current context and the kubeconfig's contexts come from files the test rewrites;
-// every call is logged. A context named in FAKE_KUBECTL_BROKEN answers nothing, and
-// FAKE_KUBECTL_FAIL_APPLY makes every apply fail.
+// every call is logged. A context named in FAKE_KUBECTL_BROKEN answers nothing,
+// FAKE_KUBECTL_FAIL_APPLY makes every apply fail, and with FAKE_KUBECTL_NAMESPACE set,
+// Deployments are only listed in that namespace.
 const kubectl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -56,7 +57,9 @@ if (rest[0] === 'config' && rest[1] === 'current-context') {
     containerStatuses: [{restartCount: 0}],
   }}]}));
 } else if (rest[0] === 'get' && rest[1] === 'deployment') {
-  const names = deployed();
+  const namespace = rest[rest.indexOf('--namespace') + 1];
+  const elsewhere = process.env.FAKE_KUBECTL_NAMESPACE && namespace !== process.env.FAKE_KUBECTL_NAMESPACE;
+  const names = elsewhere ? [] : deployed();
   if (names.length === 0) console.log('No resources found');
   for (const name of names) console.log('deployment.apps/' + name);
 } else if (rest[0] === 'apply' && process.env.FAKE_KUBECTL_FAIL_APPLY) {
@@ -150,11 +153,11 @@ async function takeCalls(): Promise<string[][]> {
 const pinnedTo = (calls: string[][], context: string) => calls.filter((call) => call[0] === '--context' && call[1] === context);
 const mutating = (calls: string[][]) => calls.filter((call) => call.includes('apply') || call.includes('delete') || call.includes('create'));
 
-async function writeRecord(context: string, kubeconfig = env.KUBECONFIG!): Promise<void> {
+async function writeRecord(context: string, kubeconfig = env.KUBECONFIG!, namespace = 'portler-recorded'): Promise<void> {
   await fs.mkdir(path.dirname(launchContextPath(projectDir)), { recursive: true });
   await fs.writeFile(
     launchContextPath(projectDir),
-    JSON.stringify({ version: 1, project: projectDir, context, kubeconfig, recordedAt: new Date().toISOString() }),
+    JSON.stringify({ version: 1, project: projectDir, context, namespace, kubeconfig, recordedAt: new Date().toISOString() }),
     'utf8',
   );
 }
@@ -227,6 +230,19 @@ describe('the kubectl context up k8s deployed to', () => {
     const up = portler('up', 'k8s', '-d', 'cron');
     assert.equal(up.status, 1, up.output);
     assert.match(up.stderr, /still runs in kubectl context "kind-a" \(retired\)/);
+    assert.deepEqual(mutating(await takeCalls()), []);
+    assert.equal(await readLaunchContext(projectDir), 'kind-a');
+  });
+
+  it('is asked in the namespace up k8s deployed to, even once portler.yml names another', async () => {
+    await writeRecord('kind-a', env.KUBECONFIG!, 'old-ns');
+    await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['worker']), 'utf8');
+    await fs.writeFile(path.join(projectDir, 'portler.yml'), `k8s_namespace: new-ns\n${CONFIG}`, 'utf8');
+    await setContexts(['kind-a', 'kind-b'], 'kind-b');
+    env.FAKE_KUBECTL_NAMESPACE = 'old-ns';
+    const up = portler('up', 'k8s', '-d', 'cron');
+    assert.equal(up.status, 1, up.output);
+    assert.match(up.stderr, /still runs in kubectl context "kind-a" \(worker\)/);
     assert.deepEqual(mutating(await takeCalls()), []);
     assert.equal(await readLaunchContext(projectDir), 'kind-a');
   });

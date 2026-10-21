@@ -552,18 +552,19 @@ export async function deployedK8sServices(
 }
 
 /**
- * The Kubernetes names of every Deployment this project has in its namespace, including
- * one of a service since removed from portler.yml (a full `down k8s` still deletes it, by
- * label). Undefined when kubectl could not say.
+ * The Kubernetes names of every Deployment this project has in `namespace` (its configured
+ * one unless given), including one of a service since removed from portler.yml (a full
+ * `down k8s` still deletes it, by label). Undefined when kubectl could not say.
  */
 export async function projectDeploymentNames(
   cluster: ClusterInfo,
   config: PortlerConfig,
   run: CommandRunner = runCommand,
+  namespace: string = config.k8sNamespace,
 ): Promise<string[] | undefined> {
   const listed = await run(
     'kubectl',
-    kubectlArgs(cluster, ['get', 'deployment', '--namespace', config.k8sNamespace, '--selector', deleteSelector(config), '-o', 'name']),
+    kubectlArgs(cluster, ['get', 'deployment', '--namespace', namespace, '--selector', deleteSelector(config), '-o', 'name']),
   );
   if (listed.code !== 0) return undefined;
   return listed.stdout

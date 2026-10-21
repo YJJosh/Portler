@@ -11,7 +11,7 @@ Portler writes runtime files to `.portler/` in the project directory:
 .portler/pids.json           pids of detached services and the proxy, and how each was launched
 .portler/logs/<service>.log  captured output of detached local services
 .portler/k8s/                generated Kubernetes manifests
-.portler/k8s-context.json    the kubectl context "up k8s" deployed to, used by env and "down k8s"
+.portler/k8s-context.json    the kubectl context and namespace "up k8s" deployed to, used by env and "down k8s"
 ```
 
 These files should **not** be committed:
