@@ -1,35 +1,12 @@
 import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
 import { prefixStream } from '../process/index.ts';
+import { stopChildOnAbort } from '../util/exec.ts';
 
 export { runCommand } from '../util/exec.ts';
 export type { CommandResult, CommandRunner } from '../util/exec.ts';
 
-/** How long a cancelled command may take to exit before it is killed. */
-const CANCEL_GRACE_MS = 2_000;
-
 function commandLine(command: string, args: string[]): string {
   return [command, ...args].join(' ');
-}
-
-/**
- * Stop the child when `signal` aborts: we spawned it and still hold it, so it may be
- * signalled (only it, not a process group). It gets the original signal first, as a
- * Ctrl-C in the terminal would give it, then SIGKILL if it has not exited after the
- * grace period. Returns the cleanup to run once it exits.
- */
-function stopOnAbort(child: ChildProcess, signal: AbortSignal | undefined): () => void {
-  if (!signal) return () => {};
-  let killTimer: NodeJS.Timeout | undefined;
-  const abort = (): void => {
-    child.kill(signal.reason === 'SIGINT' ? 'SIGINT' : 'SIGTERM');
-    killTimer = setTimeout(() => child.kill('SIGKILL'), CANCEL_GRACE_MS);
-  };
-  signal.addEventListener('abort', abort, { once: true });
-  return () => {
-    clearTimeout(killTimer);
-    signal.removeEventListener('abort', abort);
-  };
 }
 
 /**
@@ -42,7 +19,7 @@ export function runStreaming(command: string, args: string[], prefix: string, cw
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    const cleanup = stopOnAbort(child, signal);
+    const cleanup = stopChildOnAbort(child, signal);
 
     if (child.stdout) prefixStream(prefix, child.stdout, process.stdout);
     if (child.stderr) prefixStream(prefix, child.stderr, process.stderr);
@@ -65,7 +42,7 @@ export function captureOutput(command: string, args: string[], signal?: AbortSig
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const cleanup = stopOnAbort(child, signal);
+    const cleanup = stopChildOnAbort(child, signal);
     let stdout = '';
     let stderr = '';
 

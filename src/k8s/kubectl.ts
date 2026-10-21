@@ -221,8 +221,10 @@ export async function getNamespacePhase(
   cluster: ClusterInfo,
   namespace: string,
   run: CommandRunner = runCommand,
+  signal?: AbortSignal,
 ): Promise<string | null> {
-  const result = await run('kubectl', kubectlArgs(cluster, ['get', 'namespace', namespace, '-o', 'jsonpath={.status.phase}']));
+  // REVIEW: abort the in-flight read as well as the sleep between polls.
+  const result = await run('kubectl', kubectlArgs(cluster, ['get', 'namespace', namespace, '-o', 'jsonpath={.status.phase}']), undefined, signal);
 
   if (result.code !== 0) {
     if (isNamespaceNotFound(result.stderr)) return null;
@@ -249,7 +251,7 @@ export async function waitForNamespaceDeleted(
 
   for (;;) {
     signal?.throwIfAborted();
-    const gone = await getNamespacePhase(cluster, namespace, run).then(
+    const gone = await getNamespacePhase(cluster, namespace, run, signal).then(
       (phase) => phase === null,
       () => false,
     );

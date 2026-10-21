@@ -51,7 +51,17 @@ if (args.includes('current-context')) {
     forever();
   }
 } else if (args.includes('get') && args.includes('namespace')) {
-  if (args.some((arg) => arg.includes('jsonpath'))) console.log('Active');
+  // REVIEW: cancellation must reach API reads too, not just rollouts and sleeps.
+  const phase = args.some((arg) => arg.includes('jsonpath'));
+  const phaseMarker = path.join(dir, 'phase-read');
+  const poll = hang === 'namespace-poll' && phase && fs.existsSync(phaseMarker);
+  if (hang === 'namespace-check' || (hang === 'namespace-phase' && phase) || poll) {
+    fs.writeFileSync(path.join(dir, 'namespace.pid'), String(process.pid));
+    forever();
+  } else if (hang === 'namespace-poll' && phase) {
+    fs.writeFileSync(phaseMarker, 'read');
+    console.log('Terminating');
+  } else if (args.some((arg) => arg.includes('jsonpath'))) console.log('Active');
   else console.log(JSON.stringify({metadata: {labels: {
     'app.kubernetes.io/managed-by': 'portler',
     'portler.dev/project': process.env.FAKE_KUBECTL_PROJECT,
@@ -209,3 +219,32 @@ it('foreground up k8s stops waiting for a held lifecycle lock on SIGINT', { time
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+// REVIEW: a live but unresponsive API read used to swallow Ctrl-C indefinitely.
+for (const scenario of ['namespace-check', 'namespace-phase', 'namespace-poll'] as const) {
+  it(`foreground up k8s cancels a hung ${scenario}`, { timeout: 20_000 }, async () => {
+    const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-read-');
+    env.FAKE_KUBECTL_HANG = scenario;
+    const run = startUp(projectDir, env);
+    let hung: number | undefined;
+    try {
+      await waitFor(path.join(fakeDir, 'namespace.pid'), run);
+      hung = Number(await fs.readFile(path.join(fakeDir, 'namespace.pid'), 'utf8'));
+      run.child.kill('SIGTERM');
+      assert.deepEqual(await exitWithin(run, 5_000), [143, null], run.output);
+      assert.equal(isPidAlive(hung), false, 'the API-read child has exited');
+      assert.deepEqual((await calls()).filter((call) => call.includes('apply') || call.includes('delete')), []);
+      const registry = JSON.parse(await fs.readFile(path.join(dir, 'global', 'ports.json'), 'utf8').catch(() => '{"ports":{}}'));
+      assert.deepEqual(registry.ports, {}, 'any startup reservations were released');
+    } finally {
+      if (run.child.exitCode === null && run.child.signalCode === null) {
+        run.child.kill('SIGKILL');
+        await run.exited;
+      }
+      if (hung !== undefined) {
+        try { process.kill(hung, 'SIGKILL'); } catch { /* Already stopped. */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+}

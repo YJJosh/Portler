@@ -24,6 +24,7 @@ import {
   waitForStablePods,
   writeManifestFiles,
 } from '../../k8s/index.ts';
+import { runCommand, type CommandRunner } from '../../util/exec.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
@@ -79,7 +80,7 @@ async function writePortForwardPid(
  * (bounded).
  */
 async function waitOutTerminatingNamespace(cluster: ClusterInfo, config: PortlerConfig, signal?: AbortSignal): Promise<void> {
-  if ((await getNamespacePhase(cluster, config.k8sNamespace)) !== 'Terminating') return;
+  if ((await getNamespacePhase(cluster, config.k8sNamespace, undefined, signal)) !== 'Terminating') return;
 
   process.stdout.write(
     `[portler] namespace ${config.k8sNamespace} is still terminating from a previous down; waiting for it to finish...\n`,
@@ -161,7 +162,10 @@ async function startK8sPhase(
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
   // record, whatever context is active by then. A failed start leaves it in place, since
   // the rollback can fail to delete what it applied.
-  await recordLaunchContext(config, cluster);
+  // REVIEW: the old cluster probe can hang too; use startup cancellation for every
+  // startup API call, never for the rollback that must finish after cancellation.
+  const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
+  await recordLaunchContext(config, cluster, run);
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
@@ -247,7 +251,7 @@ async function startK8sPhase(
     // namespace and thereby authorizing a later `down k8s --volumes` to delete
     // it. `create` fails on AlreadyExists instead, and ensureNamespace re-reads
     // the namespace and refuses unless it really is ours.
-    await ensureNamespace(cluster, config);
+    await ensureNamespace(cluster, config, run);
 
     // Apply and await one dependency level at a time — a service's manifests
     // are not applied until every dependency's pods are stable and answering
@@ -373,9 +377,12 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
     // resolved context is then pinned onto every kubectl call below. The namespace
     // ownership check is read-only and also runs before anything is reserved; the
     // namespace itself is created (never applied) inside the start phase.
-    const cluster = await detectCluster();
+    // REVIEW: installing a signal handler without cancelling these reads would
+    // swallow the first Ctrl-C while an unreachable API/credential helper hangs.
+    const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
+    const cluster = await detectCluster(run);
     process.stdout.write(`[portler] kubectl context: ${cluster.context} (${cluster.type})\n`);
-    await ensureNamespaceClaimable(cluster, config);
+    await ensureNamespaceClaimable(cluster, config, run);
 
     // As in local mode: the lifecycle lock covers the decision, never the
     // foreground wait — but the teardown that ends that wait is a decision again
