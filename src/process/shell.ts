@@ -22,12 +22,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   const child = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
   const forward = (signal: NodeJS.Signals): void => {
     options.onSignal?.(signal);
-    if (!child.pid) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
+    if (child.pid) signalOwnedProcessGroup(child.pid, signal);
   };
   const interrupt = (): void => forward('SIGINT');
   const terminate = (): void => forward('SIGTERM');
@@ -61,6 +56,25 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
   }
 }
 
+/**
+ * Signal a process group this process spawned and still holds. A group that is gone is
+ * fine, and so is EPERM: macOS returns it for a group whose members are all zombies
+ * waiting for their reaper, which happens when a cancelled command's helper has just
+ * been killed. A throw here would escape a signal handler, an abort listener or a timer
+ * as an uncaught exception and end Portler before its rollback.
+ */
+// REVIEW: was `throw` on anything but ESRCH. On macOS a zombie-only group gives EPERM
+// (seen in exec-cancellation.test.ts under load: "kill EPERM" from the drain deadline),
+// and from stopChildOnAbort's abort listener or 2 s timer that crashed Portler mid-rollback.
+export function signalOwnedProcessGroup(pgid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pgid, signal);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ESRCH' && code !== 'EPERM') throw error;
+  }
+}
+
 /** True while the group holds a process that can run; a zombie-only group is gone (see processGroupAlive). */
 function groupAlive(pgid: number): boolean {
   return processGroupAlive(pgid);
@@ -82,11 +96,7 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
   while (groupAlive(pgid)) {
     if (Date.now() >= deadline) {
       process.stderr.write('[portler] process group still running at the deadline; killing it\n');
-      try {
-        process.kill(-pgid, 'SIGKILL');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
+      signalOwnedProcessGroup(pgid, 'SIGKILL');
       // SIGKILL is not instant, and under a PID 1 that does not reap orphans a
       // killed member stays in the group as a zombie. Confirm the group is gone
       // before returning, and say so when it is not: the exit code stays the

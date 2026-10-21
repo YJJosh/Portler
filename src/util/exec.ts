@@ -8,7 +8,7 @@
  * assert the exact argv and drive the control flow without a real daemon.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { drainOwnedProcessGroup } from '../process/shell.ts';
+import { drainOwnedProcessGroup, signalOwnedProcessGroup } from '../process/shell.ts';
 
 export interface CommandResult {
   /** Exit code; -1 when the binary could not be executed at all. */
@@ -29,12 +29,7 @@ export type CommandRunner = (command: string, args: string[], input?: string, si
 export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => Promise<void> {
   if (!signal) return async () => {};
   const forward = (name: NodeJS.Signals): void => {
-    if (!child.pid) return;
-    try {
-      process.kill(-child.pid, name);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
+    if (child.pid) signalOwnedProcessGroup(child.pid, name);
   };
   let killTimer: NodeJS.Timeout | undefined;
   const abort = (): void => {
