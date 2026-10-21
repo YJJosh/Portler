@@ -324,6 +324,27 @@ describe('the kubectl context up k8s deployed to', () => {
     });
   }
 
+  for (const failure of ['corrupt-state', 'runtime-env-write'] as const) {
+    it(`does not leave a launch or reservations after a ${failure} failure`, async () => {
+      await fs.writeFile(path.join(projectDir, 'portler.yml'), 'services:\n  api:\n    image: example/api\n    port: 8080\n');
+      await fs.mkdir(path.join(projectDir, '.portler'), { recursive: true });
+      if (failure === 'corrupt-state') {
+        await fs.writeFile(path.join(projectDir, '.portler', 'state.json'), '{broken');
+      } else {
+        // This fails deterministically even when tests run as root: writeFile
+        // cannot overwrite a directory. Allocation has already reserved api.
+        await fs.mkdir(path.join(projectDir, '.portler', 'runtime.env'));
+      }
+      const failed = portler('up', 'k8s', '-d', 'api');
+      assert.equal(failed.status, 1, failed.output);
+      assert.match(failed.stderr, failure === 'corrupt-state' ? /invalid Portler state file/ : /EISDIR|ENOTDIR/);
+      assert.deepEqual(mutating(await takeCalls()), [], 'nothing was applied');
+      assert.equal(await readLaunchContext(projectDir), null, 'a failed local write must not pin a kubeconfig');
+      const registry = JSON.parse(await fs.readFile(path.join(tempDir, 'global', 'ports.json'), 'utf8').catch(() => '{"ports":{}}'));
+      assert.deepEqual(registry.ports, {}, 'a failure before builds still releases reservations');
+    });
+  }
+
   it('is taken back by a start that removes all it started, unless an earlier start recorded it', { timeout: 60_000 }, async () => {
     await setContexts(['kind-a', 'kind-b'], 'kind-a');
     env.FAKE_KUBECTL_FAIL_APPLY = '1';

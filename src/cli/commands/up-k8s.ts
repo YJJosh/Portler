@@ -162,13 +162,15 @@ async function startK8sPhase(
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   const runningNames = new Set(await liveServiceNames(config.projectDir, pids, undefined, run));
   ensureNoOverlap(runningNames, selectedNames);
+  // REVIEW: Validate cached state before writing a launch record: a corrupt cache
+  // must not leave a record for a start that never reserved ports or applied anything.
+  const state = await readState(config.projectDir);
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
   // record, whatever context is active by then. Only a complete teardown takes it back,
   // since a rollback can fail to delete what it applied. Its kubectl reads are cancellable
   // like every startup call; the rollback's are not, since it must finish.
   const forgetOwnRecord = await recordLaunchContext(config, cluster, run);
 
-  const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
   const startProxy = config.proxy !== undefined && !runningNames.has(PROXY_SERVICE_NAME);
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
@@ -182,11 +184,6 @@ async function startK8sPhase(
     },
   );
   const generatedEnv = buildGeneratedEnv(assignments);
-
-  await writeState(config.projectDir, assignments);
-  await writeRuntimeEnv(config.projectDir, generatedEnv);
-
-  printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
 
   const children = new Map<string, ChildProcess>();
   // The services whose manifests this run has started applying. Teardown deletes
@@ -238,6 +235,12 @@ async function startK8sPhase(
   };
 
   try {
+    // REVIEW: Local state/env writes can fail after allocation too. Keep them inside
+    // rollback coverage so they cannot leak reservations or this start's launch record.
+    await writeState(config.projectDir, assignments);
+    await writeRuntimeEnv(config.projectDir, generatedEnv);
+    printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
+
     signal?.throwIfAborted();
     const builtImages = await buildServiceImages(config, selectedNames, assignments, signal);
 
