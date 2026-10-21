@@ -64,11 +64,13 @@ signal or removal it does not cover, assume it is deliberate, read its tests
 and history, and raise it in the PR instead of removing it. Call out any new
 path in the PR description.
 
+<!-- REVIEW: Startup command cancellation now owns and drains a private group, including credential/build helpers. -->
 - Signal a process group only with proof that it is ours. Proof is one of:
   - Portler spawned it in this same process and still holds the child:
     signal forwarding and the drain deadline in `runShell`
     (`src/process/shell.ts`), readiness-command timeouts
-    (`src/readiness/index.ts`), the port-forward child in
+    (`src/readiness/index.ts`), cancellable startup command trees (kubectl, builds
+    and image loads in `src/util/exec.ts`), the port-forward child in
     `src/k8s/forward-supervisor.ts`.
   - For a recorded service, the leader's start token matches now (`maySignal`
     in `src/process/identity.ts`), or matched earlier in the same stop while

@@ -51,7 +51,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     });
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
-    if (drainMs !== undefined && child.pid) await drainGroup(child.pid, drainMs);
+    if (drainMs !== undefined && child.pid) await drainOwnedProcessGroup(child.pid, drainMs);
     return code;
   } finally {
     clearTimeout(killTimer);
@@ -73,7 +73,9 @@ function groupAlive(pgid: number): boolean {
  * so a platform that watches our pid does not cut the app off the moment the
  * shell dies; what is still there at the deadline is killed.
  */
-async function drainGroup(pgid: number, deadlineMs: number): Promise<void> {
+// REVIEW: Share the existing owned-tree drain with cancellable kubectl/build commands:
+// their helpers can outlive the leader too. Call only for a group this process spawned.
+export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): Promise<void> {
   if (!groupAlive(pgid)) return;
   const deadline = Date.now() + deadlineMs;
   process.stderr.write(`[portler] waiting up to ${deadlineMs} ms for the rest of the process group to exit\n`);

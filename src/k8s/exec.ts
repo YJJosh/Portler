@@ -18,21 +18,22 @@ function commandLine(command: string, args: string[]): string {
 export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, detached: signal !== undefined, stdio: ['ignore', 'pipe', 'pipe'] });
     const cleanup = stopChildOnAbort(child, signal);
 
     if (child.stdout) prefixStream(prefix, child.stdout, process.stdout);
     if (child.stderr) prefixStream(prefix, child.stderr, process.stderr);
 
     child.on('error', (error) => {
-      cleanup();
-      reject(new Error(`failed to run ${command}: ${error.message}`));
+      void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
     });
-    child.on('exit', (code) => {
-      cleanup();
-      if (signal?.aborted) reject(signal.reason);
-      else if (code === 0) resolve();
-      else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}`));
+    // REVIEW: Keep cancellation/escalation active until helper-held pipes close.
+    child.on('close', (code) => {
+      void cleanup().then(() => {
+        if (signal?.aborted) reject(signal.reason);
+        else if (code === 0) resolve();
+        else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}`));
+      }, reject);
     });
   });
 }
@@ -41,7 +42,7 @@ export function runStreaming(command: string, args: string[], prefix: string, cw
 export function captureOutput(command: string, args: string[], signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { detached: signal !== undefined, stdio: ['ignore', 'pipe', 'pipe'] });
     const cleanup = stopChildOnAbort(child, signal);
     let stdout = '';
     let stderr = '';
@@ -54,14 +55,15 @@ export function captureOutput(command: string, args: string[], signal?: AbortSig
     });
 
     child.on('error', (error) => {
-      cleanup();
-      reject(new Error(`failed to run ${command}: ${error.message}`));
+      void cleanup().then(() => reject(new Error(`failed to run ${command}: ${error.message}`)), reject);
     });
-    child.on('exit', (code) => {
-      cleanup();
-      if (signal?.aborted) reject(signal.reason);
-      else if (code === 0) resolve(stdout.trim());
-      else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}\n${stderr.trim()}`));
+    // REVIEW: Keep cancellation/escalation active until helper-held pipes close.
+    child.on('close', (code) => {
+      void cleanup().then(() => {
+        if (signal?.aborted) reject(signal.reason);
+        else if (code === 0) resolve(stdout.trim());
+        else reject(new Error(`command failed (exit ${code ?? 'signal'}): ${commandLine(command, args)}\n${stderr.trim()}`));
+      }, reject);
     });
   });
 }
