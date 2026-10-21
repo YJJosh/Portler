@@ -69,9 +69,8 @@ for (const [name, run] of Object.entries(runners)) {
   }
 }
 
-// REVIEW: macOS answers kill(-pgid) with EPERM once every member of the group is a zombie,
-// as a just-killed helper is until its reaper gets to it. Draining (and signalling) such a
-// group must not throw: from an abort listener or timer that ended Portler before rollback.
+// macOS answers kill(-pgid) with EPERM once every member of the group is a zombie, as a
+// just-killed helper is until its reaper gets to it. Draining such a group must not throw.
 it('drains an owned group left holding only an unreaped zombie', { timeout: 15_000 }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'portler-exec-zombie-'));
   const marker = path.join(dir, 'reaper.pid');

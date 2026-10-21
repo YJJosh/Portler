@@ -157,13 +157,11 @@ async function startK8sPhase(
 ): Promise<K8sStack> {
   signal?.throwIfAborted();
   const pids = await readPids(config.projectDir);
-  // REVIEW: Overlap checks can run docker inspect for an earlier launch. Use the
-  // startup runner here too, or a hung daemon swallows the installed Ctrl-C handler.
+  // The overlap check can run docker inspect for an earlier launch, so it is cancellable too.
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   const runningNames = new Set(await liveServiceNames(config.projectDir, pids, undefined, run));
   ensureNoOverlap(runningNames, selectedNames);
-  // REVIEW: Validate cached state before writing a launch record: a corrupt cache
-  // must not leave a record for a start that never reserved ports or applied anything.
+  // Read the cached state before writing the record, so a corrupt cache leaves none behind.
   const state = await readState(config.projectDir);
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
   // record, whatever context is active by then. Only a complete teardown takes it back,
@@ -235,8 +233,7 @@ async function startK8sPhase(
   };
 
   try {
-    // REVIEW: Local state/env writes can fail after allocation too. Keep them inside
-    // rollback coverage so they cannot leak reservations or this start's launch record.
+    // Inside the rollback, so a failed write releases the ports and the launch record.
     await writeState(config.projectDir, assignments);
     await writeRuntimeEnv(config.projectDir, generatedEnv);
     printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);

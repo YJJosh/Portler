@@ -63,9 +63,6 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
  * been killed. A throw here would escape a signal handler, an abort listener or a timer
  * as an uncaught exception and end Portler before its rollback.
  */
-// REVIEW: was `throw` on anything but ESRCH. On macOS a zombie-only group gives EPERM
-// (seen in exec-cancellation.test.ts under load: "kill EPERM" from the drain deadline),
-// and from stopChildOnAbort's abort listener or 2 s timer that crashed Portler mid-rollback.
 export function signalOwnedProcessGroup(pgid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pgid, signal);

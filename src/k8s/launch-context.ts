@@ -64,9 +64,8 @@ export async function readLaunchContext(projectDir: string): Promise<string | nu
 function kubeconfigInUse(): string {
   const configured = process.env.KUBECONFIG ?? '';
   const paths = configured.split(path.delimiter).filter((entry) => entry !== '');
-  // REVIEW: Match kubectl/client-go: only an unset/empty variable loads the default.
-  // KUBECONFIG=: is nonempty but loads no files; equating it with the default would
-  // let down forget a real launch merely because this empty config lacks its context.
+  // Like kubectl, only an unset or empty variable loads the default file. KUBECONFIG=:
+  // loads no file at all, so it must not count as the default.
   if (configured === '') paths.push(path.join(os.homedir(), '.kube', 'config'));
   return paths.map((entry) => realPath(path.resolve(entry))).join(path.delimiter);
 }
