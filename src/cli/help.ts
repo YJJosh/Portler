@@ -79,6 +79,7 @@ and containers whose liveness cannot be checked; only --force stops them first.
 "env" and "down k8s" use the kubectl context "up k8s" deployed to, even after a
 context switch; a full "down k8s" clears it. "up k8s" refuses another context
 while the project still has Deployments there, or that cluster cannot be asked.
+A recorded launch also requires the original KUBECONFIG; names can collide across files.
 
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 

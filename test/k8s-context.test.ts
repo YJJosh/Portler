@@ -280,7 +280,7 @@ describe('the kubectl context up k8s deployed to', () => {
 
     const down = portler('down', 'k8s');
     assert.equal(down.status, 1, down.output);
-    assert.match(down.stderr, /kubectl context "kind-other", where "portler up k8s" started this project, is not in this kubeconfig/);
+    assert.match(down.stderr, /kubectl context "kind-other", where "portler up k8s" started this project, was recorded with a different kubeconfig/);
     assert.match(down.stderr, new RegExp(`KUBECONFIG=${path.join(tempDir, 'other-kubeconfig')}`));
     assert.equal(await readLaunchContext(projectDir), 'kind-other');
 
@@ -297,4 +297,26 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.match(sameFile.stderr, /"kind-other", where "portler up k8s" started this project, no longer exists/);
     assert.equal(await readLaunchContext(projectDir), null);
   });
+
+  // REVIEW: Both kubeconfigs can contain kind-a while pointing it at different clusters.
+  // Name presence (including an unchanged active name) must not authorize a delete or start.
+  for (const active of ['kind-a', 'kind-b']) {
+    it(`refuses another kubeconfig with the recorded context present (active ${active})`, async () => {
+      await writeRecord('kind-a', path.join(tempDir, 'original-kubeconfig'));
+      await setContexts(['kind-a', 'kind-b'], active);
+      await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['worker']));
+      const originalRecord = await fs.readFile(launchContextPath(projectDir), 'utf8');
+
+      const down = portler('down', 'k8s');
+      assert.equal(down.status, 1, down.output);
+      assert.match(down.stderr, /different kubeconfig/);
+      const up = portler('up', 'k8s', '-d', 'cron');
+      assert.equal(up.status, 1, up.output);
+      assert.match(up.stderr, /different kubeconfig/);
+      assert.deepEqual(mutating(await takeCalls()), []);
+      assert.equal(await fs.readFile(launchContextPath(projectDir), 'utf8'), originalRecord);
+      assert.deepEqual(await deployedIn('kind-a'), ['worker']);
+    });
+  }
+
 });

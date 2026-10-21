@@ -66,16 +66,16 @@ function kubeconfigInUse(): string {
 }
 
 /**
- * The error for a recorded context that is not in this kubeconfig, or undefined when it
- * is missing from the one `up k8s` read too, so it is gone. A shell with another
- * KUBECONFIG (direnv, a temp file) does not see the context while the stack may still
- * run there: forgetting it would release the ports and let `up k8s` start a second copy.
+ * REVIEW: A context name is scoped to its kubeconfig, not globally unique. Refuse a
+ * different kubeconfig even when it has the same name: it may point at another local
+ * cluster, so deleting there or replacing the record could leave the real stack running.
+ * Requiring the original config is simpler than copying credentials or guessing identity.
  */
-function outOfSight(record: LaunchContextFile, refusal: string): Error | undefined {
+function differentKubeconfig(record: LaunchContextFile, refusal: string): Error | undefined {
   const here = kubeconfigInUse();
   if (record.kubeconfig === here) return undefined;
   return new Error(
-    `kubectl context "${record.context}", where "portler up k8s" started this project, is not in this kubeconfig ` +
+    `kubectl context "${record.context}", where "portler up k8s" started this project, was recorded with a different kubeconfig ` +
       `(${here}); "portler up k8s" read it from ${record.kubeconfig}. ${refusal} Run this again with ` +
       `KUBECONFIG=${record.kubeconfig}. If that cluster is gone for good, "portler clean" forgets it, along with the ` +
       "rest of this checkout's runtime state.",
@@ -102,10 +102,10 @@ export type LaunchCluster =
 export async function launchCluster(projectDir: string, run: CommandRunner = runCommand): Promise<LaunchCluster> {
   const record = await readLaunchRecord(projectDir);
   if (record === null) return { source: 'active', cluster: await detectCluster(run) };
+  const error = differentKubeconfig(record, 'Portler will not assume an identically named context is the same cluster.');
+  if (error) throw error;
   const { context } = record;
   if ((await contextExists(context, run)) === false) {
-    const error = outOfSight(record, 'Portler cannot reach that cluster from here, and will not act on another one.');
-    if (error) throw error;
     return { source: 'gone', context };
   }
   try {
@@ -128,11 +128,13 @@ export async function recordLaunchContext(
   run: CommandRunner = runCommand,
 ): Promise<void> {
   const record = await readLaunchRecord(config.projectDir);
+  if (record !== null) {
+    const error = differentKubeconfig(record, `Portler will not start it in "${cluster.context}" as well while it may still run there.`);
+    if (error) throw error;
+  }
   if (record !== null && record.context !== cluster.context) {
     const recorded = record.context;
     if ((await contextExists(recorded, run)) === false) {
-      const error = outOfSight(record, `Portler will not start it in "${cluster.context}" as well while it may still run there.`);
-      if (error) throw error;
       process.stderr.write(
         `[portler] kubectl context "${recorded}", where "portler up k8s" last started this project, no longer exists; ` +
           `starting in "${cluster.context}"\n`,
