@@ -277,7 +277,10 @@ async function startK8sPhase(
       );
       signal?.throwIfAborted();
 
-      const readinessWaits: Array<Promise<void>> = [];
+      // REVIEW: defer probes until every forward has a pid entry, like local up.
+      // An abort while the next pid write awaits I/O must not reject an earlier
+      // probe before any handler can observe it (Node would exit without rollback).
+      const readinessWaits: Array<() => Promise<void>> = [];
 
       // Not cancellable between a spawn and its pid entry: the entry is how the
       // rollback finds the port-forward to stop.
@@ -298,12 +301,13 @@ async function startK8sPhase(
         // k8s mode never has command healthchecks (applyK8sMode strips them),
         // so the readiness env is not consulted.
         readinessWaits.push(
-          waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal),
+          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal),
         );
       }
 
-      for (const wait of readinessWaits) wait.catch(() => {});
-      await Promise.all(readinessWaits);
+      const waits = readinessWaits.map((wait) => wait());
+      for (const wait of waits) wait.catch(() => {});
+      await Promise.all(waits);
       signal?.throwIfAborted();
     }
 

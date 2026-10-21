@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { it } from 'node:test';
+import { readProcessStartToken } from '../src/process/identity.ts';
 import { isPidAlive, readPids } from '../src/process/pids.ts';
 import { projectHash } from '../src/util/hash.ts';
 
@@ -248,3 +249,59 @@ for (const scenario of ['namespace-check', 'namespace-phase', 'namespace-poll'] 
     }
   });
 }
+
+it('cancellation while recording a sibling forward does not leave an unhandled readiness rejection', { timeout: 30_000 }, async () => {
+  const { dir, projectDir, env, deployed } = await fixture('portler-k8s-interrupt-sibling-');
+  await fs.appendFile(path.join(projectDir, 'portler.yml'), '  worker:\n    image: example/worker\n    port: 8081\n');
+  env.FAKE_KUBECTL_HANG = 'forward';
+  // REVIEW: emulate a slow second atomic pid write. The first readiness probe must
+  // not reject unobserved while startup awaits the sibling's state-file I/O.
+  const marker = path.join(dir, 'writing-sibling');
+  const release = path.join(dir, 'finish-write');
+  const preload = path.join(dir, 'slow-state.mjs');
+  await fs.writeFile(preload, `
+import fs from 'node:fs/promises';
+const rename = fs.rename;
+fs.rename = async function(from, to) {
+  if (to === ${JSON.stringify(path.join(projectDir, '.portler', 'pids.json'))} &&
+      await fs.access(to).then(() => true, () => false)) {
+    await fs.writeFile(${JSON.stringify(marker + '.tmp')}, await fs.readFile(from));
+    await rename(${JSON.stringify(marker + '.tmp')}, ${JSON.stringify(marker)});
+    while (!await fs.access(${JSON.stringify(release)}).then(() => true, () => false)) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  return rename.call(this, from, to);
+};
+`);
+  env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${JSON.stringify(preload)}`;
+  const run = startUp(projectDir, env);
+  try {
+    await waitFor(marker, run);
+    run.child.kill('SIGTERM');
+    // Leave enough event-loop turns for an unhandled rejection to be fatal.
+    await sleep(200);
+    await fs.writeFile(release, 'done');
+    assert.deepEqual(await exitWithin(run, 15_000), [143, null], run.output);
+    assert.doesNotMatch(run.output, /UnhandledPromiseRejection/);
+    assert.deepEqual(await deployed(), [], 'both siblings rolled back');
+    assert.deepEqual(Object.keys((await readPids(projectDir))?.services ?? {}), []);
+  } finally {
+    await fs.writeFile(release, 'done');
+    if (run.child.exitCode === null && run.child.signalCode === null) {
+      run.child.kill('SIGKILL');
+      await run.exited;
+    }
+    // If a regression kills the CLI before the second pid entry is renamed,
+    // the marker holds that pending entry. Only signal a still-matching leader.
+    const pending = JSON.parse(await fs.readFile(marker, 'utf8').catch(() => '{"services":{}}')) as {
+      services: Record<string, { pid: number; startToken?: string }>;
+    };
+    for (const info of Object.values(pending.services)) {
+      if (info.startToken !== undefined && await readProcessStartToken(info.pid) === info.startToken) {
+        try { process.kill(-info.pid, 'SIGKILL'); } catch { /* Already stopped. */ }
+      }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
