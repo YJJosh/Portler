@@ -230,6 +230,43 @@ it('foreground up k8s stops waiting for a held lifecycle lock on SIGINT', { time
   }
 });
 
+it('foreground up k8s cancels a hung Docker overlap inspection before recording a launch', { timeout: 20_000 }, async () => {
+  const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-inspect-');
+  const marker = path.join(fakeDir, 'docker.pid');
+  await fs.writeFile(path.join(dir, 'bin', 'docker'), `#!/usr/bin/env node
+require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  await fs.mkdir(path.join(projectDir, '.portler'), { recursive: true });
+  const previous = { version: 1, project: projectDir, startedAt: new Date().toISOString(), services: {
+    old: { pid: 2147483647, command: 'docker run', cwd: projectDir, startedAt: new Date().toISOString(), dockerContainer: 'old' },
+  } };
+  await fs.writeFile(path.join(projectDir, '.portler', 'pids.json'), JSON.stringify(previous));
+  const run = startUp(projectDir, env);
+  let docker: number | undefined;
+  let token: string | null = null;
+  try {
+    await waitFor(marker, run);
+    docker = Number(await fs.readFile(marker, 'utf8'));
+    token = await readProcessStartToken(docker);
+    run.child.kill('SIGTERM');
+    assert.deepEqual(await exitWithin(run, 5_000), [143, null], run.output);
+    assert.equal(isPidAlive(docker), false, 'the Docker inspection exited before startup settled');
+    assert.deepEqual((await calls()).filter((call) => call.includes('apply') || call.includes('delete')), []);
+    assert.deepEqual(await readPids(projectDir), previous, 'another run keeps its bookkeeping');
+    await assert.rejects(fs.access(path.join(projectDir, '.portler', 'k8s-context.json')));
+  } finally {
+    if (run.child.exitCode === null && run.child.signalCode === null) {
+      run.child.kill('SIGKILL');
+      await run.exited;
+    }
+    if (docker !== undefined && token !== null && await readProcessStartToken(docker) === token) {
+      try { process.kill(docker, 'SIGKILL'); } catch { /* Already stopped. */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 // A hung API read must not swallow the signal.
 for (const scenario of ['namespace-check', 'namespace-phase', 'namespace-poll'] as const) {
   it(`foreground up k8s cancels a hung ${scenario}`, { timeout: 20_000 }, async () => {

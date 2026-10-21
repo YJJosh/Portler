@@ -157,13 +157,15 @@ async function startK8sPhase(
 ): Promise<K8sStack> {
   signal?.throwIfAborted();
   const pids = await readPids(config.projectDir);
-  const runningNames = new Set(await liveServiceNames(config.projectDir, pids));
+  // REVIEW: Overlap checks can run docker inspect for an earlier launch. Use the
+  // startup runner here too, or a hung daemon swallows the installed Ctrl-C handler.
+  const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
+  const runningNames = new Set(await liveServiceNames(config.projectDir, pids, undefined, run));
   ensureNoOverlap(runningNames, selectedNames);
   // Before anything touches the cluster: `env` and `down k8s` reach it through this
   // record, whatever context is active by then. Only a complete teardown takes it back,
   // since a rollback can fail to delete what it applied. Its kubectl reads are cancellable
   // like every startup call; the rollback's are not, since it must finish.
-  const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   const forgetOwnRecord = await recordLaunchContext(config, cluster, run);
 
   const state = await readState(config.projectDir);
