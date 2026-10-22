@@ -14,7 +14,7 @@ import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, servicesWithPorts, validateDockerMode } from '../services.ts';
-import { validateK8sForwards, validateK8sMode } from './up-k8s.ts';
+import { k8sForwardConfig, validateK8sForwards, validateK8sMode } from './up-k8s.ts';
 
 /**
  * A cached assignment as a fresh allocation for this config would give it: only the port
@@ -217,7 +217,8 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
 
     // `config` already carries the running containers' pins, so the assignments name the
     // images they run.
-    const { assignments, generatedEnv } = await ensureAssignments(config);
+    // A Kubernetes launch forwards only TCP to this machine, as `up k8s` allocates it.
+    const { assignments, generatedEnv } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);

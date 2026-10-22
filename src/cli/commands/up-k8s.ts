@@ -84,6 +84,22 @@ export function validateK8sForwards(config: PortlerConfig, selectedNames: string
   }
 }
 
+/**
+ * The config the local side of `up k8s` allocates ports with. kubectl port-forward
+ * binds only TCP on this machine, so a tcp+udp service needs a free TCP port here,
+ * not a port free for both protocols; manifests keep the service's own transport.
+ */
+export function k8sForwardConfig(config: PortlerConfig): PortlerConfig {
+  if (!Object.values(config.services).some((service) => serviceTransport(service) === 'tcp+udp')) return config;
+  const services = Object.fromEntries(
+    Object.entries(config.services).map(([name, service]) => [
+      name,
+      serviceTransport(service) === 'tcp+udp' ? { ...service, transport: 'tcp' as const } : service,
+    ]),
+  );
+  return { ...config, services };
+}
+
 /** Record one freshly spawned port-forward, merging with the existing file (see up.ts). */
 async function writePortForwardPid(
   config: PortlerConfig,
@@ -199,7 +215,10 @@ async function startK8sPhase(
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
   // As in up.ts: Ctrl-C may end the wait for another project's hold on the port
   // registry, before anything is reserved.
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services, signal }).catch(
+  const assignments = await allocateAssignments(k8sForwardConfig(config), state, reserveNames, runningNames, {
+    recorded: pids?.services,
+    signal,
+  }).catch(
     async (error: unknown) => {
       // Nothing is reserved or applied yet.
       await forgetOwnRecord();

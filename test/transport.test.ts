@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { validateK8sForwards } from '../src/cli/commands/up-k8s.ts';
+import { k8sForwardConfig, validateK8sForwards } from '../src/cli/commands/up-k8s.ts';
 import { ensureAssignments } from '../src/cli/commands/env.ts';
 import { portLabel } from '../src/cli/table.ts';
 import { loadConfig } from '../src/config/loader.ts';
@@ -268,6 +268,28 @@ describe('allocateAssignments with UDP', () => {
       assert.equal(assignments.game!.transport, 'udp');
       const registry = await readRegistry();
       assert.equal(registry.ports[String(assignments.game!.port)]?.transport, 'udp');
+    } finally {
+      await close();
+    }
+  });
+
+  it('up k8s keeps a tcp+udp service on its port when only the UDP side is busy here', async () => {
+    const { port: busy, close } = await occupyUdpPort();
+    try {
+      const config = makeConfig('/project-k8s', [makeService({ port: 7777, transport: 'tcp+udp' })]);
+      const state: StateFile = {
+        version: 1,
+        project: '/project-k8s',
+        updatedAt: new Date().toISOString(),
+        services: {
+          game: { name: 'game', port: busy, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: `http://localhost:${busy}` },
+        },
+      };
+      const forwarded = k8sForwardConfig(config);
+      assert.equal(config.services.game!.transport, 'tcp+udp');
+      const assignments = await allocateAssignments(forwarded, state, ['game'], new Set());
+      assert.equal(assignments.game!.port, busy);
+      assert.equal('transport' in assignments.game!, false);
     } finally {
       await close();
     }
