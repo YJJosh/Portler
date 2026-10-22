@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { managedVolumeName, normalizeVolumeToken, volumeFullName, volumeLabelArgs, volumeScope } from '../config/index.ts';
 import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue } from '../env/index.ts';
+import { serviceTransport, transportProtocols } from '../ports/transport.ts';
 import { dockerLabelArgs, PROJECT_LABEL } from './ownership.ts';
 import type { Assignments, DockerConfig, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
@@ -138,7 +139,10 @@ function dockerRunCommand(
   ];
 
   if (assignment && service.port !== undefined) {
-    args.push('-p', `${assignment.host}:${assignment.port}:${service.port}`);
+    for (const protocol of transportProtocols(serviceTransport(service))) {
+      // Docker publishes TCP when no protocol is given; keep that spelling for TCP.
+      args.push('-p', `${assignment.host}:${assignment.port}:${service.port}${protocol === 'udp' ? '/udp' : ''}`);
+    }
   }
 
   for (const [key, value] of dockerEnvEntries(env, explicitEnvKeys)) {

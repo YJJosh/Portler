@@ -26,6 +26,7 @@ import {
 } from '../../k8s/index.ts';
 import { runCommand, type CommandRunner } from '../../util/exec.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
+import { serviceTransport } from '../../ports/transport.ts';
 import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { isTcpReady, waitForServiceReady } from '../../readiness/index.ts';
@@ -54,6 +55,30 @@ export function validateK8sMode(config: PortlerConfig, selectedNames: string[]):
     if (!service.docker) {
       throw new Error(
         `service "${serviceName}" has no container config for Kubernetes. Add image, build, dockerfile, or docker: {...}`,
+      );
+    }
+  }
+}
+
+/**
+ * `kubectl port-forward` carries TCP only. A UDP-only service would get a local
+ * port that nothing answers on, so `up k8s` refuses it; `k8s render` still
+ * renders it. A tcp+udp service is forwarded for its TCP half.
+ */
+export function validateK8sForwards(config: PortlerConfig, selectedNames: string[]): void {
+  for (const serviceName of selectedNames) {
+    const service = config.services[serviceName]!;
+    if (service.port === undefined) continue;
+    const transport = serviceTransport(service);
+    if (transport === 'udp') {
+      throw new Error(
+        `service "${serviceName}" uses UDP, and "portler up k8s" reaches services through kubectl port-forward, which only carries TCP. ` +
+          'Run it with "portler up docker", or expose it from the cluster yourself (render it with "portler k8s render").',
+      );
+    }
+    if (transport === 'tcp+udp') {
+      process.stderr.write(
+        `[portler] warning: service "${serviceName}" uses TCP and UDP; kubectl port-forward only forwards its TCP port to this machine.\n`,
       );
     }
   }
@@ -378,6 +403,7 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
   reportImageOverrides(modeConfig, args.images ?? {});
 
   validateK8sMode(config, selectedNames);
+  validateK8sForwards(config, selectedNames);
 
   // As in local mode (startServices in up.ts): a foreground run that gets Ctrl-C or
   // SIGTERM during startup rolls back what it started and exits 130 or 143.

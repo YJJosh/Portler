@@ -1,3 +1,5 @@
+import type { PortTransport } from './config.ts';
+
 export interface ServiceAssignment {
   name: string;
   port: number;
@@ -6,6 +8,8 @@ export interface ServiceAssignment {
   urlHost: string;
   protocol: string;
   url: string;
+  /** Set only for a port that is not plain TCP. */
+  transport?: PortTransport;
   containerName?: string;
   image?: string;
 }
@@ -83,6 +87,8 @@ export interface RegistryEntry {
   desiredPort?: number;
   /** Host the reservation was probed/bound on; absent in pre-0.2 files. */
   host?: string;
+  /** Transports the reservation was probed on; absent means TCP. */
+  transport?: PortTransport;
   assignedAt: string;
 }
 

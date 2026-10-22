@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DEFAULT_PORT_RANGE } from '../constants.ts';
 import { parseDotEnv } from '../parse/dotenv.ts';
 import { parseYaml } from '../parse/yaml.ts';
+import { isPortTransport, PORT_TRANSPORTS, usesTcp } from '../ports/transport.ts';
 import { pathExists } from '../util/fs.ts';
 import { didYouMean } from '../util/suggest.ts';
 import { findDependencyCycle, normalizeDependsOn } from './dependencies.ts';
@@ -23,7 +24,7 @@ import {
   optionalPort,
   optionalString,
 } from './scalars.ts';
-import type { EnvMap, PortlerConfig, PortRange, ServiceConfig, UnknownMap } from '../types/index.ts';
+import type { EnvMap, PortlerConfig, PortRange, PortTransport, ServiceConfig, UnknownMap } from '../types/index.ts';
 
 function normalizePortRange(root: UnknownMap): PortRange {
   const rawRange = root.port_range;
@@ -97,6 +98,22 @@ function validateHealthcheckShape(service: ServiceConfig): void {
   if (healthcheck.type === 'http' && !healthcheck.url && service.port === undefined) {
     throw new Error(`services.${service.name}.healthcheck type "http" requires a url or services.${service.name}.port`);
   }
+  // A UDP-only port accepts no TCP connections, so neither check could ever pass.
+  if (!usesTcp(service) && (healthcheck.type === 'tcp' || (healthcheck.type === 'http' && !healthcheck.url))) {
+    throw new Error(
+      `services.${service.name}.healthcheck type "${healthcheck.type}" checks the port over TCP, but services.${service.name}.transport is "udp". ` +
+        'Use a command healthcheck, an http url on another service, or "none".',
+    );
+  }
+}
+
+function normalizeTransport(value: unknown, serviceName: string, port: number | undefined): PortTransport | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPortTransport(value)) {
+    throw new Error(`services.${serviceName}.transport must be one of: ${PORT_TRANSPORTS.join(', ')}`);
+  }
+  if (port === undefined) throw new Error(`services.${serviceName}.transport requires services.${serviceName}.port`);
+  return value;
 }
 
 export async function findConfigFile(projectDir: string, explicitFile?: string): Promise<string> {
@@ -200,6 +217,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     const serviceUrlHost = optionalString(rawService.url_host, `services.${serviceName}.url_host`) ?? urlHost;
     const serviceProtocol = optionalString(rawService.protocol, `services.${serviceName}.protocol`) ?? protocol;
     const port = optionalPort(rawService.port, `services.${serviceName}.port`);
+    const transport = normalizeTransport(rawService.transport, serviceName, port);
     const command = optionalString(rawService.command, `services.${serviceName}.command`);
     const cwd = optionalString(rawService.cwd, `services.${serviceName}.cwd`) ?? '.';
     const serviceEnv = normalizeEnvObject(rawService.env ?? rawService.environment, `services.${serviceName}.env/environment`);
@@ -214,6 +232,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
       command,
       cwd,
       port,
+      ...(transport === undefined ? {} : { transport }),
       portEnv: normalizePortEnv(rawService.port_env ?? rawService.portEnv),
       env: serviceEnv,
       host: serviceHost,

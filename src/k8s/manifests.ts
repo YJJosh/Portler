@@ -1,5 +1,6 @@
 import { k8sName } from '../config/index.ts';
 import { PORTLER_INTERNAL_ENV_KEYS } from '../env/index.ts';
+import { serviceTransport, transportProtocols } from '../ports/transport.ts';
 import { projectHash } from '../util/hash.ts';
 import type { EnvMap, PortlerConfig, ServiceConfig, UnknownMap } from '../types/index.ts';
 
@@ -140,7 +141,15 @@ function deploymentManifest(
   };
 
   if (docker.command) container.command = ['sh', '-lc', docker.command];
-  if (service.port !== undefined) container.ports = [{ containerPort: service.port }];
+  if (service.port !== undefined) {
+    const protocols = transportProtocols(serviceTransport(service));
+    // TCP is Kubernetes' default, so a TCP-only service renders as it always did.
+    container.ports = protocols.map((protocol) =>
+      protocol === 'tcp' && protocols.length === 1
+        ? { containerPort: service.port }
+        : { name: protocol, containerPort: service.port, protocol: protocol.toUpperCase() },
+    );
+  }
   if (env.length > 0) container.env = env;
   if (volume) container.volumeMounts = [{ name: 'data', mountPath: volumeMountPath(service) }];
 
@@ -164,6 +173,13 @@ function deploymentManifest(
   };
 }
 
+/** Service ports: one per protocol; a port list with more than one entry must name each. */
+function servicePorts(service: ServiceConfig): UnknownMap[] {
+  const protocols = transportProtocols(serviceTransport(service));
+  if (protocols.length === 1 && protocols[0] === 'tcp') return [{ port: service.port, targetPort: service.port }];
+  return protocols.map((protocol) => ({ name: protocol, port: service.port, targetPort: service.port, protocol: protocol.toUpperCase() }));
+}
+
 function serviceManifest(config: PortlerConfig, service: ServiceConfig, name: string): K8sManifest {
   return {
     apiVersion: 'v1',
@@ -173,7 +189,7 @@ function serviceManifest(config: PortlerConfig, service: ServiceConfig, name: st
       selector: { app: name },
       // Expose the declared port so in-cluster DNS URLs like
       // postgres://…@postgres:5432 work exactly like Docker network aliases.
-      ports: [{ port: service.port, targetPort: service.port }],
+      ports: servicePorts(service),
     },
   };
 }

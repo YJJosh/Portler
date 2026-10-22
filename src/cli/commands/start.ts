@@ -1,12 +1,15 @@
+import dgram from 'node:dgram';
 import net from 'node:net';
 import { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
+import { isPortFree } from '../../ports/probe.ts';
+import { serviceTransport } from '../../ports/transport.ts';
 import { runShell } from '../../process/shell.ts';
-import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, EnvMap, PortlerConfig, PortTransport, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 
-async function freePort(host: string): Promise<number> {
+function ephemeralTcpPort(host: string): Promise<number> {
   const server = net.createServer();
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -16,6 +19,27 @@ async function freePort(host: string): Promise<number> {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
+}
+
+function ephemeralUdpPort(host: string): Promise<number> {
+  const socket = dgram.createSocket({ type: net.isIPv6(host) ? 'udp6' : 'udp4' });
+  return new Promise((resolve, reject) => {
+    socket.once('error', reject);
+    socket.bind(0, host, () => {
+      const { port } = socket.address();
+      socket.close(() => resolve(port));
+    });
+  });
+}
+
+/** A port the OS calls free on every protocol of the service's transport. */
+async function freePort(host: string, transport: PortTransport): Promise<number> {
+  if (transport === 'udp') return ephemeralUdpPort(host);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const port = await ephemeralTcpPort(host);
+    if (transport === 'tcp' || (await isPortFree(port, host, 'udp'))) return port;
+  }
+  throw new Error(`could not find a port on ${host} that is free for both TCP and UDP`);
 }
 
 export function selectStartService(config: PortlerConfig, requested: string[]): ServiceConfig {
@@ -42,7 +66,7 @@ export async function buildStartEnv(
   if (platformPort !== undefined && (!/^\d+$/.test(platformPort) || Number(platformPort) < 1 || Number(platformPort) > 65535)) {
     throw new Error(`PORT must be a port between 1 and 65535, got "${platformPort}"`);
   }
-  const port = platformPort !== undefined ? Number(platformPort) : service.port ?? await freePort(service.host);
+  const port = platformPort !== undefined ? Number(platformPort) : service.port ?? await freePort(service.host, serviceTransport(service));
   const assignments: Assignments = {};
   for (const entry of Object.values(config.services)) {
     const assignedPort = entry.name === service.name ? port : entry.port;

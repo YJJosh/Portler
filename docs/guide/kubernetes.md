@@ -162,6 +162,8 @@ As with Docker services, `port:` is the internal container port; the in-cluster 
 
 When a top-level [`proxy:`](/guide/proxy) is configured, it runs as a host process after the port-forwards are ready and routes to those forwarded ports, so the project URL and `PORTLER_PROXY_*` variables work in Kubernetes mode too.
 
+A service with `transport: udp` renders its container port and Service port as UDP (`tcp+udp` renders both, named `tcp` and `udp`). `up k8s` refuses a UDP-only service, since `kubectl port-forward` only carries TCP, and forwards only the TCP half of a `tcp+udp` service.
+
 `command` healthchecks are **ignored** in Kubernetes mode (they usually shell into Docker containers); readiness uses the Deployment rollout plus a TCP check through the port-forward.
 
 ::: warning
