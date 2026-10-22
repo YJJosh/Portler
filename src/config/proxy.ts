@@ -1,4 +1,5 @@
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS, PROXY_SERVICE_NAME } from '../constants.ts';
+import { usesTcp } from '../ports/transport.ts';
 import { isPort } from '../util/guards.ts';
 import { normalizeIpAddress } from '../util/ip.ts';
 import { isObject, normalizeStringArray, optionalString } from './scalars.ts';
@@ -52,6 +53,9 @@ export function normalizeProxyConfig(root: UnknownMap, services: Record<string, 
     if (!service) throw new Error(`proxy route "${prefix}" targets unknown service "${serviceName}"`);
     if (service.port === undefined) {
       throw new Error(`proxy route "${prefix}" targets service "${serviceName}" which has no port`);
+    }
+    if (!usesTcp(service)) {
+      throw new Error(`proxy route "${prefix}" targets service "${serviceName}", whose port is UDP only; the proxy forwards HTTP over TCP`);
     }
 
     routes.push({ prefix, service: serviceName });

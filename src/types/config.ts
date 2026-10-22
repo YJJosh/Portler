@@ -9,6 +9,9 @@ export interface DependencyConfig {
 
 export type HealthcheckType = 'none' | 'tcp' | 'http' | 'command';
 
+/** Which IP transports a service's port uses. `tcp` is the default. */
+export type PortTransport = 'tcp' | 'udp' | 'tcp+udp';
+
 export interface HealthcheckConfig {
   type: HealthcheckType;
   command?: string;
@@ -90,6 +93,11 @@ export interface ServiceConfig {
   command?: string;
   cwd: string;
   port?: number;
+  /**
+   * Transports the port is published and checked on. Absent means `tcp`, so
+   * library callers that build a ServiceConfig by hand keep today's behavior.
+   */
+  transport?: PortTransport;
   portEnv: string[];
   env: UnknownMap;
   /** Always set by the loader (service value or root fallback). */

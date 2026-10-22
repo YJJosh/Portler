@@ -40,7 +40,7 @@ A top-level `dockerfile:` on the service (without `build:`) is shorthand for `bu
 
 ## Ports in Docker services
 
-For Docker services, `port:` is the **internal container port**. Portler maps a dynamically assigned host port to it, so from the outside the service behaves exactly like a local one: references (`api.url`, `${api.port}`) and `PORTLER_*` variables use the assigned host port. Inside the container, `port_env` receives the internal container port.
+For Docker services, `port:` is the **internal container port**. Portler maps a dynamically assigned host port to it, so from the outside the service behaves exactly like a local one: references (`api.url`, `${api.port}`) and `PORTLER_*` variables use the assigned host port. Inside the container, `port_env` receives the internal container port. A service with `transport: udp` or `tcp+udp` is published for those protocols; see [UDP ports](/guide/ports#udp-ports).
 
 ## Environment
 

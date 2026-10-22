@@ -4,6 +4,7 @@ import { isPort } from '../util/guards.ts';
 import { CorruptStateFileError } from '../util/json-file.ts';
 import { withRegistryLock } from './lock.ts';
 import { isPortFree } from './probe.ts';
+import { serviceTransport } from './transport.ts';
 import { pruneRegistry, readRegistry, writeRegistry } from './registry.ts';
 import type { Assignments, PidServiceInfo, PortlerConfig, RegistryFile, ServiceAssignment, ServiceConfig, StateFile } from '../types/index.ts';
 
@@ -17,6 +18,7 @@ function serviceUrl(service: ServiceConfig, port: number): string {
 }
 
 function makeAssignment(service: ServiceConfig, port: number): ServiceAssignment {
+  const transport = serviceTransport(service);
   return {
     name: service.name,
     port,
@@ -25,6 +27,7 @@ function makeAssignment(service: ServiceConfig, port: number): ServiceAssignment
     urlHost: service.urlHost,
     protocol: service.protocol,
     url: serviceUrl(service, port),
+    ...(transport === 'tcp' ? {} : { transport }),
     containerName: service.docker?.containerName,
     image: service.docker?.image,
   };
@@ -61,7 +64,7 @@ async function choosePort(
     ownRegisteredPort !== undefined &&
     isPort(ownRegisteredPort) &&
     !reservedPorts.has(ownRegisteredPort) &&
-    (await isPortFree(ownRegisteredPort, service.host))
+    (await isPortFree(ownRegisteredPort, service.host, serviceTransport(service)))
   ) {
     return ownRegisteredPort;
   }
@@ -78,7 +81,7 @@ async function choosePort(
   for (const candidate of candidates) {
     if (!isPort(candidate)) continue;
     if (reservedPorts.has(candidate)) continue;
-    if (await isPortFree(candidate, service.host)) return candidate;
+    if (await isPortFree(candidate, service.host, serviceTransport(service))) return candidate;
   }
 
   const { start, end } = config.portRange;
@@ -91,7 +94,7 @@ async function choosePort(
   for (let attempt = 0; attempt < size; attempt += 1) {
     const port = start + ((offset + attempt) % size);
     if (reservedPorts.has(port)) continue;
-    if (await isPortFree(port, service.host)) return port;
+    if (await isPortFree(port, service.host, serviceTransport(service))) return port;
   }
 
   throw new Error(`no free ports available in range ${start}-${end}`);
@@ -192,6 +195,7 @@ export async function allocateAssignments(
         port: assignment.port,
         desiredPort: assignment.desiredPort,
         host: assignment.host,
+        ...(assignment.transport === undefined ? {} : { transport: assignment.transport }),
         assignedAt: new Date().toISOString(),
       };
     }

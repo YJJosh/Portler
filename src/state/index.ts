@@ -3,6 +3,7 @@ import path from 'node:path';
 import { formatDotEnv } from '../parse/dotenv.ts';
 import { isObject, isOptionalPort, isOptionalString, isPort, isString } from '../util/guards.ts';
 import { readValidatedJsonFile, writeJsonFile } from '../util/json-file.ts';
+import { isPortTransport } from '../ports/transport.ts';
 import type { Assignments, EnvMap, ServiceAssignment, StateFile } from '../types/index.ts';
 
 function isServiceAssignment(value: unknown): value is ServiceAssignment {
@@ -15,6 +16,7 @@ function isServiceAssignment(value: unknown): value is ServiceAssignment {
     isString(value.urlHost) &&
     isString(value.protocol) &&
     isString(value.url) &&
+    (value.transport === undefined || isPortTransport(value.transport)) &&
     isOptionalString(value.containerName) &&
     isOptionalString(value.image)
   );

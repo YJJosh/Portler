@@ -26,6 +26,7 @@ import {
 } from '../../k8s/index.ts';
 import { runCommand, type CommandRunner } from '../../util/exec.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
+import { serviceTransport } from '../../ports/transport.ts';
 import { readPids, liveServiceNames, stopServices, updatePids, waitForForegroundServices } from '../../process/index.ts';
 import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { isTcpReady, waitForServiceReady } from '../../readiness/index.ts';
@@ -57,6 +58,46 @@ export function validateK8sMode(config: PortlerConfig, selectedNames: string[]):
       );
     }
   }
+}
+
+/**
+ * `kubectl port-forward` carries TCP only. A UDP-only service would get a local
+ * port that nothing answers on, so `up k8s` refuses it; `k8s render` still
+ * renders it. A tcp+udp service is forwarded for its TCP half.
+ */
+export function validateK8sForwards(config: PortlerConfig, selectedNames: string[]): void {
+  for (const serviceName of selectedNames) {
+    const service = config.services[serviceName]!;
+    if (service.port === undefined) continue;
+    const transport = serviceTransport(service);
+    if (transport === 'udp') {
+      throw new Error(
+        `service "${serviceName}" uses UDP, and "portler up k8s" reaches services through kubectl port-forward, which only carries TCP. ` +
+          'Run it with "portler up docker", or expose it from the cluster yourself (render it with "portler k8s render").',
+      );
+    }
+    if (transport === 'tcp+udp') {
+      process.stderr.write(
+        `[portler] warning: service "${serviceName}" uses TCP and UDP; kubectl port-forward only forwards its TCP port to this machine.\n`,
+      );
+    }
+  }
+}
+
+/**
+ * The config the local side of `up k8s` allocates ports with. kubectl port-forward
+ * binds only TCP on this machine, so a tcp+udp service needs a free TCP port here,
+ * not a port free for both protocols; manifests keep the service's own transport.
+ */
+export function k8sForwardConfig(config: PortlerConfig): PortlerConfig {
+  if (!Object.values(config.services).some((service) => serviceTransport(service) === 'tcp+udp')) return config;
+  const services = Object.fromEntries(
+    Object.entries(config.services).map(([name, service]) => [
+      name,
+      serviceTransport(service) === 'tcp+udp' ? { ...service, transport: 'tcp' as const } : service,
+    ]),
+  );
+  return { ...config, services };
 }
 
 /** Record one freshly spawned port-forward, merging with the existing file (see up.ts). */
@@ -174,7 +215,10 @@ async function startK8sPhase(
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
   // As in up.ts: Ctrl-C may end the wait for another project's hold on the port
   // registry, before anything is reserved.
-  const assignments = await allocateAssignments(config, state, reserveNames, runningNames, { recorded: pids?.services, signal }).catch(
+  const assignments = await allocateAssignments(k8sForwardConfig(config), state, reserveNames, runningNames, {
+    recorded: pids?.services,
+    signal,
+  }).catch(
     async (error: unknown) => {
       // Nothing is reserved or applied yet.
       await forgetOwnRecord();
@@ -378,6 +422,7 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
   reportImageOverrides(modeConfig, args.images ?? {});
 
   validateK8sMode(config, selectedNames);
+  validateK8sForwards(config, selectedNames);
 
   // As in local mode (startServices in up.ts): a foreground run that gets Ctrl-C or
   // SIGTERM during startup rolls back what it started and exits 130 or 143.

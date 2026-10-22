@@ -6,6 +6,10 @@ import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 
+// REVIEW: the change added UDP and tcp+udp ephemeral-port picking here, but the
+// loader rejects `transport` without `port`, and a service with a port uses it
+// as is, so that code could never run. Reverted to the TCP-only original; a
+// transport-less service is TCP.
 async function freePort(host: string): Promise<number> {
   const server = net.createServer();
   return new Promise((resolve, reject) => {

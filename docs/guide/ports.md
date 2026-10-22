@@ -11,7 +11,8 @@ Every service that declares a `port:` gets a port assigned when the stack starts
 3. **Its previous assignment** from the project's `.portler/state.json`.
 4. **A scan of the port range** (`51000`–`59999` by default). The scan starts at an offset derived from a hash of the project directory and service name, so each service has a stable "home" in the range and different projects spread out instead of contending for the same low ports.
 
-Freeness is verified with a real TCP probe, and services that are **currently running** keep their port verbatim — their port is busy precisely because they're listening on it.
+<!-- REVIEW: Allocation now binds each selected transport, not always TCP. -->
+Freeness is verified by temporarily binding the port on each of the service's transports (TCP by default; see [UDP ports](#udp-ports)), and services that are **currently running** keep their port verbatim — their port is busy precisely because they're listening on it.
 
 The result: ports are **sticky**. Restarting a stack normally reproduces the same ports, and a stack that's already running is never disturbed.
 
@@ -73,6 +74,26 @@ portler ports           # show this project's assigned ports
 portler clean --ports   # release this project's reservations
 portler clean --global  # prune stale entries left by crashed/deleted projects
 ```
+
+## UDP ports
+
+A port is TCP unless the service says otherwise. Game servers and other UDP apps set `transport`:
+
+```yaml
+services:
+  bedrock:
+    image: itzg/minecraft-bedrock-server
+    port: 19132
+    transport: udp      # UDP only
+  satisfactory:
+    image: wolveix/satisfactory-server
+    port: 7777
+    transport: tcp+udp  # the same port number on both
+```
+
+Portler then picks a port that is free for those protocols, records the reservation for them, and publishes a Docker container port with `/udp` (both for `tcp+udp`). Everything else about the port stays the same: `${bedrock.port}`, `port_env` and `PORTLER_*` variables. `portler ports` and `portler ps` show the port as `19132/udp` or `7777/tcp+udp`; the URL keeps the service's `protocol`, which is only the URL scheme.
+
+UDP has no connection to probe, so a `udp` service gets no readiness check by default; give it a `command` [healthcheck](/reference/configuration#healthcheck) if something should wait for it. A `tcp` or plain `http` check on a UDP-only port is an error, and so is a [proxy](/guide/proxy) route to one: the proxy forwards HTTP over TCP. `portler up k8s` refuses a UDP-only service, because `kubectl port-forward` only carries TCP (a `tcp+udp` service is forwarded for TCP only); `portler k8s render` renders the right protocols.
 
 ## Hosts, URLs, and protocol
 

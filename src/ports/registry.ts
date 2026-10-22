@@ -2,6 +2,7 @@ import { isObject, isOptionalPort, isOptionalString, isPort, isString } from '..
 import { readValidatedJsonFile, writeJsonFile } from '../util/json-file.ts';
 import { registryPath } from './locations.ts';
 import { isPortFree } from './probe.ts';
+import { isPortTransport } from './transport.ts';
 import type { RegistryEntry, RegistryFile } from '../types/index.ts';
 
 const REGISTRY_FREE_STALE_MS = 5 * 60_000;
@@ -14,6 +15,7 @@ function isRegistryEntry(value: unknown): value is RegistryEntry {
     isPort(value.port) &&
     isOptionalPort(value.desiredPort) &&
     isOptionalString(value.host) &&
+    (value.transport === undefined || isPortTransport(value.transport)) &&
     isString(value.assignedAt)
   );
 }
@@ -66,7 +68,7 @@ export async function pruneRegistry(registry: RegistryFile): Promise<void> {
     // Older registries did not store host and were always probed on loopback.
     // Probing only 127.0.0.1 for a reservation bound to ::1/a LAN interface can
     // incorrectly declare a live service stale and hand its port out again.
-    if (age > REGISTRY_FREE_STALE_MS && (await isPortFree(port, entry.host ?? '127.0.0.1'))) {
+    if (age > REGISTRY_FREE_STALE_MS && (await isPortFree(port, entry.host ?? '127.0.0.1', entry.transport))) {
       delete registry.ports[portText];
     }
   }

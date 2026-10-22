@@ -15,7 +15,7 @@ Prints one row per running service with:
 - **mode** — `local`, `docker`, or `k8s` for a port-forward started by `up k8s`, with `(prod)` when the service was started with `--prod`
 - **pid** — the process id
 - **status** — whether the service is still alive (below)
-- **port / URL** — the assigned port and generated URL
+- **port / URL** — the assigned port and generated URL; a `udp` or `tcp+udp` port shows its [transport](/guide/ports#udp-ports), as in `19132/udp` (not for a `k8s` port-forward, which is TCP only)
 - **container** — the Docker container name (Docker services)
 - **image** — the `--image` pin the service runs from (shown when any service has one)
 

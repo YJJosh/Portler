@@ -1,6 +1,7 @@
 import { PACKAGE_NAME, VERSION } from '../constants.ts';
 
 export function printHelp(): void {
+  // REVIEW: Include the transport restriction in CLI help as well as the guides.
   process.stdout.write(`${PACKAGE_NAME} ${VERSION}
 
 Usage:
@@ -75,6 +76,10 @@ entries are kept, and "ps" reports "running (group)" with unverified ownership.
 
 "clean" refuses running services, including containers left by dead supervisors
 and containers whose liveness cannot be checked; only --force stops them first.
+
+Ports use TCP by default; per-service "transport: udp" or "tcp+udp" selects UDP
+or both. "up k8s" and explicit "env k8s" refuse UDP-only services, since kubectl
+port-forward carries only TCP; "tcp+udp" forwards TCP only. "k8s render" renders both.
 
 "up k8s" also checks container liveness for overlaps; "env" preserves their ports.
 

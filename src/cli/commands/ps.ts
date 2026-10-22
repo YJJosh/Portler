@@ -4,7 +4,7 @@ import { readPids, serviceLiveness } from '../../process/index.ts';
 import type { ServiceLiveness } from '../../process/index.ts';
 import type { PidServiceInfo } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
-import { printTable } from '../table.ts';
+import { portLabel, printTable } from '../table.ts';
 import { selectServiceTargets } from '../services.ts';
 
 export async function commandPs(args: ParsedArgs): Promise<number> {
@@ -25,12 +25,15 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   const hasImage = entries.some(([, info]) => info.image);
   const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : [])];
   const rows = entries.map(([serviceName, info], index) => {
+    const mode = modeLabel(info);
+    // REVIEW: show the transport like `portler ports` does; a k8s port-forward carries TCP only.
+    const transport = mode.startsWith('k8s') ? undefined : config.services[serviceName]?.transport;
     return [
       serviceName,
-      modeLabel(info),
+      mode,
       String(info.pid),
       statusLabel(liveness[index]!),
-      info.port !== undefined ? String(info.port) : '-',
+      info.port !== undefined ? portLabel(info.port, transport) : '-',
       info.url ?? '-',
       ...(hasDocker ? [info.dockerContainer ?? '-'] : []),
       ...(hasImage ? [info.image ?? '-'] : []),

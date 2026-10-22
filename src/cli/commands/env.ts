@@ -7,13 +7,14 @@ import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGenerated
 import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
+import { serviceTransport } from '../../ports/transport.ts';
 import { liveServiceNames, readPids, serviceLiveness } from '../../process/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, servicesWithPorts, validateDockerMode } from '../services.ts';
-import { validateK8sMode } from './up-k8s.ts';
+import { k8sForwardConfig, validateK8sForwards, validateK8sMode } from './up-k8s.ts';
 
 /**
  * A cached assignment as a fresh allocation for this config would give it: only the port
@@ -37,7 +38,7 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 /**
  * Return the current port assignments plus their generated env, allocating
  * (and persisting) them as a deliberate side effect when state is missing,
- * incomplete, or has stale Docker metadata.
+ * incomplete, or has stale Docker/transport metadata.
  */
 export async function ensureAssignments(config: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
   const state = await readState(config.projectDir);
@@ -49,7 +50,12 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
     if (!service.docker || service.port === undefined) return true;
     return state?.services?.[service.name]?.containerName === service.docker.containerName;
   });
-  if (state && hasAll && hasFreshDockerMetadata) {
+  // REVIEW: A cached TCP allocation says nothing about UDP availability after a
+  // transport edit. Reallocate stopped services, preserving live ports below.
+  const hasFreshTransportMetadata = Object.values(config.services).every((service) =>
+    service.port === undefined || (state?.services[service.name]?.transport ?? 'tcp') === serviceTransport(service),
+  );
+  if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata) {
     // state.json can hold more than this config runs: a development run's assignments seen
     // through --prod (services prod.services leaves out), or a service since removed. Return
     // what a fresh allocation would, one assignment per configured service, so `env --prod`
@@ -201,12 +207,18 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     if (modeExplicit && mode !== 'local') {
       const launched = expandAndOrderServices(config, selectServiceNames(config, service ? [service.name] : []));
       if (mode === 'docker') validateDockerMode(config, launched);
-      else validateK8sMode(config, launched);
+      else {
+        validateK8sMode(config, launched);
+        // REVIEW: An explicit env k8s view must reject the same unforwardable
+        // UDP services (including dependencies) that up k8s refuses.
+        validateK8sForwards(config, launched);
+      }
     }
 
     // `config` already carries the running containers' pins, so the assignments name the
     // images they run.
-    const { assignments, generatedEnv } = await ensureAssignments(config);
+    // A Kubernetes launch forwards only TCP to this machine, as `up k8s` allocates it.
+    const { assignments, generatedEnv } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
     // Always refresh runtime.env, even when cached state was reused, so a
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);
