@@ -10,13 +10,15 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { validateK8sForwards } from '../src/cli/commands/up-k8s.ts';
 import { ensureAssignments } from '../src/cli/commands/env.ts';
+import { portLabel } from '../src/cli/table.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { serviceManifests } from '../src/k8s/manifests.ts';
 import { allocateAssignments } from '../src/ports/allocate.ts';
 import { isPortFree } from '../src/ports/probe.ts';
 import { pruneRegistry, readRegistry } from '../src/ports/registry.ts';
 import { dockerShellCommand } from '../src/process/docker.ts';
-import type { Assignments, PortlerConfig, ServiceConfig, StateFile } from '../src/types/index.ts';
+import { waitForServiceReady } from '../src/readiness/index.ts';
+import type { Assignments, PortlerConfig, RegistryFile, ServiceConfig, StateFile } from '../src/types/index.ts';
 
 const tempDirs: string[] = [];
 let previousGlobalDir: string | undefined;
@@ -183,6 +185,45 @@ describe('isPortFree with transports', () => {
       await close();
     }
     assert.equal(await isPortFree(port, '127.0.0.1', 'udp'), true);
+  });
+});
+
+// REVIEW: nothing covered pruning by transport, which is what keeps a running
+// UDP service's reservation from being handed out again after five minutes.
+describe('pruneRegistry with transports', () => {
+  it('keeps an old entry whose port is busy on its recorded transport', async () => {
+    const { port, close } = await occupyUdpPort();
+    try {
+      const old = new Date(Date.now() - 10 * 60_000).toISOString();
+      const entry = { project: '/project', service: 'game', port, host: '127.0.0.1', assignedAt: old };
+      const udp: RegistryFile = { version: 1, ports: { [port]: { ...entry, transport: 'udp' } } };
+      await pruneRegistry(udp);
+      assert.ok(udp.ports[port], 'a UDP reservation that is still bound must stay');
+
+      // The same entry without a transport is TCP, and nothing listens on TCP.
+      const tcp: RegistryFile = { version: 1, ports: { [port]: entry } };
+      await pruneRegistry(tcp);
+      assert.equal(tcp.ports[port], undefined);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('UDP readiness and display', () => {
+  it('waits for nothing by default on a UDP-only port', async () => {
+    const service = makeService({ port: 19132, transport: 'udp' });
+    const config = makeConfig('/project', [service]);
+    const assignment = { name: 'game', port: 1, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: 'http://localhost:1', transport: 'udp' as const };
+    // Port 1 accepts no TCP connection, so a TCP check would time out instead of returning.
+    await waitForServiceReady(config, service, {}, { game: assignment }, assignment, () => false);
+  });
+
+  it('labels non-TCP ports with their transport and leaves TCP ports bare', () => {
+    assert.equal(portLabel(3000, undefined), '3000');
+    assert.equal(portLabel(3000, 'tcp'), '3000');
+    assert.equal(portLabel(19132, 'udp'), '19132/udp');
+    assert.equal(portLabel(7777, 'tcp+udp'), '7777/tcp+udp');
   });
 });
 

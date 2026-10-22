@@ -91,7 +91,7 @@ services:
     transport: tcp+udp  # the same port number on both
 ```
 
-Portler then picks a port that is free for those protocols, records the reservation for them, and publishes a Docker container port with `/udp` (both for `tcp+udp`). Everything else about the port stays the same: `${bedrock.port}`, `port_env` and `PORTLER_*` variables.
+Portler then picks a port that is free for those protocols, records the reservation for them, and publishes a Docker container port with `/udp` (both for `tcp+udp`). Everything else about the port stays the same: `${bedrock.port}`, `port_env` and `PORTLER_*` variables. `portler ports` and `portler ps` show the port as `19132/udp` or `7777/tcp+udp`; the URL keeps the service's `protocol`, which is only the URL scheme.
 
 UDP has no connection to probe, so a `udp` service gets no readiness check by default; give it a `command` [healthcheck](/reference/configuration#healthcheck) if something should wait for it. A `tcp` or plain `http` check on a UDP-only port is an error, and so is a [proxy](/guide/proxy) route to one: the proxy forwards HTTP over TCP. `portler up k8s` refuses a UDP-only service, because `kubectl port-forward` only carries TCP (a `tcp+udp` service is forwarded for TCP only); `portler k8s render` renders the right protocols.
 

@@ -1,16 +1,16 @@
-import dgram from 'node:dgram';
-import dns from 'node:dns/promises';
 import net from 'node:net';
 import { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { assertRequiredEnv, blankRequiredKeys, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
-import { isPortFree } from '../../ports/probe.ts';
-import { serviceTransport } from '../../ports/transport.ts';
 import { runShell } from '../../process/shell.ts';
-import type { Assignments, EnvMap, PortlerConfig, PortTransport, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 
-function ephemeralTcpPort(host: string): Promise<number> {
+// REVIEW: the change added UDP and tcp+udp ephemeral-port picking here, but the
+// loader rejects `transport` without `port`, and a service with a port uses it
+// as is, so that code could never run. Reverted to the TCP-only original; a
+// transport-less service is TCP.
+async function freePort(host: string): Promise<number> {
   const server = net.createServer();
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -20,33 +20,6 @@ function ephemeralTcpPort(host: string): Promise<number> {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
-}
-
-async function ephemeralUdpPort(host: string): Promise<number> {
-  // REVIEW: Match the resolved address family, as the allocator's UDP probe does.
-  const { address, family } = await dns.lookup(host);
-  const socket = dgram.createSocket({ type: family === 6 ? 'udp6' : 'udp4' });
-  return new Promise((resolve, reject) => {
-    socket.once('error', (error) => {
-      // REVIEW: A failed bind still owns a socket; close it before rejecting.
-      socket.close();
-      reject(error);
-    });
-    socket.bind(0, address, () => {
-      const { port } = socket.address();
-      socket.close(() => resolve(port));
-    });
-  });
-}
-
-/** A port the OS calls free on every protocol of the service's transport. */
-async function freePort(host: string, transport: PortTransport): Promise<number> {
-  if (transport === 'udp') return ephemeralUdpPort(host);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const port = await ephemeralTcpPort(host);
-    if (transport === 'tcp' || (await isPortFree(port, host, 'udp'))) return port;
-  }
-  throw new Error(`could not find a port on ${host} that is free for both TCP and UDP`);
 }
 
 export function selectStartService(config: PortlerConfig, requested: string[]): ServiceConfig {
@@ -73,7 +46,7 @@ export async function buildStartEnv(
   if (platformPort !== undefined && (!/^\d+$/.test(platformPort) || Number(platformPort) < 1 || Number(platformPort) > 65535)) {
     throw new Error(`PORT must be a port between 1 and 65535, got "${platformPort}"`);
   }
-  const port = platformPort !== undefined ? Number(platformPort) : service.port ?? await freePort(service.host, serviceTransport(service));
+  const port = platformPort !== undefined ? Number(platformPort) : service.port ?? await freePort(service.host);
   const assignments: Assignments = {};
   for (const entry of Object.values(config.services)) {
     const assignedPort = entry.name === service.name ? port : entry.port;
