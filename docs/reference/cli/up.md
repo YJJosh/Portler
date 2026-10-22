@@ -49,4 +49,7 @@ portler up --volume-set my-branch   # forked data variants
 portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…   # CI-built image, nothing built
 ```
 
+<!-- REVIEW: Surface the new transport restriction at the affected command, not only in the guides. -->
+Kubernetes mode refuses a service with `transport: udp` (including dependencies): `kubectl port-forward` only carries TCP. A `tcp+udp` service gets a warning and only its TCP half is forwarded. To generate UDP manifests without port-forwarding, use [`portler k8s render`](/reference/cli/k8s-render).
+
 Kubernetes mode ignores setup definitions and rejects `--prod`, `--setup` and `--no-setup`. Source files, lockfiles, ports and env values are not part of setup fingerprints unless a step lists the files in `watch:`: use `watch`, `if_missing` or `always` steps for commands that must follow them, or force setup after changing these inputs.

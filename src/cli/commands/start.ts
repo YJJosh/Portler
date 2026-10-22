@@ -1,4 +1,5 @@
 import dgram from 'node:dgram';
+import dns from 'node:dns/promises';
 import net from 'node:net';
 import { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
@@ -21,11 +22,17 @@ function ephemeralTcpPort(host: string): Promise<number> {
   });
 }
 
-function ephemeralUdpPort(host: string): Promise<number> {
-  const socket = dgram.createSocket({ type: net.isIPv6(host) ? 'udp6' : 'udp4' });
+async function ephemeralUdpPort(host: string): Promise<number> {
+  // REVIEW: Match the resolved address family, as the allocator's UDP probe does.
+  const { address, family } = await dns.lookup(host);
+  const socket = dgram.createSocket({ type: family === 6 ? 'udp6' : 'udp4' });
   return new Promise((resolve, reject) => {
-    socket.once('error', reject);
-    socket.bind(0, host, () => {
+    socket.once('error', (error) => {
+      // REVIEW: A failed bind still owns a socket; close it before rejecting.
+      socket.close();
+      reject(error);
+    });
+    socket.bind(0, address, () => {
       const { port } = socket.address();
       socket.close(() => resolve(port));
     });

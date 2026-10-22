@@ -1,4 +1,5 @@
 import dgram from 'node:dgram';
+import dns from 'node:dns/promises';
 import net from 'node:net';
 import { transportProtocols } from './transport.ts';
 import type { PortTransport } from '../types/index.ts';
@@ -20,16 +21,24 @@ function isTcpPortFree(port: number, host: string): Promise<boolean> {
   });
 }
 
-function isUdpPortFree(port: number, host: string): Promise<boolean> {
+async function isUdpPortFree(port: number, host: string): Promise<boolean> {
+  // REVIEW: Pick the socket family from DNS, not the hostname's spelling; an
+  // IPv6-only hostname otherwise gets an IPv4 socket and every port looks busy.
+  let resolved;
+  try {
+    resolved = await dns.lookup(host);
+  } catch {
+    return false;
+  }
   return new Promise((resolve) => {
-    const socket = dgram.createSocket({ type: net.isIPv6(host) ? 'udp6' : 'udp4' });
+    const socket = dgram.createSocket({ type: resolved.family === 6 ? 'udp6' : 'udp4' });
 
     socket.unref();
     socket.on('error', () => {
       socket.close();
       resolve(false);
     });
-    socket.bind({ port, address: host, exclusive: true }, () => {
+    socket.bind({ port, address: resolved.address, exclusive: true }, () => {
       socket.close(() => resolve(true));
     });
   });

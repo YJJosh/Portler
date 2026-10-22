@@ -11,7 +11,8 @@ Every service that declares a `port:` gets a port assigned when the stack starts
 3. **Its previous assignment** from the project's `.portler/state.json`.
 4. **A scan of the port range** (`51000`–`59999` by default). The scan starts at an offset derived from a hash of the project directory and service name, so each service has a stable "home" in the range and different projects spread out instead of contending for the same low ports.
 
-Freeness is verified with a real TCP probe, and services that are **currently running** keep their port verbatim — their port is busy precisely because they're listening on it.
+<!-- REVIEW: Allocation now binds each selected transport, not always TCP. -->
+Freeness is verified by temporarily binding the port on each of the service's transports (TCP by default; see [UDP ports](#udp-ports)), and services that are **currently running** keep their port verbatim — their port is busy precisely because they're listening on it.
 
 The result: ports are **sticky**. Restarting a stack normally reproduces the same ports, and a stack that's already running is never disturbed.
 
