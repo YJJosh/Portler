@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { managedVolumeName, normalizeVolumeToken, volumeFullName, volumeLabelArgs, volumeScope } from '../config/index.ts';
-import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue, serviceViewer } from '../env/index.ts';
+import { buildGeneratedEnv, exportEnvReader, PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue, serviceViewer } from '../env/index.ts';
 import { serviceTransport, transportProtocols } from '../ports/transport.ts';
 import { dockerLabelArgs, PROJECT_LABEL } from './ownership.ts';
 import type { Assignments, DockerConfig, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -91,7 +91,7 @@ function ensureVolumeCommands(config: PortlerConfig, docker: DockerConfig): stri
   return commands;
 }
 
-function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assignments: Assignments): string | undefined {
+function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assignments: Assignments, baseEnv: EnvMap): string | undefined {
   const docker = service.docker;
   const build = docker?.build;
   if (!docker || !build) return undefined;
@@ -107,7 +107,10 @@ function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assig
   if (build.target) args.push('--target', build.target);
 
   // Build args resolve as the image will run: `${db.address}` is the alias on the project network.
-  const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name };
+  // REVIEW: Build-argument exports must read the exporter's effective env, not
+  // the config-only fallback (which ignores shell/.env and mode overrides).
+  const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name,
+    exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments) };
   for (const [key, value] of Object.entries(build.args)) {
     args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments, resolveOptions)}`);
   }
@@ -270,11 +273,12 @@ export function dockerShellCommand(
   explicitEnvKeys: ReadonlySet<string>,
   assignment: ServiceAssignment | undefined,
   assignments: Assignments,
+  baseEnv: EnvMap = {},
 ): string {
   const docker = service.docker;
   if (!docker) throw new Error(`service "${service.name}" is not a Docker service`);
 
-  const build = dockerBuildCommand(config, service, assignments);
+  const build = dockerBuildCommand(config, service, assignments, baseEnv);
   const run = dockerRunCommand(config, service, env, explicitEnvKeys, assignment);
   const commands = [
     build,

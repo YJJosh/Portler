@@ -646,7 +646,7 @@ export async function startPhase(
         options.signal?.throwIfAborted();
         let childExited = false;
         const logFilePath = options.detach ? serviceLogPath(config.projectDir, serviceName) : undefined;
-        const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath);
+        const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath, baseEnv);
         child.once('exit', () => {
           childExited = true;
         });

@@ -14,8 +14,9 @@ function serviceCommandFor(
   explicitEnvKeys: ReadonlySet<string>,
   assignment: ServiceAssignment | undefined,
   assignments: Assignments,
+  baseEnv: EnvMap,
 ): string {
-  if (service.docker) return dockerShellCommand(config, service, env, explicitEnvKeys, assignment, assignments);
+  if (service.docker) return dockerShellCommand(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
   if (!service.command) throw new Error(`service "${service.name}" has no command`);
   return service.command;
 }
@@ -34,8 +35,10 @@ export function spawnService(
   assignments: Assignments,
   attachLogs: boolean,
   logFilePath?: string,
+  // REVIEW: Preserve use_env values when resolving exports in build args.
+  baseEnv: EnvMap = {},
 ): ChildProcess {
-  const command = serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments);
+  const command = serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
   const cwd = resolveServiceCwd(config, service);
 
   // The child inherits the file descriptor directly, so log capture keeps

@@ -8,6 +8,8 @@ import { EnvSpec, mergeEnvEntry } from '../src/config/env-spec.ts';
 import { applyK8sMode } from '../src/config/k8s.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyProduction } from '../src/config/production.ts';
+import { dockerShellCommand } from '../src/process/docker.ts';
+import { buildServiceImages } from '../src/k8s/build.ts';
 import { renderManifests } from '../src/k8s/render.ts';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvValue } from '../src/env/resolve.ts';
@@ -381,6 +383,37 @@ describe('env review regressions', () => {
 `);
     const built = buildServiceEnv(cfg, cfg.services.api!, {}, {}, {});
     assert.equal(maskSecrets({ DISPLAY: built.env.DISPLAY! }, false, built.secrets).DISPLAY, '***');
+  });
+
+  it('resolves build-argument exports using the same shell and env-file values as runtime', async () => {
+    const cfg = await config(`use_env: .env
+services:
+  db:
+    image: postgres
+    port: 5432
+    env: { REVIEW_CREDENTIAL: { default: fallback, secret: true } }
+    exports: { credential: '\${env.REVIEW_CREDENTIAL}' }
+  api:
+    image: example/api
+    build: { context: '.', args: { AUTH: '\${db.credential}' } }
+`);
+    await fs.writeFile(path.join(cfg.projectDir, '.env'), 'REVIEW_CREDENTIAL=file-value\n');
+    const assignments = assign(cfg, { db: 53000 });
+    const api = cfg.services.api!;
+    const line = dockerShellCommand(cfg, api, {}, new Set(), undefined, assignments, { REVIEW_CREDENTIAL: 'file-value' });
+    assert.match(line.split(' && ')[0]!, /AUTH=file-value/);
+    withProcessEnv({ REVIEW_CREDENTIAL: 'shell-value' }, () => {
+      assert.match(dockerShellCommand(cfg, api, {}, new Set(), undefined, assignments), /AUTH=shell-value/);
+    });
+    const bin = path.join(cfg.projectDir, 'bin');
+    await fs.mkdir(bin);
+    await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@" > build-args\n', { mode: 0o755 });
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previous ?? ''}`;
+    try {
+      await buildServiceImages(applyK8sMode(cfg), ['api'], assignments);
+      assert.match(await fs.readFile(path.join(cfg.projectDir, 'build-args'), 'utf8'), /AUTH=file-value/);
+    } finally { process.env.PATH = previous; }
   });
 
   it('checks resolved empty references when composed envs are available', async () => {
