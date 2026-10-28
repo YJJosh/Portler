@@ -19,7 +19,7 @@ Usage:
   ${PACKAGE_NAME} env [docker|k8s] [service] [--prod] [--reveal]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
   ${PACKAGE_NAME} volumes [list] [--prod]
-  ${PACKAGE_NAME} volumes fork <volume> <new-set> [--prod]
+  ${PACKAGE_NAME} volumes fork <volume> <new-set> [--force] [--prod]
   ${PACKAGE_NAME} volumes remove <volume> [--force] [--prod]
   ${PACKAGE_NAME} init
 
@@ -42,6 +42,8 @@ Options:
       --force             For "clean": stop running services first (also recovers
                           from a corrupt .portler/); for "volumes remove": bypass
                           only the in-use check (ownership is always required);
+                          for "volumes fork": copy a volume a running container
+                          mounts (the copy may be inconsistent);
                           for "down": DANGEROUS last resort — signal pids
                           whose identity cannot be verified
   -f, --follow            Keep streaming new output for "logs" (captured files

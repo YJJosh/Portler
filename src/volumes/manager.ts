@@ -187,9 +187,10 @@ async function volumeExists(fullName: string): Promise<boolean> {
 
 /**
  * Clone a volume's data into a new `--<set>` variant so a branch or worktree
- * can experiment (e.g. test a migration) without touching the original.
+ * can experiment (e.g. test a migration) without touching the original. A
+ * volume a running container mounts is refused unless `force`.
  */
-export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string): Promise<ForkResult> {
+export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string, force = false): Promise<ForkResult> {
   await ensureDockerRunning();
 
   const newSet = normalizeVolumeSet(rawNewSet);
@@ -212,11 +213,17 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     throw new Error(`target volume already exists: ${target}. Remove it first with "portler volumes remove ${parsed.name}${VOLUME_SET_SEPARATOR}${newSet}"`);
   }
 
+  // A database writes while it runs, so a file copy of its volume can be broken in ways
+  // that only show later. Copy a volume nothing runs on, unless told otherwise.
   const users = await containersUsing(source);
-  if (users.length > 0) {
-    process.stderr.write(
-      `[portler] warning: volume ${source} is mounted by ${users.join(', ')}; the copy may be inconsistent. Consider "portler down" first.\n`,
+  if (users.length > 0 && !force) {
+    throw new Error(
+      `volume ${source} is in use by ${users.join(', ')}, and a copy of a running database can be broken. ` +
+        'Stop the services that use it (portler down) or pass --force to copy it anyway.',
     );
+  }
+  if (users.length > 0) {
+    process.stderr.write(`[portler] warning: volume ${source} is mounted by ${users.join(', ')}; the copy may be inconsistent.\n`);
   }
 
   const owner = volumeScope(config).owner;

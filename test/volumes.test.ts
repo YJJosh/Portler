@@ -125,6 +125,20 @@ describe('managed volume destructive-operation ownership', () => {
     assert.equal(invoked.some((args) => args[0] === 'volume' && args[1] === 'create'), false);
   });
 
+  it('refuses to fork a volume a running container mounts, unless --force', async () => {
+    process.env.MOCK_DOCKER_MODE = 'owned-in-use';
+    const config = makeConfig();
+
+    await assert.rejects(forkVolume(config, 'data', 'branch'), /volume .* is in use by api-container, and a copy of a running database can be broken.*--force/);
+    const refused = await calls();
+    assert.equal(refused.some((args) => args[0] === 'volume' && args[1] === 'create'), false, 'nothing is created');
+    assert.equal(refused.some((args) => args[0] === 'run'), false, 'nothing is copied');
+
+    // With --force the in-use check lets it through; this fake then fails it for another reason.
+    await assert.rejects(forkVolume(config, 'data', 'branch', true), (error: Error) => !/is in use by/.test(error.message));
+    assert.ok((await calls()).some((args) => args[0] === 'volume' && args[1] === 'create'));
+  });
+
   it('refuses a foreign target that wins the exists/create race', async () => {
     process.env.MOCK_DOCKER_MODE = 'target-race';
     const config = makeConfig();
