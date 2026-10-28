@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/loader.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
-import { buildProjectEnv, forgetSetupReceipts, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
+import { buildProjectEnv, forgetVolumeSetupReceipts, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
@@ -120,16 +120,28 @@ services:
     assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
   });
 
-  it('forgets the receipts of the given modes only, so their steps run again', async () => {
-    const cfg = await config('setup: echo migrate >> steps\nservices: {api: {command: echo}}');
-    for (const mode of ['local:dev', 'docker:dev', 'local:dev@other', 'local:prod']) await runSetupStep(cfg, null, {}, mode);
-    assert.equal(await forgetSetupReceipts(cfg, ['local:dev', 'docker:dev']), true);
-    assert.equal(await forgetSetupReceipts(cfg, ['local:dev', 'docker:dev']), false, 'nothing left to forget');
-    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
-    assert.deepEqual(Object.keys(state.steps).sort(), ['local:dev@other:project', 'local:prod:project']);
-    await runSetupStep(cfg, null, {}, 'local:dev');
-    await runSetupStep(cfg, null, {}, 'local:prod');
-    assert.equal((await lines()).length, 5, 'only the forgotten mode ran again');
+  // REVIEW: Both run modes and both production settings may share a volume;
+  // preserve other volume sets and the separate prod scope of a named project.
+  it('forgets every receipt using the recreated volume scope and set', async () => {
+    const cfg = await config(`setup: echo migrate >> steps
+services: {db: {image: redis, volumes: ['@data:/data']}}`);
+    const modes = ['local:dev', 'docker:dev', 'local:prod', 'docker:prod', 'local:dev@other', 'local:prod@other'];
+    for (const named of [false, true]) {
+      for (const prod of [false, true]) {
+        await fs.rm(path.join(dir, '.portler/setup.json'), { force: true });
+        const scoped = { ...cfg, ...(named ? { name: 'named' } : {}), production: prod };
+        for (const mode of modes) await runSetupStep(scoped, null, {}, mode);
+        assert.equal(await forgetVolumeSetupReceipts(scoped), true);
+        assert.equal(await forgetVolumeSetupReceipts(scoped), false, 'nothing left to forget');
+        const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+        const preserved = modes.filter((mode) => mode.includes('@other') || (named && mode.endsWith(prod ? ':dev' : ':prod')));
+        assert.deepEqual(Object.keys(state.steps).sort(), preserved.map((mode) => `${mode}:project`).sort());
+        await runSetupStep(scoped, null, {}, setupModeKey(scoped, 'local', prod));
+        const after = (await lines()).length;
+        await runSetupStep(scoped, null, {}, setupModeKey(scoped, 'local', prod));
+        assert.equal((await lines()).length, after, 'the rerun records a new receipt');
+      }
+    }
   });
 
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {

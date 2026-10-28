@@ -1,6 +1,6 @@
 import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { buildProjectEnv, forgetSetupReceipts, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
+import { buildProjectEnv, forgetVolumeSetupReceipts, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv, hostResolveOptions, resolveEnvValue, type ResolveOptions } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -571,8 +571,7 @@ export async function startPhase(
     // holds for it, in either run mode that mounts the same volumes. Also done with
     // --no-setup, which still creates the volume.
     if (newVolumes?.length) {
-      const modes = (['local', 'docker'] as const).map((runMode) => setupModeKey(config, runMode, options.prod));
-      if (await forgetSetupReceipts(config, modes)) {
+      if (await forgetVolumeSetupReceipts(config)) {
         process.stdout.write(`[portler] new volume ${newVolumes.join(', ')}: setup steps run again\n`);
       }
     }

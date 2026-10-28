@@ -190,12 +190,18 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
 }
 
 /**
- * Drops every receipt of the given modes, so all their steps run again. `up` calls it
- * when a managed volume is about to be created empty: a migration that ran against
- * the volume that was there before has not run against the new one. Writes only when
- * something was dropped, and returns whether it did. Caller holds the lifecycle lock.
+ * Drops receipts for the active volume scope and set, so all their steps run again.
+ * `up` calls it when a managed volume is about to be created empty: a migration that
+ * ran against the volume that was there before has not run against the new one.
+ * Writes only when something was dropped, and returns whether it did. Caller holds
+ * the lifecycle lock.
  */
-export async function forgetSetupReceipts(config: PortlerConfig, modes: readonly string[]): Promise<boolean> {
+export async function forgetVolumeSetupReceipts(config: PortlerConfig): Promise<boolean> {
+  // REVIEW: Without name:, dev and prod mount the same volumes. Recreating
+  // one must invalidate both modes, including when this up uses --no-setup.
+  // A named project's production volumes are separate from its dev volumes.
+  const productions = config.name ? [config.production === true] : [false, true];
+  const modes = productions.flatMap((prod) => (['local', 'docker'] as const).map((mode) => setupModeKey(config, mode, prod)));
   const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
   const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
   if (!previous || previous.project !== config.projectDir) return false;
