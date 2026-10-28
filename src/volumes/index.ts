@@ -1,6 +1,7 @@
 export {
   forkVolume,
   listProjectVolumes,
+  missingManagedVolumes,
   parseProjectVolumeName,
   removeVolume,
   resolveVolumeName,

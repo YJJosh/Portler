@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/loader.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
-import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
+import { buildProjectEnv, forgetSetupReceipts, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
@@ -93,6 +93,18 @@ services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
 `);
     assert.equal(await commandSetup(parseArgs(['docker', 'app'], 'setup')), 0);
     assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
+  });
+
+  it('forgets the receipts of the given modes only, so their steps run again', async () => {
+    const cfg = await config('setup: echo migrate >> steps\nservices: {api: {command: echo}}');
+    for (const mode of ['local:dev', 'docker:dev', 'local:dev@other', 'local:prod']) await runSetupStep(cfg, null, {}, mode);
+    assert.equal(await forgetSetupReceipts(cfg, ['local:dev', 'docker:dev']), true);
+    assert.equal(await forgetSetupReceipts(cfg, ['local:dev', 'docker:dev']), false, 'nothing left to forget');
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(Object.keys(state.steps).sort(), ['local:dev@other:project', 'local:prod:project']);
+    await runSetupStep(cfg, null, {}, 'local:dev');
+    await runSetupStep(cfg, null, {}, 'local:prod');
+    assert.equal((await lines()).length, 5, 'only the forgotten mode ran again');
   });
 
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {

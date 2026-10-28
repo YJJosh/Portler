@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { projectVolumeName } from '../src/config/naming.ts';
-import { forkVolume, removeVolume } from '../src/volumes/manager.ts';
+import { forkVolume, missingManagedVolumes, removeVolume } from '../src/volumes/manager.ts';
 import type { PortlerConfig } from '../src/types/index.ts';
 
 let tempDir: string;
@@ -85,6 +85,11 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   console.log('null');
   process.exit(0);
 }
+if (args[0] === 'volume' && args[1] === 'ls') {
+  if (process.env.MOCK_DOCKER_MODE === 'ls-error') process.exit(1);
+  for (const name of (process.env.MOCK_VOLUMES ?? '').split(',').filter(Boolean)) console.log(name);
+  process.exit(0);
+}
 if (args[0] === 'volume' && args[1] === 'rm') process.exit(0);
 if (args[0] === 'volume' && args[1] === 'create') { console.log(args.at(-1)); process.exit(0); }
 process.exit(0);
@@ -103,6 +108,7 @@ afterEach(async () => {
   process.env.PATH = oldPath;
   delete process.env.MOCK_DOCKER_CALLS;
   delete process.env.MOCK_VOLUME_ROOT;
+  delete process.env.MOCK_VOLUMES;
   if (oldMode === undefined) delete process.env.MOCK_DOCKER_MODE;
   else process.env.MOCK_DOCKER_MODE = oldMode;
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -112,6 +118,29 @@ async function calls(): Promise<string[][]> {
   const text = await fs.readFile(callsFile, 'utf8');
   return text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
 }
+
+describe('volume lookups', () => {
+  function withService(volumeSet?: string): PortlerConfig {
+    const config = makeConfig();
+    config.volumeSet = volumeSet;
+    config.services = { api: { name: 'api', docker: { volumes: ['@data:/data', './src:/src'] } } } as unknown as PortlerConfig['services'];
+    return config;
+  }
+
+  it('names the managed volumes that do not exist yet in the active set', async () => {
+    process.env.MOCK_VOLUMES = projectVolumeName(volumeRoot, 'data');
+    assert.deepEqual(await missingManagedVolumes(withService(), ['api']), []);
+    assert.deepEqual(await missingManagedVolumes(withService('fresh'), ['api']), ['data']);
+    process.env.MOCK_VOLUMES = '';
+    assert.deepEqual(await missingManagedVolumes(withService(), ['api']), ['data']);
+    assert.deepEqual(await missingManagedVolumes(withService(), []), [], 'no services, no Docker call needed');
+  });
+
+  it('says nothing when Docker cannot be asked', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ls-error';
+    assert.equal(await missingManagedVolumes(withService(), ['api']), undefined);
+  });
+});
 
 describe('managed volume destructive-operation ownership', () => {
   // REVIEW: Daemon failures must not look like an unused source volume.

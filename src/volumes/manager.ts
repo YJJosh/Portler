@@ -407,6 +407,20 @@ function managedVolumesFor(config: PortlerConfig, serviceNames: readonly string[
 }
 
 /**
+ * Managed volumes the given services would create because they do not exist yet in
+ * the active volume set (a first start, a new set, or one removed with `volumes
+ * remove` or `docker volume rm`). `undefined` when Docker cannot be asked.
+ */
+export async function missingManagedVolumes(config: PortlerConfig, serviceNames: readonly string[]): Promise<string[] | undefined> {
+  const managed = managedVolumesFor(config, serviceNames);
+  if (managed.length === 0) return [];
+  const result = await runDocker(['volume', 'ls', '--format', '{{.Name}}']);
+  if (result.code !== 0) return undefined;
+  const existing = new Set(result.stdout.split('\n').map((line) => line.trim()).filter(Boolean));
+  return managed.filter((name) => !existing.has(volumeFullName(volumeScope(config).prefix, name, config.volumeSet)));
+}
+
+/**
  * Guard against typos in `up --volume-set` / PORTLER_VOLUME_SET: starting with
  * a set that was never forked silently creates a fresh EMPTY variant, which
  * looks like data loss. For each managed volume the selected services are

@@ -190,6 +190,26 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
 }
 
 /**
+ * Drops every receipt of the given modes, so all their steps run again. `up` calls it
+ * when a managed volume is about to be created empty: a migration that ran against
+ * the volume that was there before has not run against the new one. Writes only when
+ * something was dropped, and returns whether it did. Caller holds the lifecycle lock.
+ */
+export async function forgetSetupReceipts(config: PortlerConfig, modes: readonly string[]): Promise<boolean> {
+  const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
+  const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
+  if (!previous || previous.project !== config.projectDir) return false;
+  let changed = false;
+  for (const key of Object.keys(previous.steps)) {
+    if (!modes.some((mode) => key.startsWith(`${mode}:`))) continue;
+    delete previous.steps[key];
+    changed = true;
+  }
+  if (changed) await writeJsonFile(filePath, previous);
+  return changed;
+}
+
+/**
  * Environment for top-level setup steps: `default:` entries, the process env, base
  * `.env` files, then root config env. In production the deployment wins instead: root
  * config env, base `.env` files, then the process env, and a key the deployment

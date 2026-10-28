@@ -129,7 +129,7 @@ api:
       watch: [migrations]
 ```
 
-Setup steps run on your machine even when `api` runs in a container, and they see `${db.address}` as `localhost:<port>`. A step's receipt belongs to the [volume set](/guide/volumes#volume-sets), so `portler up --volume-set fresh` against an empty database runs the migrations there too.
+Setup steps run on your machine even when `api` runs in a container, and they see `${db.address}` as `localhost:<port>`. A step's receipt belongs to the [volume set](/guide/volumes#volume-sets), so `portler up --volume-set fresh` against an empty database runs the migrations there too, and so does the next `up` after `portler volumes remove db-data`.
 
 A seed step can use `if_missing:` with a marker file, or live in a task you run by hand.
 

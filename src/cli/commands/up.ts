@@ -1,6 +1,6 @@
 import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { buildProjectEnv, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
+import { buildProjectEnv, forgetSetupReceipts, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv, hostResolveOptions, resolveEnvValue, type ResolveOptions } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -23,7 +23,7 @@ import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
-import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
+import { missingManagedVolumes, warnMissingVolumeSetVariants } from '../../volumes/index.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
@@ -402,6 +402,8 @@ export async function startPhase(
   }
   // Fires exactly when a set variant is about to be created empty (typo guard).
   await warnMissingVolumeSetVariants(config, selectedNames);
+  // Asked before anything spawns: starting a Docker service creates its volumes.
+  const newVolumes = await missingManagedVolumes(config, selectedNames);
 
   const startedEntries = new Map<string, PidServiceInfo>();
   const children = new Map<string, ReturnType<typeof spawnService>>();
@@ -562,6 +564,15 @@ export async function startPhase(
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);
+    // A managed volume about to be created is empty, so a migration's receipt no longer
+    // holds for it, in either run mode that mounts the same volumes. Also done with
+    // --no-setup, which still creates the volume.
+    if (newVolumes?.length) {
+      const modes = (['local', 'docker'] as const).map((runMode) => setupModeKey(config, runMode, options.prod));
+      if (await forgetSetupReceipts(config, modes)) {
+        process.stdout.write(`[portler] new volume ${newVolumes.join(', ')}: setup steps run again\n`);
+      }
+    }
     if (options.setup !== false) {
       await runSetupStep(config, null, projectEnv, setupMode, options.setup, options.signal);
     }

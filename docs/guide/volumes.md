@@ -55,7 +55,7 @@ Runs the stack against the `--<name>` variants of **all** `@` volumes. `PORTLER_
 
 `portler restart` comes back on the set a service was started with (it records it), unless you give it another one with `--volume-set`.
 
-[Setup](/guide/setup-and-production) receipts are kept per volume set, so a migration step that ran against one set's database runs again the first time you start another set, such as a fresh empty one.
+[Setup](/guide/setup-and-production) receipts are kept per volume set, so a migration step that ran against one set's database runs again the first time you start another set, such as a fresh empty one. The same happens when `up` creates a volume again after `portler volumes remove`: an empty volume makes every setup step of its set run again.
 
 Starting with a set that was never forked creates a fresh **empty** variant. When the base volume or other sets already exist for that volume — usually a sign of a typo — `up` prints a warning first (with a did-you-mean suggestion) but still proceeds; fork an existing volume instead if you wanted its data.
 
