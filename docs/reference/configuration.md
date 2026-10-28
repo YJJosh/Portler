@@ -338,6 +338,8 @@ Env values (top-level and per-service) can reference other services, either as t
 
 `address` is `host:port` as the reader sees it: `localhost:<assigned port>` from a process on your machine (including setup steps, healthcheck commands and `portler run`), `<service>:<port>` from a container on the project network or from a pod in [Kubernetes mode](/guide/kubernetes), and `host.docker.internal:<assigned port>` from a container reaching a local process. `url`, `port` and `host` are always the host-side values. See [Services & environment](/guide/services#service-references).
 
+On native Linux Docker, Portler adds a `host.docker.internal:host-gateway` mapping. A local process reached from a container must listen on an interface reachable from the Docker bridge (for example `0.0.0.0`), not only loopback. Keep the host firewall restricted as appropriate. Docker Desktop supplies its own host gateway.
+
 ## Complete example
 
 ```yaml

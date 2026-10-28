@@ -138,6 +138,9 @@ function dockerRunCommand(
     config.dockerNetwork,
     '--network-alias',
     service.name,
+    // REVIEW: Native Linux Docker does not define Desktop's host gateway DNS
+    // name automatically; mode-aware addresses must be resolvable there too.
+    ...(process.platform === 'linux' ? ['--add-host', 'host.docker.internal:host-gateway'] : []),
   ];
 
   if (assignment && service.port !== undefined) {
