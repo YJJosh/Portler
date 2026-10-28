@@ -128,20 +128,25 @@ export function assertStartRequirements(
 ): void {
   const required = requiredEnvKeys(config, service);
   const portKeys = required.filter((key) => service.portEnv.includes(key));
+  // REVIEW: A missing platform PORT must not hide other missing production keys.
+  const messages: string[] = [];
   if (portKeys.length > 0 && (platformEnv.PORT === undefined || platformEnv.PORT === '')) {
-    throw new Error(
+    messages.push(
       `service ${service.name} requires ${portKeys.join(', ')} in production (prod.require), and the platform sets no PORT. ` +
         `start fills its port_env names (${service.portEnv.join(', ')}) with the port it listens on, and only the platform's PORT chooses that port; ` +
         'a use_env file does not.',
     );
   }
-  assertRequiredEnv(
-    `service ${service.name}`,
-    required.filter((key) => !service.portEnv.includes(key)),
-    deploymentEnv(baseEnv),
-    blankRequiredKeys(config, service),
-    { fromSpec: new Set(specProductionKeys(config, service)), descriptions: envDescriptions(config, service) },
-  );
+  try {
+    assertRequiredEnv(
+      `service ${service.name}`,
+      required.filter((key) => !service.portEnv.includes(key)),
+      deploymentEnv(baseEnv, Object.fromEntries(Object.entries(platformEnv).filter((entry): entry is [string, string] => entry[1] !== undefined))),
+      blankRequiredKeys(config, service),
+      { fromSpec: new Set(specProductionKeys(config, service)), descriptions: envDescriptions(config, service) },
+    );
+  } catch (error) { messages.push((error as Error).message); }
+  if (messages.length > 0) throw new Error(messages.join('\n'));
 }
 
 /** How long `start` waits for the rest of the process group after the shell exits. */

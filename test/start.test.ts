@@ -268,6 +268,26 @@ services:
     assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
   });
 
+  // REVIEW: One diagnostic must include platform PORT and every other missing key.
+  it('aggregates start port requirements with production and required:true keys', async () => {
+    const cfg = await config(`services:
+  api:
+    command: echo started > started
+    port_env: PORT
+    prod: { require: [PORT, REVIEW_DEPLOY_TOKEN] }
+    env: { REVIEW_REQUIRED: { required: true } }
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.PORT;
+    delete env.REVIEW_DEPLOY_TOKEN;
+    delete env.REVIEW_REQUIRED;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1);
+    for (const key of ['PORT', 'REVIEW_DEPLOY_TOKEN', 'REVIEW_REQUIRED']) assert.ok(refused.stderr.includes(key), refused.stderr);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'started')));
+  });
+
   it('returns the shell exit code and runs in the requested cwd', async () => {
     const cfg = await config('services: {api: {command: echo}}');
     assert.equal(await runShell('pwd > cwd; exit 17', cfg.projectDir, {}), 17);
