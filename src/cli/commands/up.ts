@@ -1,6 +1,6 @@
 import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
+import { buildProjectEnv, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
@@ -546,7 +546,7 @@ export async function startPhase(
 
     const projectEnv = buildProjectEnv(config, baseEnv, assignments);
 
-    const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
+    const setupMode = setupModeKey(config, mode, options.prod);
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);

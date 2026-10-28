@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/loader.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
-import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
+import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
@@ -57,6 +57,25 @@ describe('setup', () => {
     assert.equal(isPlainSetupStep({ run: 'a' }), true);
     assert.equal(isPlainSetupStep({ run: 'a', ifMissing: 'x' }), false);
     assert.equal(isPlainSetupStep({ run: 'a', always: true }), false);
+  });
+
+  it('keys receipts by volume set only when the project has managed volumes', async () => {
+    const plain = await config('services: {api: {command: echo}}');
+    assert.equal(setupModeKey({ ...plain, volumeSet: 'feature' }, 'local', false), 'local:dev', 'no volumes: a set changes nothing');
+    const withVolumes = await config(`setup: echo migrate >> steps
+services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
+    assert.equal(setupModeKey(withVolumes, 'local', false), 'local:dev');
+    assert.equal(setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'docker', true), 'docker:prod@feature');
+    // A migration that ran against one set's database runs again for an empty one.
+    await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
+    assert.deepEqual(await lines(), ['migrate', 'migrate']);
+    // Pruning one set's receipts leaves the others alone.
+    await pruneSetupReceipts({ ...withVolumes, setup: [] }, 'local:dev');
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
   });
 
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {

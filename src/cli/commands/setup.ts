@@ -1,7 +1,7 @@
 import { assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { assertProductionRequirements, buildServiceEnv } from '../../env/index.ts';
-import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
+import { buildProjectEnv, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { EnvMap } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -31,7 +31,7 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     for (const name of names) {
       serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments).env);
     }
-    const setupMode = `${mode}:${args.prod ? 'prod' : 'dev'}`;
+    const setupMode = setupModeKey(config, mode, args.prod);
     await pruneSetupReceipts(config, setupMode);
     await runSetupStep(config, null, projectEnv, setupMode, true);
     for (const name of names) {

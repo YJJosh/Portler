@@ -36,6 +36,17 @@ function isSetupState(value: unknown): value is SetupState {
 }
 
 /**
+ * The run a receipt belongs to: run mode, dev or prod, and the volume set when the
+ * project has managed volumes. A step such as a migration that ran against one volume
+ * set's database has not run against another's, so switching sets runs the steps
+ * again for that set (once); a project without managed volumes is not affected.
+ */
+export function setupModeKey(config: PortlerConfig, mode: string, prod?: boolean): string {
+  const set = config.volumeSet && config.volumes.length > 0 ? `@${config.volumeSet}` : '';
+  return `${mode}:${prod ? 'prod' : 'dev'}${set}`;
+}
+
+/**
  * What a plain step's receipt stands for: this command, in this cwd, in this
  * mode, as entry number `occurrence` of the `total` entries of its list, of
  * any kind, that run the same command. Carrying the total means adding or
