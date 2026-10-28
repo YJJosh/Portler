@@ -225,6 +225,33 @@ services:
     assert.doesNotThrow(() => assertEnvRequirements(dev, ['api'], { STRIPE_KEY: 'sk' }));
   });
 
+  it('does not treat a prod.env entry that only adds metadata as left blank', async () => {
+    const cfg = applyProduction(await config(`env:
+  ROOT_KEY: root
+prod:
+  env:
+    ROOT_KEY: { description: Set on the platform }
+services:
+  api:
+    command: x
+    env: { TOKEN: dev, OTHER: x, ASKED: dev }
+    prod:
+      env:
+        TOKEN: { secret: true }
+        OTHER: { value: '' }
+        ASKED: { required: prod }
+`), true);
+    const api = cfg.services.api!;
+    assert.deepEqual(requiredEnvKeys(cfg, api).sort(), ['ASKED', 'OTHER']);
+    const built = buildServiceEnv(cfg, api, {}, {}, {});
+    assert.equal(built.env.TOKEN, 'dev', 'secret: true keeps the value');
+    assert.equal(built.env.ROOT_KEY, 'root', 'a description keeps the value');
+    assert.throws(
+      () => assertEnvRequirements(cfg, ['api'], {}),
+      (error: Error) => /\(left blank in prod\.env: OTHER; required: prod: ASKED\)/.test(error.message) && !/TOKEN|ROOT_KEY/.test(error.message),
+    );
+  });
+
   it('puts production and required: true problems in one error, and reports a project key once', async () => {
     const cfg = applyProduction(
       await config(`setup: echo

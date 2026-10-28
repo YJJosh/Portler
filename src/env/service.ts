@@ -300,11 +300,21 @@ export function buildPrintableEnv(
   return output;
 }
 
-// A `prod.env` entry with no value (`KEY: ''`, or a bare `KEY:`) says the deployment must supply it.
+// An env entry that gives the key no value: blank, or a mapping without `value` or `default`.
 function isBlankConfigValue(value: unknown): boolean {
   if (!isEnvSpec(value)) return value === '' || value === null;
   const entry = envEntryValue(value);
   return entry === undefined || entry.value === '' || entry.value === null;
+}
+
+// A `prod.env` entry left blank (`KEY: ''`, a bare `KEY:`, or `{ value: '' }`) says the
+// deployment must supply the key. A mapping that only adds `secret`, `description` or
+// `required` keeps the lower value (mergeEnvEntry), so it is not blank; `required: prod`
+// is counted by specProductionKeys instead.
+function isLeftBlankInProd(value: unknown): boolean {
+  if (!isEnvSpec(value)) return value === '' || value === null;
+  const entry = envEntryValue(value);
+  return entry !== undefined && (entry.value === '' || entry.value === null);
 }
 
 /** The env entries an owner sees: the project's top-level ones, or a service's merged over them. */
@@ -329,12 +339,12 @@ export function specProductionKeys(config: PortlerConfig, service?: ServiceConfi
 export function requiredEnvKeys(config: PortlerConfig, service?: ServiceConfig): string[] {
   const keys = new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])]);
   for (const [key, value] of Object.entries(config.prod?.env ?? {})) {
-    if (!isBlankConfigValue(value)) continue;
+    if (!isLeftBlankInProd(value)) continue;
     if (service && Object.hasOwn(service.env, key) && !isBlankConfigValue(service.env[key])) continue;
     keys.add(key);
   }
   for (const [key, value] of Object.entries(service?.prod?.env ?? {})) {
-    if (isBlankConfigValue(value)) keys.add(key);
+    if (isLeftBlankInProd(value)) keys.add(key);
   }
   for (const key of specProductionKeys(config, service)) keys.add(key);
   return [...keys];
@@ -348,7 +358,7 @@ export function blankRequiredKeys(config: PortlerConfig, service?: ServiceConfig
   const listed = new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])]);
   const blank = new Set<string>();
   for (const [key, value] of Object.entries({ ...config.prod?.env, ...service?.prod?.env })) {
-    if (isBlankConfigValue(value) && !listed.has(key)) blank.add(key);
+    if (isLeftBlankInProd(value) && !listed.has(key)) blank.add(key);
   }
   return new Set(requiredEnvKeys(config, service).filter((key) => blank.has(key)));
 }
