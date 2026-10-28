@@ -117,11 +117,21 @@ async function volumeSizes(): Promise<Map<string, string>> {
   return sizes;
 }
 
-/** Names of running containers mounting the volume (best effort). */
-async function containersUsing(fullName: string): Promise<string[]> {
-  // REVIEW: A failed query is not proof that no container uses a volume.
-  // Refuse a fork/removal rather than bypassing the in-use safety gate.
-  const output = await dockerOrThrow(['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}']);
+/**
+ * Names of running containers mounting the volume. A failed query throws: it is not
+ * proof that nothing uses the volume, so fork and remove refuse. `bestEffort` (the
+ * `volumes` listing) shows nobody instead.
+ */
+async function containersUsing(fullName: string, bestEffort = false): Promise<string[]> {
+  const query = ['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}'];
+  let output: string;
+  if (bestEffort) {
+    const result = await runDocker(query);
+    if (result.code !== 0) return [];
+    output = result.stdout;
+  } else {
+    output = await dockerOrThrow(query);
+  }
   return output.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
@@ -156,7 +166,7 @@ export async function listProjectVolumes(config: PortlerConfig): Promise<Project
       volumeSet: parsed.volumeSet,
       driver,
       size: sizes.get(fullName),
-      usedBy: await containersUsing(fullName),
+      usedBy: await containersUsing(fullName, true),
       services: declaredServicesFor(config, parsed.name),
       exists: true,
     });

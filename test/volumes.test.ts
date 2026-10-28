@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { projectVolumeName } from '../src/config/naming.ts';
-import { forkVolume, missingManagedVolumes, removeVolume } from '../src/volumes/manager.ts';
+import { forkVolume, listProjectVolumes, missingManagedVolumes, removeVolume } from '../src/volumes/manager.ts';
 import type { PortlerConfig } from '../src/types/index.ts';
 
 let tempDir: string;
@@ -134,6 +134,14 @@ describe('volume lookups', () => {
     process.env.MOCK_VOLUMES = '';
     assert.deepEqual(await missingManagedVolumes(withService(), ['api']), ['data']);
     assert.deepEqual(await missingManagedVolumes(withService(), []), [], 'no services, no Docker call needed');
+  });
+
+  it('lists volumes even when Docker cannot say who uses them', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ps-error';
+    process.env.MOCK_VOLUMES = projectVolumeName(volumeRoot, 'data');
+    const [volume] = await listProjectVolumes(withService());
+    assert.equal(volume?.name, 'data');
+    assert.deepEqual(volume?.usedBy, []);
   });
 
   it('says nothing when Docker cannot be asked', async () => {
