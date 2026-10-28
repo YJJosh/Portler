@@ -130,12 +130,24 @@ env:
 | `value` | The config value, like a plain value: in development it wins over your shell and the `use_env` files |
 | `default` | Used only when neither your shell nor a `use_env` file sets the key. Cannot be combined with `value` |
 | `required` | `true`: the key must end up non-empty wherever the service runs, from your shell, a `use_env` file, or a non-empty `value`/`default`. `prod`: under `--prod` the deployment must supply it, like [`prod.require`](#setup-and-prod); its config value still works in development |
-| `secret` | `true` hides the value in [`portler env`](/reference/cli/env), in development too, and so does a value that reads it through an [export](#exports). `false` keeps a secret-looking name (`PASSWORD_MIN_LENGTH`) visible under `--prod` |
+| `secret` | `true` hides the value in [`portler env`](/reference/cli/env), in development too, and so does a value that reads it through an [export](#exports). `false` keeps a secret-looking name (`PASSWORD_MIN_LENGTH`) visible under `--prod`, but does not unmask a value read from a secret export. It only changes what Portler prints: the value still reaches the process as plain env, and [`k8s render`](/reference/cli/k8s-render) writes it into the Deployment as a plain `value`, not a Kubernetes Secret |
 | `description` | Shown next to the key when it is missing |
 
 A mapping with only `required`, `secret` or `description` sets no value: the key comes from your shell or a `use_env` file, and is forwarded to containers like the keys those files set. `up`, `setup`, `restart` and `start` check `required: true` before anything runs or stops and report every missing key in one error; `env` and `run` print the same report as a warning.
 
-Layers merge per key. A higher layer (the service over the top level, `docker.env` or `k8s.env` over the service, `prod.env` over both) replaces the value or default, while `required`, `secret` and `description` stay unless it sets them too: a plain `docker.env` value does not drop `secret: true`. Under `--prod` (and in `portler start`) the deployment wins over config anyway, so `default` and `value` behave the same there.
+Layers merge per key. A higher layer (the service over the top level, `docker.env` or `k8s.env` over the service, `prod.env` over both) replaces the value or default, while `required`, `secret` and `description` stay unless it sets them too: a plain `docker.env` value does not drop `secret: true`, and an entry that only adds metadata (`{ secret: true }`) keeps the value below it. So only a `prod.env` entry with an empty value (`KEY: ''`, `{ value: '' }`) is "left blank" and asks the deployment for the key.
+
+Where a key's value comes from, highest first:
+
+| | Development | `--prod` and `portler start` |
+| --- | --- | --- |
+| 1 | Values Portler sets (`PORTLER_*`, `port_env`) | Values Portler sets |
+| 2 | Config `value` (or a plain value) | Process env (the platform) |
+| 3 | `use_env` files | `use_env` files |
+| 4 | Your shell | Config `value` or `default` |
+| 5 | Config `default` | |
+
+A key the deployment must supply (`prod.require`, `required: prod`, a blank `prod.env` entry) skips the config row under `--prod`. Within config, the service's entry beats the top-level one, and the mode's `docker.env`/`k8s.env`/`prod.env` beats both.
 
 ## use (presets) {#use-presets}
 
