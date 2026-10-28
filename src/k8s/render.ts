@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { loadBaseEnv } from '../config/index.ts';
-import { buildGeneratedEnv, buildServiceEnv } from '../env/index.ts';
+import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv } from '../env/index.ts';
 import { formatYamlDocuments } from '../parse/yaml-format.ts';
 import { portlerDir } from '../state/index.ts';
 import { containerEnvEntries, k8sServiceNames, namespaceManifest, serviceManifests } from './manifests.ts';
@@ -34,6 +34,13 @@ export async function renderManifests(
   const names = k8sServiceNames(selectedNames);
   const generatedEnv = buildGeneratedEnv(assignments);
   const baseEnv = await loadBaseEnv(config);
+  // REVIEW: Kubernetes must enforce required:true too, before writing or
+  // applying manifests. Top-level setup never runs in Kubernetes mode.
+  assertEnvRequirements(config, selectedNames, baseEnv, { projectSetup: false });
+  const environments = new Map(selectedNames.map((name) => [name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments)]));
+  assertEnvRequirements(config, selectedNames, baseEnv, {
+    projectSetup: false, envs: new Map([...environments].map(([name, built]) => [name, built.env])),
+  });
 
   const files: RenderedManifests['files'] = [
     { fileName: NAMESPACE_MANIFEST_FILE, text: formatYamlDocuments([namespaceManifest(config)]) },
@@ -42,7 +49,7 @@ export async function renderManifests(
   for (const serviceName of selectedNames) {
     const service = config.services[serviceName]!;
     const name = names.get(serviceName)!;
-    const { env, explicitKeys } = buildServiceEnv(config, service, baseEnv, generatedEnv, assignments);
+    const { env, explicitKeys } = environments.get(serviceName)!;
     const manifests = serviceManifests(config, service, name, containerEnvEntries(env, explicitKeys));
     files.push({ fileName: `${name}.yml`, text: formatYamlDocuments(manifests) });
   }

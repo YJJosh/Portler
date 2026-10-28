@@ -550,6 +550,13 @@ export async function startPhase(
     }
 
     const projectEnv = buildProjectEnv(config, baseEnv, assignments, generatedEnv);
+    // REVIEW: A non-empty template may resolve to empty; check composed envs
+    // before setup or spawning, while retaining the early raw-value preflight.
+    assertEnvRequirements(config, selectedNames, baseEnv, {
+      projectSetup: options.setup !== false,
+      projectEnv,
+      envs: new Map([...serviceEnvs].map(([name, built]) => [name, built.env])),
+    });
 
     const setupMode = setupModeKey(config, mode, options.prod);
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped

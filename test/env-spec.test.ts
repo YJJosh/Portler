@@ -8,6 +8,7 @@ import { EnvSpec, mergeEnvEntry } from '../src/config/env-spec.ts';
 import { applyK8sMode } from '../src/config/k8s.ts';
 import { loadConfig } from '../src/config/loader.ts';
 import { applyProduction } from '../src/config/production.ts';
+import { renderManifests } from '../src/k8s/render.ts';
 import { buildGeneratedEnv } from '../src/env/generate.ts';
 import { resolveEnvValue } from '../src/env/resolve.ts';
 import {
@@ -326,5 +327,72 @@ describe('mode-aware addresses and exports', () => {
     await assert.rejects(config('services: {a: {command: x, exports: {Bad: x}}}'), /export names use lowercase/);
     await assert.rejects(config('services: {self: {command: x}}'), /service name "self" is reserved/);
     await assert.rejects(config('services: {env: {command: x}}'), /service name "env" is reserved/);
+  });
+});
+
+// REVIEW: Regression coverage for metadata-only scalar overrides and checking
+// the winning value, not merely the existence of some non-empty input layer.
+describe('env review regressions', () => {
+  it('preserves scalar values when an override only adds metadata', () => {
+    assert.deepEqual({ ...(mergeEnvEntry('root', new EnvSpec({ secret: true })) as EnvSpec) }, { value: 'root', secret: true });
+  });
+
+  it('requires the winning layer to be non-empty in dev, production and start', async () => {
+    const cfg = await config(`services:
+  api:
+    command: x
+    env:
+      REVIEW_FIXED: { value: '', required: true }
+      REVIEW_DEFAULT: { default: nonempty, required: true }
+`);
+    const supplied = { REVIEW_FIXED: 'shell', REVIEW_DEFAULT: '' };
+    assert.match(envRequirementProblems(cfg, ['api'], supplied).join('\n'), /REVIEW_FIXED/);
+    assert.match(envRequirementProblems(cfg, ['api'], supplied).join('\n'), /REVIEW_DEFAULT/);
+    const prod = applyProduction(cfg, true);
+    assert.doesNotMatch(envRequirementProblems(prod, ['api'], supplied).join('\n'), /REVIEW_FIXED/);
+    assert.match(envRequirementProblems(prod, ['api'], supplied).join('\n'), /REVIEW_DEFAULT/);
+    assert.doesNotMatch(envRequirementProblems(cfg, ['api'], supplied, { deploymentPrecedence: true }).join('\n'), /REVIEW_FIXED/);
+    withProcessEnv({ REVIEW_DEFAULT: 'shell' }, () => {
+      assert.match(envRequirementProblems(cfg, ['api'], { REVIEW_DEFAULT: '' }).join('\n'), /REVIEW_DEFAULT/);
+    });
+  });
+
+  it('enforces required env in Kubernetes renders, aggregating all services', async () => {
+    const cfg = applyK8sMode(await config(`services:
+  a: { image: node, env: { FIRST: { required: true } } }
+  b: { image: node, env: { SECOND: { required: true } } }
+`));
+    await assert.rejects(renderManifests(cfg, ['a', 'b'], {}), (error: Error) => {
+      assert.match(error.message, /FIRST/);
+      assert.match(error.message, /SECOND/);
+      return true;
+    });
+  });
+
+  it('does not let secret:false unmask a value derived from an exported secret', async () => {
+    const cfg = await config(`services:
+  db:
+    command: x
+    env: { SESSION: { value: private, secret: true } }
+    exports: { credential: '\${env.SESSION}' }
+  api:
+    command: x
+    env: { DISPLAY: { value: '\${db.credential}', secret: false } }
+`);
+    const built = buildServiceEnv(cfg, cfg.services.api!, {}, {}, {});
+    assert.equal(maskSecrets({ DISPLAY: built.env.DISPLAY! }, false, built.secrets).DISPLAY, '***');
+  });
+
+  it('checks resolved empty references when composed envs are available', async () => {
+    const cfg = await config(`services:
+  api:
+    command: x
+    port: 3000
+    env: { EMPTY: { value: '\${self.container}', required: true } }
+`);
+    const assignments = assign(cfg, { api: 53000 });
+    const built = buildServiceEnv(cfg, cfg.services.api!, {}, {}, assignments);
+    assert.equal(built.env.EMPTY, '');
+    assert.throws(() => assertEnvRequirements(cfg, ['api'], {}, { envs: new Map([['api', built.env]]) }), /EMPTY/);
   });
 });

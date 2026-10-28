@@ -283,13 +283,14 @@ async function startK8sPhase(
     printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
 
     signal?.throwIfAborted();
+    // REVIEW: Render/validate required env before building images or changing the cluster.
+    const rendered = await renderManifests(config, selectedNames, assignments);
     const builtImages = await buildServiceImages(config, selectedNames, assignments, signal);
 
     for (const image of builtImages) {
       await loadImageIntoCluster(cluster, image, signal);
     }
 
-    const rendered = await renderManifests(config, selectedNames, assignments);
     const manifestDir = await writeManifestFiles(config.projectDir, rendered);
 
     await waitOutTerminatingNamespace(cluster, config, signal);

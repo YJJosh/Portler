@@ -33,6 +33,8 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     for (const name of names) {
       serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments, { viewer: 'host' }).env);
     }
+    // REVIEW: Validate resolved values too, before any setup command runs.
+    assertEnvRequirements(config, names, baseEnv, { projectEnv, envs: serviceEnvs });
     const setupMode = setupModeKey(config, mode, args.prod);
     await pruneSetupReceipts(config, setupMode);
     await runSetupStep(config, null, projectEnv, setupMode, true);

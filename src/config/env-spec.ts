@@ -103,17 +103,20 @@ export function envEntryValue(entry: unknown): { value: unknown; isDefault: bool
  * `docker.env` value does not drop `secret: true` from the service's entry.
  */
 export function mergeEnvEntry(lower: unknown, upper: unknown): unknown {
-  if (!isEnvSpec(lower)) return upper;
+  // REVIEW: Metadata-only overrides must keep a lower scalar's value too, not
+  // just values already wrapped in EnvSpec (e.g. root FOO: bar + secret: true).
+  if (!isEnvSpec(lower) && !isEnvSpec(upper)) return upper;
+  const base = isEnvSpec(lower) ? lower : new EnvSpec({ value: lower ?? null });
   if (!isEnvSpec(upper)) {
-    return new EnvSpec({ value: upper ?? null, required: lower.required, secret: lower.secret, description: lower.description });
+    return new EnvSpec({ value: upper ?? null, required: base.required, secret: base.secret, description: base.description });
   }
   const ownValue = upper.value !== undefined || upper.default !== undefined;
   return new EnvSpec({
-    value: ownValue ? upper.value : lower.value,
-    default: ownValue ? upper.default : lower.default,
-    required: upper.required ?? lower.required,
-    secret: upper.secret ?? lower.secret,
-    description: upper.description ?? lower.description,
+    value: ownValue ? upper.value : base.value,
+    default: ownValue ? upper.default : base.default,
+    required: upper.required ?? base.required,
+    secret: upper.secret ?? base.secret,
+    description: upper.description ?? base.description,
   });
 }
 

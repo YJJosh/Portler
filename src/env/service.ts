@@ -84,10 +84,12 @@ function resolveConfigLayers(
     defaults: resolveEnvMap(defaults, assignments, notUsed, options, exportSecrets),
     secrets: new Map(),
   };
-  for (const key of exportSecrets) output.secrets.set(key, true);
   for (const [key, entry] of Object.entries(entries)) {
     if (isEnvSpec(entry) && entry.secret !== undefined) output.secrets.set(key, entry.secret);
   }
+  // REVIEW: secret:false disables the name guess, not secret provenance. An
+  // exported secret remains secret even under an innocently named override.
+  for (const key of exportSecrets) output.secrets.set(key, true);
   return output;
 }
 
@@ -433,14 +435,22 @@ function productionMessage(config: PortlerConfig, owner: string, keys: string[],
  * file, else a non-empty config value or default. In production a key the deployment
  * must supply only counts the deployment's value.
  */
-function missingRequiredValues(config: PortlerConfig, supplied: EnvMap, service?: ServiceConfig): string[] {
+function missingRequiredValues(config: PortlerConfig, supplied: EnvMap, service?: ServiceConfig, effective?: EnvMap, deploymentPrecedence = config.production): string[] {
   const deploymentOnly = new Set(config.production ? requiredEnvKeys(config, service) : []);
   const missing: string[] = [];
   for (const [key, entry] of Object.entries(ownerEntries(config, service))) {
     if (!isEnvSpec(entry) || entry.required !== true) continue;
-    if (Object.hasOwn(supplied, key) && supplied[key] !== '') continue;
-    if (!deploymentOnly.has(key) && !isBlankConfigValue(entry)) continue;
-    missing.push(key);
+    // REVIEW: A supplied key can be empty, and a dev value overrides even a
+    // non-empty shell key. Validate the winning layer, not any non-empty layer.
+    // Once composed, check the actual result too (references may resolve empty).
+    let value: unknown;
+    if (effective) value = effective[key];
+    else {
+      const configured = envEntryValue(entry);
+      const useSupplied = deploymentOnly.has(key) || configured === undefined || configured.isDefault || deploymentPrecedence;
+      value = useSupplied && Object.hasOwn(supplied, key) ? supplied[key] : deploymentOnly.has(key) ? undefined : configured?.value;
+    }
+    if (value === undefined || value === null || value === '') missing.push(key);
   }
   return missing;
 }
@@ -462,7 +472,7 @@ export function assertEnvRequirements(
   config: PortlerConfig,
   serviceNames: Iterable<string>,
   baseEnv: EnvMap,
-  options: { projectSetup?: boolean } = {},
+  options: RequirementOptions = {},
 ): void {
   const messages = envRequirementProblems(config, serviceNames, baseEnv, options);
   if (messages.length > 0) throw new Error(messages.join('\n'));
@@ -473,13 +483,25 @@ export function assertEnvRequirements(
  * missing. `deployment: false` leaves out the production keys, for a caller that checks
  * those itself (start).
  */
+interface RequirementOptions {
+  projectSetup?: boolean;
+  deployment?: boolean;
+  project?: boolean;
+  /** Composed environments, when available, also catch references resolving to empty. */
+  envs?: ReadonlyMap<string, EnvMap>;
+  projectEnv?: EnvMap;
+  /** start always gives the deployment precedence, even without --prod. */
+  deploymentPrecedence?: boolean;
+}
+
 export function envRequirementProblems(
   config: PortlerConfig,
   serviceNames: Iterable<string>,
   baseEnv: EnvMap,
-  options: { projectSetup?: boolean; deployment?: boolean; project?: boolean } = {},
+  options: RequirementOptions = {},
 ): string[] {
-  const supplied = deploymentEnv(baseEnv);
+  // REVIEW: .env wins over the shell in dev, just as buildServiceEnv composes it.
+  const supplied = config.production || options.deploymentPrecedence ? deploymentEnv(baseEnv) : { ...processEnvAsMap(), ...baseEnv };
   // `project: true` checks the project's top-level env as if its setup steps ran (`portler env`),
   // `project: false` leaves the project out: a view of one service names that service.
   const projectSetup = options.project === true || (options.project !== false && options.projectSetup !== false && (config.setup?.length ?? 0) > 0);
@@ -509,11 +531,11 @@ export function envRequirementProblems(
       if (known.has(key)) descriptions.set(key, known.get(key)!);
     }
   };
-  const projectMissing = projectSetup ? missingRequiredValues(config, supplied) : [];
+  const projectMissing = projectSetup ? missingRequiredValues(config, supplied, undefined, options.projectEnv, options.deploymentPrecedence) : [];
   note('the project', projectMissing);
   for (const name of names) {
     const service = config.services[name]!;
-    note(`service ${name}`, missingRequiredValues(config, supplied, service).filter((key) => !projectMissing.includes(key)), service);
+    note(`service ${name}`, missingRequiredValues(config, supplied, service, options.envs?.get(name), options.deploymentPrecedence).filter((key) => !projectMissing.includes(key)), service);
   }
   if (owners.size > 0) {
     const lines = [...owners].map(([key, who]) => `  ${key} (${who.join(', ')})${descriptions.has(key) ? `: ${descriptions.get(key)}` : ''}`);

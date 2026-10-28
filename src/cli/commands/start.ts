@@ -155,10 +155,18 @@ export async function commandStart(args: ParsedArgs): Promise<number> {
   // Checked against what the platform and the use_env file supply, before buildStartEnv picks
   // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
   // not pass on a free port the platform does not route to.
-  if (args.prod) assertStartRequirements(config, service, baseEnv);
-  // `required: true` entries, in every mode; the production keys were checked just above.
-  const missing = envRequirementProblems(config, [service.name], baseEnv, { project: false, deployment: false });
+  // REVIEW: Aggregate start's production errors and required:true errors, and
+  // use start's deployment-first precedence even when --prod was not typed.
+  const missing = envRequirementProblems(config, [service.name], baseEnv, { project: false, deployment: false, deploymentPrecedence: true });
+  if (args.prod) {
+    try { assertStartRequirements(config, service, baseEnv); }
+    catch (error) { missing.unshift((error as Error).message); }
+  }
   if (missing.length > 0) throw new Error(missing.join('\n'));
   const env = await buildStartEnv(config, service, baseEnv);
+  const resolvedMissing = envRequirementProblems(config, [service.name], baseEnv, {
+    project: false, deployment: false, envs: new Map([[service.name, env]]),
+  });
+  if (resolvedMissing.length > 0) throw new Error(resolvedMissing.join('\n'));
   return runShell(service.command!, resolveServiceCwd(config, service), env, { drainMs: args.drainMs ?? DEFAULT_DRAIN_MS });
 }
