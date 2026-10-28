@@ -47,12 +47,7 @@ features:
 ```yaml [portler.yml]
 services:
   postgres:
-    image: postgres:16-alpine
-    port: 5432
-    env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-      POSTGRES_DB: app
+    use: postgres          # image, port, volume, healthcheck
 
   backend:
     command: npm run dev
@@ -62,7 +57,7 @@ services:
     depends_on:
       - postgres
     env:
-      DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
+      DATABASE_URL: ${postgres.database_url}
 
   frontend:
     command: npm run dev

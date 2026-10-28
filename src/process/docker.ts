@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { managedVolumeName, normalizeVolumeToken, volumeFullName, volumeLabelArgs, volumeScope } from '../config/index.ts';
-import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue } from '../env/index.ts';
+import { PORTLER_INTERNAL_ENV_KEYS, resolveEnvValue, serviceViewer } from '../env/index.ts';
 import { serviceTransport, transportProtocols } from '../ports/transport.ts';
 import { dockerLabelArgs, PROJECT_LABEL } from './ownership.ts';
 import type { Assignments, DockerConfig, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -106,8 +106,10 @@ function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assig
   }
   if (build.target) args.push('--target', build.target);
 
+  // Build args resolve as the image will run: `${db.address}` is the alias on the project network.
+  const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name };
   for (const [key, value] of Object.entries(build.args)) {
-    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments)}`);
+    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments, resolveOptions)}`);
   }
 
   args.push(path.resolve(config.projectDir, build.context));

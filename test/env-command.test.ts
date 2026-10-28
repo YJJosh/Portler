@@ -188,7 +188,7 @@ describe('env for a running service', () => {
     assert.equal(local.status, 0, local.stderr);
     assert.equal(value(local.stdout, 'MODE'), 'local');
     assert.equal(local.stderr, '');
-    assert.match(run('backend', '--reveal').stderr, /--reveal applies to "env --prod"/);
+    assert.equal(run('backend', '--reveal').status, 0, 'the development view takes --reveal too');
   });
 
   it('leaves no container name or image from a typed Docker view in the plain one', async () => {
@@ -459,3 +459,37 @@ describe('env for a Kubernetes service without a port', () => {
     assert.match(result.stderr, /could not ask the cluster whether worker runs there/);
   });
 });
+
+describe('env development view and env entries', () => {
+  it('hides what the config marks secret, shows what the shell gives a default, and warns about a missing required value', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      `services:
+  api:
+    command: node server.js
+    env:
+      SESSION: { value: dev-session, secret: true }
+      LEVEL: { default: info }
+      STRIPE_KEY: { required: true, description: From the Stripe dashboard }
+`,
+      'utf8',
+    );
+    delete env.LEVEL;
+    delete env.STRIPE_KEY;
+    const plain = run('api');
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(value(plain.stdout, 'SESSION'), '***');
+    assert.equal(value(plain.stdout, 'LEVEL'), 'info');
+    assert.equal(value(plain.stdout, 'STRIPE_KEY'), undefined);
+    assert.match(plain.stderr, /STRIPE_KEY \(service api\): From the Stripe dashboard/);
+    env.LEVEL = 'debug';
+    env.STRIPE_KEY = 'sk_test';
+    const supplied = run('api', '--reveal');
+    assert.equal(supplied.stderr, '');
+    assert.equal(value(supplied.stdout, 'SESSION'), 'dev-session');
+    assert.equal(value(supplied.stdout, 'LEVEL'), 'debug', 'the shell wins over a default, and the view says so');
+    assert.equal(value(supplied.stdout, 'STRIPE_KEY'), 'sk_test');
+    assert.equal(value(run('api').stdout, 'STRIPE_KEY'), '***', 'a secret-looking value from the shell is hidden');
+  });
+});
+

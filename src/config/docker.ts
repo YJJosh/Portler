@@ -1,5 +1,6 @@
 import { applyK8sMode } from './k8s.ts';
 import { didYouMean } from '../util/suggest.ts';
+import { mergeEnvMaps, normalizeEnvSpecs } from './env-spec.ts';
 import { defaultDockerContainer, defaultDockerImage } from './naming.ts';
 import { isObject, normalizeEnvObject, normalizeStringArray, optionalString } from './scalars.ts';
 import type { DockerBuildConfig, DockerConfig, PortlerConfig, ServiceConfig, UnknownMap } from '../types/index.ts';
@@ -44,7 +45,7 @@ function normalizeDockerBuild(
 }
 
 function readDockerEnv(raw: UnknownMap, pathPrefix: string): UnknownMap {
-  return normalizeEnvObject(raw.env ?? raw.environment, `${pathPrefix}.env/environment`);
+  return normalizeEnvSpecs(normalizeEnvObject(raw.env ?? raw.environment, `${pathPrefix}.env/environment`), `${pathPrefix}.env`);
 }
 
 function normalizeDockerConfigFromObject(
@@ -146,7 +147,7 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
       ? {
           ...service,
           docker,
-          env: { ...service.env, ...docker.env },
+          env: mergeEnvMaps(service.env, docker.env),
         }
       : {
           ...service,
@@ -156,6 +157,7 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
 
   return {
     ...config,
+    runMode: 'docker',
     services,
   };
 }

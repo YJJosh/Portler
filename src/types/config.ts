@@ -123,6 +123,20 @@ export interface ServiceConfig {
    * `portler up k8s` / `portler k8s render`. See applyK8sMode.
    */
   k8s?: K8sConfig;
+  /**
+   * Values the service offers to others as `${service.<name>}`, e.g. a
+   * connection URL. Templates that may use `self.*` and `env.KEY` (the
+   * service's own env); they resolve for whoever reads them.
+   */
+  exports?: Record<string, string>;
+}
+
+/** A named command for `portler run <task>`. */
+export interface TaskConfig {
+  run: string;
+  /** Runs with this service's env and in its cwd; without one, with the project env in the project root. */
+  service?: string;
+  description?: string;
 }
 
 export interface PortRange {
@@ -176,6 +190,8 @@ export interface PortlerConfig {
   dockerNetworkExplicit?: true;
   /** Set by applyProduction: the deployment (process env, then use_env files) wins over config env. */
   production?: boolean;
+  /** Set by applyDockerMode and applyK8sMode; absent for a plain (local) run. */
+  runMode?: 'docker' | 'k8s';
   filePath: string;
   projectDir: string;
   useEnv: string[];
@@ -202,4 +218,6 @@ export interface PortlerConfig {
   k8sNamespace: string;
   services: Record<string, ServiceConfig>;
   proxy?: ProxyConfig;
+  /** Named commands for `portler run`. */
+  tasks?: Record<string, TaskConfig>;
 }

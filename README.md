@@ -30,16 +30,7 @@ A `portler.yml` for a web app with a database looks like this:
 ```yaml
 services:
   postgres:
-    image: postgres:16-alpine
-    port: 5432
-    env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-      POSTGRES_DB: app
-    volumes:
-      - '@postgres-data:/var/lib/postgresql/data'
-    healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
+    use: postgres          # built-in preset: image, port, volume, healthcheck
 
   backend:
     command: npm run dev
@@ -52,7 +43,7 @@ services:
     depends_on:
       - postgres
     env:
-      DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
+      DATABASE_URL: ${postgres.database_url}
 
   frontend:
     command: npm run dev
@@ -81,7 +72,7 @@ portler down
 On `portler up`:
 
 - Every service gets a free host port, so this stack can run next to other projects and checkouts. Local processes receive it through `port_env`.
-- `${postgres.port}` and `backend.url` resolve to those ports, so `DATABASE_URL` and `VITE_API_URL` always point at the right place.
+- `${postgres.database_url}` and `backend.url` resolve to those ports, so `DATABASE_URL` and `VITE_API_URL` always point at the right place. In `portler up docker` the same `DATABASE_URL` becomes `postgres:5432`, the address a container needs.
 - Postgres runs in Docker. Its data lives in the managed volume `@postgres-data`, which survives restarts and can be forked for another checkout.
 - `npm install` runs only while `node_modules` is missing.
 - The backend starts once Postgres passes its healthcheck, and the frontend once the backend answers.
@@ -93,6 +84,7 @@ On `portler up`:
 - **[Dependency and health checks](https://yjjosh.github.io/Portler/guide/dependencies)** — control startup order.
 - **[Docker](https://yjjosh.github.io/Portler/guide/docker) and [local Kubernetes](https://yjjosh.github.io/Portler/guide/kubernetes)** — use the same configuration.
 - **[Managed volumes](https://yjjosh.github.io/Portler/guide/volumes)** — make it easy to fork local data between checkouts.
+- **[Database presets](https://yjjosh.github.io/Portler/guide/databases)** — `use: postgres`, `mysql` or `redis`, or a preset file of your own for any other database.
 - **[Reverse proxy](https://yjjosh.github.io/Portler/guide/proxy)** — serves the stack through one local origin when enabled.
 - **[Setup & production](https://yjjosh.github.io/Portler/guide/setup-and-production)** — install and build steps live next to the services and run once per checkout, while a path is missing, or every time; `portler start` runs one service on a platform without Docker.
 

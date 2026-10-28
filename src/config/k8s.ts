@@ -1,3 +1,4 @@
+import { mergeEnvMaps, normalizeEnvSpecs } from './env-spec.ts';
 import { isObject, optionalNumber, optionalString } from './scalars.ts';
 import type { K8sConfig, K8sVolumeConfig, PortlerConfig, ServiceConfig, UnknownMap } from '../types/index.ts';
 
@@ -49,7 +50,7 @@ export function normalizeK8sConfig(rawService: UnknownMap, serviceName: string):
 
   return {
     replicas,
-    env,
+    env: normalizeEnvSpecs(env, `${pathPrefix}.env`),
     volume: normalizeK8sVolume(rawK8s.volume, pathPrefix),
   };
 }
@@ -72,7 +73,7 @@ export function applyK8sMode(config: PortlerConfig): PortlerConfig {
       ...service,
       docker,
       k8s,
-      env: { ...service.env, ...(docker?.env ?? {}), ...k8s.env },
+      env: mergeEnvMaps(mergeEnvMaps(service.env, docker?.env), k8s.env),
       // `command` healthchecks usually shell into Docker containers that do
       // not exist in k8s mode; fall back to the default TCP check through the
       // port-forward instead.
@@ -82,6 +83,7 @@ export function applyK8sMode(config: PortlerConfig): PortlerConfig {
 
   return {
     ...config,
+    runMode: 'k8s',
     services,
   };
 }

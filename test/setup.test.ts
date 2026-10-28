@@ -78,6 +78,23 @@ services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
     assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
   });
 
+  it('gives the setup steps of a container service its env as seen from this machine', async () => {
+    await config(`services:
+  db:
+    image: postgres
+    port: 5432
+  app:
+    image: example/app
+    port: 3000
+    env:
+      DB: \${db.address}
+      SELF: \${self.address}
+    setup: 'echo "$DB $SELF" >> steps'
+`);
+    assert.equal(await commandSetup(parseArgs(['docker', 'app'], 'setup')), 0);
+    assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
+  });
+
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {
     const cfg = await config('setup: echo root >> steps\nservices: {api: {command: echo}}');
     await runSetupStep(cfg, null, {}, 'local:dev');

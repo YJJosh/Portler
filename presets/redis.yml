@@ -1,0 +1,10 @@
+# Built-in preset: `use: redis`. Your service's own keys replace these;
+# env and exports merge key by key.
+image: redis:7-alpine
+port: 6379
+volumes:
+  - '@${self.name}-data:/data'
+healthcheck:
+  command: docker exec ${self.container} redis-cli ping
+exports:
+  redis_url: redis://${self.address}

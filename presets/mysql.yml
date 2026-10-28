@@ -1,0 +1,19 @@
+# Built-in preset: `use: mysql`. Your service's own keys replace these;
+# env and exports merge key by key. The image pins a version line: Portler
+# does not change it, because a data volume only opens with a compatible server.
+image: mysql:8.4
+port: 3306
+volumes:
+  - '@${self.name}-data:/var/lib/mysql'
+env:
+  MYSQL_ROOT_PASSWORD: { default: mysql, secret: true }
+  MYSQL_DATABASE: { default: app }
+  MYSQL_USER: { default: app }
+  MYSQL_PASSWORD: { default: app, secret: true }
+healthcheck:
+  # Over TCP: while the image creates the database on first start, its
+  # temporary server does not listen on the network.
+  command: docker exec ${self.container} mysqladmin ping -h 127.0.0.1 -P 3306 --silent
+  timeout_ms: 180000
+exports:
+  database_url: mysql://${env.MYSQL_USER}:${env.MYSQL_PASSWORD}@${self.address}/${env.MYSQL_DATABASE}

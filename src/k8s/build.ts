@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { resolveEnvValue } from '../env/index.ts';
+import { resolveEnvValue, serviceViewer } from '../env/index.ts';
 import { runStreaming } from './exec.ts';
 import type { Assignments, PortlerConfig, ServiceConfig } from '../types/index.ts';
 
@@ -18,8 +18,10 @@ function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignme
   }
   if (build.target) args.push('--target', build.target);
 
+  // Build args resolve as the image will run: in the cluster.
+  const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name };
   for (const [key, value] of Object.entries(build.args)) {
-    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments)}`);
+    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments, resolveOptions)}`);
   }
 
   args.push(path.resolve(config.projectDir, build.context));

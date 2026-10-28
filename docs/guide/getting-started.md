@@ -26,16 +26,7 @@ use_env: .env
 
 services:
   postgres:
-    image: postgres:16-alpine
-    port: 5432
-    env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-      POSTGRES_DB: app
-    volumes:
-      - '@postgres-data:/var/lib/postgresql/data'
-    healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
+    use: postgres
 
   backend:
     command: npm run dev
@@ -45,7 +36,7 @@ services:
     depends_on:
       - postgres
     env:
-      DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
+      DATABASE_URL: ${postgres.database_url}
       CORS_ALLOWED_ORIGIN: frontend.url
 
   frontend:
@@ -59,7 +50,7 @@ services:
       VITE_API_URL: backend.url
 ```
 
-Adapt it to your project: each entry under `services:` is one process (or container) with a `command` or an `image`, an optional preferred `port`, and its environment.
+Adapt it to your project: each entry under `services:` is one process (or container) with a `command`, an `image` or a [preset](/guide/databases) (`use: postgres`), an optional preferred `port`, and its environment.
 
 ::: warning Env files must exist
 The sample lists `use_env: .env`, and every file listed in `use_env` is required — `portler up` fails with an error when one is missing. Create it first (`touch .env`) or remove the `use_env` line if you don't need it.
@@ -82,8 +73,8 @@ frontend   51236   http://localhost:51236
 
 What happened here:
 
-- **`postgres`** has an `image`, so it runs as a Docker container. Its container port `5432` is mapped to the assigned host port `51234`.
-- **`backend`** received `PORT=51235` (via `port_env`) and `DATABASE_URL=postgres://app:app@localhost:51234/app` — the `${postgres.port}` reference resolved to the assigned port.
+- **`postgres`** uses the built-in `postgres` preset, which gives it an image (`postgres:18-alpine`), a managed volume and a healthcheck, so it runs as a Docker container. Its container port `5432` is mapped to the assigned host port `51234`.
+- **`backend`** received `PORT=51235` (via `port_env`) and `DATABASE_URL=postgres://postgres:postgres@localhost:51234/app` — the preset's `database_url` export resolved to the assigned port. Under `portler up docker`, where the backend runs in a container too, the same reference gives `postgres:5432`.
 - **`frontend`** received `VITE_API_URL=http://localhost:51235` — `backend.url` resolved to the backend's full URL.
 - Startup order respected `depends_on`: postgres passed its healthcheck before the backend started, and the backend answered on its port before the frontend started.
 

@@ -2,7 +2,7 @@ import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, l
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
+import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv, hostResolveOptions, resolveEnvValue, type ResolveOptions } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import { shellQuote } from '../../process/docker.ts';
@@ -24,7 +24,7 @@ import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
-import type { Assignments, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
 import { commandUpK8s } from './up-k8s.ts';
@@ -91,13 +91,13 @@ function validateDockerContainerNames(config: PortlerConfig): void {
  * Resolve every service reference the healthcheck will use, so typos like
  * `backend.urll` fail before any service starts instead of mid-poll.
  */
-function validateHealthcheckReferences(service: ServiceConfig, assignments: Assignments): void {
+function validateHealthcheckReferences(service: ServiceConfig, assignments: Assignments, options: ResolveOptions): void {
   const healthcheck = service.healthcheck;
   if (!healthcheck) return;
 
   try {
-    if (healthcheck.url) resolveEnvValue(healthcheck.url, assignments);
-    if (healthcheck.command) resolveEnvValue(healthcheck.command, assignments);
+    if (healthcheck.url) resolveEnvValue(healthcheck.url, assignments, options);
+    if (healthcheck.command) resolveEnvValue(healthcheck.command, assignments, options);
   } catch (error) {
     throw new Error(`services.${service.name}.healthcheck: ${(error as Error).message}`);
   }
@@ -530,21 +530,26 @@ export async function startPhase(
 
   try {
     options.signal?.throwIfAborted();
-    // prod.require: a deployment that forgot a value fails here, before setup runs or
-    // anything is spawned, naming the key instead of failing somewhere inside the app.
-    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
+    // prod.require and `required:` entries: a missing value fails here, before setup runs
+    // or anything is spawned, naming every missing key instead of failing inside the app.
+    assertEnvRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
 
     // Resolve every selected service's env (and healthcheck references) up
     // front, so config mistakes like `backend.urll` fail before anything is
-    // spawned instead of after some services have already started.
+    // spawned instead of after some services have already started. A container
+    // service gets a second env as seen from this machine, for its setup steps and
+    // healthcheck command, which run here: `${db.address}` differs between the two.
     const serviceEnvs = new Map<string, ServiceEnv>();
+    const hostEnvs = new Map<string, EnvMap>();
     for (const serviceName of selectedNames) {
       const service = config.services[serviceName]!;
-      serviceEnvs.set(serviceName, buildServiceEnv(config, service, baseEnv, generatedEnv, assignments));
-      validateHealthcheckReferences(service, assignments);
+      const built = buildServiceEnv(config, service, baseEnv, generatedEnv, assignments);
+      serviceEnvs.set(serviceName, built);
+      hostEnvs.set(serviceName, service.docker ? buildServiceEnv(config, service, baseEnv, generatedEnv, assignments, { viewer: 'host' }).env : built.env);
+      validateHealthcheckReferences(service, assignments, hostResolveOptions(config, service, baseEnv, generatedEnv, assignments));
     }
 
-    const projectEnv = buildProjectEnv(config, baseEnv, assignments);
+    const projectEnv = buildProjectEnv(config, baseEnv, assignments, generatedEnv);
 
     const setupMode = setupModeKey(config, mode, options.prod);
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
@@ -627,8 +632,9 @@ export async function startPhase(
         options.signal?.throwIfAborted();
         const service = config.services[serviceName]!;
         const { env: serviceEnv, explicitKeys } = serviceEnvs.get(serviceName)!;
+        const hostEnv = hostEnvs.get(serviceName)!;
         if (options.setup !== false) {
-          await runSetupStep(config, service, serviceEnv, setupMode, options.setup, options.signal);
+          await runSetupStep(config, service, hostEnv, setupMode, options.setup, options.signal);
         }
         options.signal?.throwIfAborted();
         let childExited = false;
@@ -652,13 +658,14 @@ export async function startPhase(
             waitForServiceReady(
               config,
               service,
-              serviceEnv,
+              hostEnv,
               assignments,
               assignments[serviceName],
               () => childExited,
               service.docker ? DOCKER_TCP_HOLD_MS : 0,
               logFilePath,
               options.signal,
+              hostResolveOptions(config, service, baseEnv, generatedEnv, assignments),
             ),
           );
         }

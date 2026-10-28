@@ -11,6 +11,7 @@ import { commandLogs } from './commands/logs.ts';
 import { commandPorts } from './commands/ports.ts';
 import { commandPs } from './commands/ps.ts';
 import { commandRestart } from './commands/restart.ts';
+import { commandRun } from './commands/run.ts';
 import { commandStart } from './commands/start.ts';
 import { commandSetup } from './commands/setup.ts';
 import { commandUp } from './commands/up.ts';
@@ -63,6 +64,7 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     logs: new Set(['--follow', '--file']),
     ports: new Set(['--file']),
     env: new Set(['--file', '--prod', '--reveal']),
+    run: new Set(['--file', '--prod', '--volume-set']),
     volumes: new Set(['--force', '--volume-set', '--file', '--prod']),
     k8s: new Set(['--file']),
     init: new Set(),
@@ -132,6 +134,8 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
       return commandPorts(args);
     case 'env':
       return commandEnv(args);
+    case 'run':
+      return commandRun(args);
     case 'volumes':
       return commandVolumes(args);
     case 'k8s':

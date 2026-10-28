@@ -5,7 +5,7 @@ import net from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
-import { resolveEnvValue } from '../env/index.ts';
+import { resolveEnvValue, type ResolveOptions } from '../env/index.ts';
 import { usesTcp } from '../ports/transport.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
@@ -140,6 +140,7 @@ async function checkReady(
   attemptTimeoutMs: number,
   tcpHoldMs: number,
   signal?: AbortSignal,
+  resolve: ResolveOptions = {},
 ): Promise<boolean> {
   switch (healthcheck.type) {
     case 'none':
@@ -148,13 +149,13 @@ async function checkReady(
       if (!assignment) return true;
       return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs, signal);
     case 'http': {
-      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
+      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment?.url;
       if (!url) return true;
       return isHttpReady(url, attemptTimeoutMs, healthcheck.accept, signal);
     }
     case 'command': {
       if (!healthcheck.command) throw new Error(`service "${service.name}" healthcheck command is missing`);
-      const command = resolveEnvValue(healthcheck.command, assignments);
+      const command = resolveEnvValue(healthcheck.command, assignments, resolve);
       return isCommandReady(command, resolveServiceCwd(config, service), env, attemptTimeoutMs, signal);
     }
   }
@@ -165,12 +166,13 @@ function describeHealthcheck(
   healthcheck: HealthcheckConfig,
   assignment: ServiceAssignment | undefined,
   assignments: Assignments,
+  resolve: ResolveOptions = {},
 ): string {
   switch (healthcheck.type) {
     case 'tcp':
       return assignment ? `tcp check on ${assignment.host}:${assignment.port}` : 'tcp check';
     case 'http': {
-      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments) : assignment?.url;
+      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment?.url;
       return url ? `http check on ${url}` : 'http check';
     }
     case 'command':
@@ -310,8 +312,11 @@ export async function waitForServiceReady(
   /** The detached log file of the service, named in errors; undefined when its output is on this terminal. */
   logFile?: string,
   signal?: AbortSignal,
+  /** How references in the healthcheck resolve; they are read on this machine, with the service as `self`. */
+  resolveOptions: ResolveOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
+  const resolve: ResolveOptions = { config, viewer: 'host', self: service.name, ...resolveOptions };
   const healthcheck = service.healthcheck ?? defaultHealthcheck(service, assignment);
   if (healthcheck.type === 'none') return;
 
@@ -323,7 +328,7 @@ export async function waitForServiceReady(
     if (childHasExited()) throw exitedError(service, logFile);
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
-    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs, signal);
+    const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs, signal, resolve);
     // The probe can pass against a port whose process died while it ran: Docker's
     // proxy keeps accepting, a hold timer keeps ticking. The exit wins.
     signal?.throwIfAborted();
@@ -339,7 +344,7 @@ export async function waitForServiceReady(
 
   throw new Error(
     `service "${service.name}" was not ready after ${Math.round(healthcheck.timeoutMs / 1000)}s ` +
-      `(${describeHealthcheck(healthcheck, assignment, assignments)}). ` +
+      `(${describeHealthcheck(healthcheck, assignment, assignments, resolve)}). ` +
       `If the service just needs more time, raise services.${service.name}.healthcheck.timeout_ms; otherwise fix the check or the service.`,
   );
 }

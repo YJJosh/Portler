@@ -17,6 +17,7 @@ Usage:
   ${PACKAGE_NAME} logs [service...] [-f|--follow]
   ${PACKAGE_NAME} ports
   ${PACKAGE_NAME} env [docker|k8s] [service] [--prod] [--reveal]
+  ${PACKAGE_NAME} run [docker|k8s] [task|service] [-- <command>...] [--prod] [--volume-set <name>]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
   ${PACKAGE_NAME} volumes [list] [--prod]
   ${PACKAGE_NAME} volumes fork <volume> <new-set> [--force] [--prod]
@@ -27,9 +28,10 @@ Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
-      --prod              Use production overrides for setup, start, up, restart, env and volumes
-      --reveal            For "env --prod" (or a service started with --prod): print
-                          secret-looking values instead of ***
+      --prod              Use production overrides for setup, start, up, restart, env, run
+                          and volumes
+      --reveal            For "env": print values marked "secret: true" (and, with
+                          --prod, secret-looking ones) instead of ***
       --drain-ms <ms>     For "start": after the shell exits, wait up to <ms> for the rest
                           of its process group before returning (default 10000)
       --setup             For "up" and "restart": run setup steps again, ignoring their receipts
@@ -89,6 +91,9 @@ port-forward carries only TCP; "tcp+udp" forwards TCP only. "k8s render" renders
 context switch; a full "down k8s" clears it. "up k8s" refuses another context
 while the project still has Deployments there, or that cluster cannot be asked.
 A recorded launch also requires the original KUBECONFIG; names can collide across files.
+
+"run" runs a "tasks:" entry, or "run <service> -- <command>", on this machine with
+that service's env as seen from here (e.g. \${db.address} is localhost:<port>).
 
 Run "${PACKAGE_NAME} init" to write a starter portler.yml.
 

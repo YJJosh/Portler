@@ -20,6 +20,8 @@ export interface ParsedArgs {
   /** `--image <service>=<image>`: run that Docker service from this image instead of building it (up/restart). */
   images?: Record<string, string>;
   positionals: string[];
+  /** The words after `--`, when there is one; they are in `positionals` too. `run` passes them on as a command. */
+  passthrough?: string[];
 }
 
 /** Every flag the CLI accepts, for unknown-flag rejection and suggestions. */
@@ -92,7 +94,8 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
     const arg = args[index]!;
 
     if (arg === '--') {
-      positionals.push(...args.slice(index + 1));
+      parsed.passthrough = args.slice(index + 1);
+      positionals.push(...parsed.passthrough);
       break;
     }
 

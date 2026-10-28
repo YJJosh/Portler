@@ -1,7 +1,7 @@
 import { configForRunMode, loadBaseEnv, loadConfig, managedVolumeMount, managedVolumeName, type RunMode } from '../../config/index.ts';
 import { productionServices } from '../../config/production.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertProductionRequirements } from '../../env/index.ts';
+import { assertEnvRequirements } from '../../env/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
@@ -482,17 +482,15 @@ async function prepareRestart(
   // (a recorded Docker mode whose docker: config has since been removed), the commands and
   // container names, --image (applyImageOverrides rejects an unknown service or one that does
   // not run in Docker in this mode, and a target this restart leaves running would keep its
-  // old image), and prod.require (a deployment value that has gone missing).
+  // old image), and the env values a launch requires (prod.require, `required:` entries).
   const finalConfig = rawConfig;
   const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
     const { config: runConfig } = launchConfig(withVolumeSet(finalConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
     checkLaunch(runConfig, plan.mode, names);
     if (Object.keys(plan.images).length > 0) validateImageOverrideTargets(plan.images, names, liveNow);
-    if (plan.prod) {
-      assertProductionRequirements(runConfig, names, await loadBaseEnv(runConfig, { allowMissing: true }), {
-        projectSetup: plan.setup !== false,
-      });
-    }
+    assertEnvRequirements(runConfig, names, await loadBaseEnv(runConfig, { allowMissing: plan.prod }), {
+      projectSetup: plan.setup !== false,
+    });
   };
   return { rawConfig, planProd, requestedRootNames, starting, launch, planFor, startingFor, preflight };
 }

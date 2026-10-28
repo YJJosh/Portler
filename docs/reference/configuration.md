@@ -10,6 +10,16 @@ The `portler.yml` format is being improved and can change in breaking ways in up
 Portler uses its own hand-rolled YAML parser covering a practical subset: mappings, block and inline lists, scalars, quoting, and comments. Anchors, multi-document files, and other exotic features are not supported.
 :::
 
+::: tip Editor autocomplete
+Portler ships a JSON schema for `portler.yml` (`schema/portler.schema.json` in the package). Editors that use yaml-language-server, such as VS Code with the YAML extension, pick it up from this first line:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/YJJosh/Portler/main/schema/portler.schema.json
+```
+
+It completes keys and flags typos such as `healtcheck:`, which Portler itself ignores.
+:::
+
 ## Top-level options
 
 | Key | Type | Default | Description |
@@ -18,8 +28,9 @@ Portler uses its own hand-rolled YAML parser covering a practical subset: mappin
 | `name` | string | — | Stable project name. Under `--prod` it names the Docker network, the containers and the managed volumes instead of the directory hash; `[a-z0-9][a-z0-9_.-]*` ending in a letter or digit, no `--`, up to 40 characters. See [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server) |
 | `prod` | object | — | Production `setup` replacement, `env` overrides, `require` (keys the deployment must supply) and `services` (which services run), used with `--prod` |
 | `services` | mapping | — (required) | The services to run; see [Service options](#service-options) |
+| `tasks` | mapping | — | Named commands for [`portler run`](/reference/cli/run); see [tasks](#tasks) |
 | `use_env` | string \| list | `[]` | `.env` file(s) loaded for all services, later files win. Alias: `env_file` |
-| `env` | mapping \| list | `{}` | Env values shared by all services; [references](#service-references) resolve |
+| `env` | mapping \| list | `{}` | Env values shared by all services; [references](#service-references) resolve. An entry can be a mapping with `default`, `required`, `secret` and `description`; see [env entries](#env-entries) |
 | `host` | string | `127.0.0.1` | Default bind/probe host for all services |
 | `url_host` | string | `localhost` | Default host used in generated URLs |
 | `protocol` | string | `http` | Default URL scheme |
@@ -36,6 +47,8 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
+| `use` | string | — | Start from a preset: a built-in name (`postgres`, `mysql`, `redis`) or a path to a preset file. See [use](#use-presets) |
+| `exports` | mapping | — | Named values other services read as `${service.name}`, such as a connection URL. See [exports](#exports) |
 | `setup` | string \| list of commands and steps | — | Host shell commands in service cwd, with resolved service env; steps as at the top level |
 | `prod` | object | — | Production `setup`, `command` replacements, `env` overrides and `require` |
 | `command` | string | — | Shell command that starts the service (local mode) |
@@ -43,7 +56,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 | `port` | integer | — | Declared port (local; tried first only with `prefer_declared_port`, see [Ports](/guide/ports)) / internal container port (Docker). Services without a port get no assignment and cannot be referenced |
 | `port_env` | string \| list | `[]` | Env variable name(s) that receive the port |
 | `transport` | `tcp` \| `udp` \| `tcp+udp` | `tcp` | Which protocols the port uses; needs `port`. See [UDP ports](/guide/ports#udp-ports) |
-| `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development. Alias: `environment` |
+| `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development, except `default:` entries. Entries as in [env entries](#env-entries). Alias: `environment` |
 | `host` | string | top-level `host` | Bind/probe host override |
 | `url_host` | string | top-level `url_host` | URL host override |
 | `protocol` | string | top-level `protocol` | URL scheme override |
@@ -62,7 +75,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 A service becomes a **Docker service** (runs in Docker even under plain `portler up`) when it has `image`, `build`, `dockerfile`, `volumes`, or `type: docker`.
 
 ::: warning Reserved service names
-`docker` and `k8s` are always reserved (they select run modes on the command line). `proxy` is reserved when a `proxy:` block exists.
+`docker` and `k8s` are always reserved (they select run modes on the command line). `self` and `env` are reserved too (`${self.port}` names the service itself; `${env.KEY}` reads a service's own env in its [exports](#exports)). `proxy` is reserved when a `proxy:` block exists.
 :::
 
 ## Setup and prod
@@ -96,7 +109,102 @@ Top-level `prod` accepts `setup`, `env`, `require` and `services`; service `prod
 
 `prod.env` wins over Docker-mode env. `prod.command` only replaces a container command that comes from `command` (top-level `image`/`build` services); a `docker:` block keeps `docker.command` or the image `CMD`. With `--prod` and in `portler start`, the deployment wins over config: process env, then the `use_env` file (a missing one is skipped), then config env. Kubernetes does not apply production overrides or setup; production/setup flags are rejected in `up k8s`. `prod` is a config key but **not** a reserved service name or positional mode; use `--prod`. See [Setup & production](/guide/setup-and-production).
 
-`prod.require` lists variables the deployment must supply: with `--prod`, `up`, `setup`, `start` and `restart` fail before anything runs or is stopped when one of them is missing or empty, naming it. A required key is always taken from the deployment (process env or the `use_env` file); its config value is not used, and neither is a value Portler sets itself (`PORTLER_*`, a `port_env` name such as `PORT`), so a blank `prod.env` entry and a `require` entry mean the same, and required keys reach containers whether or not an `env:` names them. A blank top-level `prod.env` entry belongs to the env each service and the top-level setup steps see: it is required by each service that does not set the key itself, and by the project only while its top-level setup steps run. A top-level `prod.require` holds always. Top-level `prod.services` lists the services that run under `--prod`; the rest are external to the deployment: they are not started, dependencies on them are dropped, a proxy route to one is an error, and naming one on the command line is an error. Without it every service runs.
+`prod.require` lists variables the deployment must supply: with `--prod`, `up`, `setup`, `start` and `restart` fail before anything runs or is stopped when one of them is missing or empty, naming it. A required key is always taken from the deployment (process env or the `use_env` file); its config value is not used, and neither is a value Portler sets itself (`PORTLER_*`, a `port_env` name such as `PORT`), so a blank `prod.env` entry, a `require` entry and an env entry marked `required: prod` (see [env entries](#env-entries)) mean the same, and required keys reach containers whether or not an `env:` names them. A blank top-level `prod.env` entry belongs to the env each service and the top-level setup steps see: it is required by each service that does not set the key itself, and by the project only while its top-level setup steps run. A top-level `prod.require` holds always. Top-level `prod.services` lists the services that run under `--prod`; the rest are external to the deployment: they are not started, dependencies on them are dropped, a proxy route to one is an error, and naming one on the command line is an error. Without it every service runs.
+
+## env entries
+
+Every `env:` block (top-level, service, `docker.env`, `k8s.env`, `prod.env`) takes a plain value or a mapping that describes the key:
+
+```yaml
+env:
+  LOG_LEVEL: { default: debug }                     # your shell or .env can override it
+  STRIPE_KEY:
+    required: true                                  # up fails, listing every missing key
+    secret: true                                    # portler env prints ***
+    description: Test key from the Stripe dashboard
+  PUBLIC_URL: { value: "http://localhost:${web.port}", required: prod }
+```
+
+| Key | Meaning |
+| --- | --- |
+| `value` | The config value, like a plain value: in development it wins over your shell and the `use_env` files |
+| `default` | Used only when neither your shell nor a `use_env` file sets the key. Cannot be combined with `value` |
+| `required` | `true`: the key must end up non-empty wherever the service runs, from your shell, a `use_env` file, or a non-empty `value`/`default`. `prod`: under `--prod` the deployment must supply it, like [`prod.require`](#setup-and-prod); its config value still works in development |
+| `secret` | `true` hides the value in [`portler env`](/reference/cli/env), in development too, and so does a value that reads it through an [export](#exports). `false` keeps a secret-looking name (`PASSWORD_MIN_LENGTH`) visible under `--prod` |
+| `description` | Shown next to the key when it is missing |
+
+A mapping with only `required`, `secret` or `description` sets no value: the key comes from your shell or a `use_env` file, and is forwarded to containers like the keys those files set. `up`, `setup`, `restart` and `start` check `required: true` before anything runs or stops and report every missing key in one error; `env` and `run` print the same report as a warning.
+
+Layers merge per key. A higher layer (the service over the top level, `docker.env` or `k8s.env` over the service, `prod.env` over both) replaces the value or default, while `required`, `secret` and `description` stay unless it sets them too: a plain `docker.env` value does not drop `secret: true`. Under `--prod` (and in `portler start`) the deployment wins over config anyway, so `default` and `value` behave the same there.
+
+## use (presets) {#use-presets}
+
+`use:` starts a service from a preset: a built-in one by name, or a YAML file of your own by path. A preset holds ordinary service keys, so a new database needs no change to Portler.
+
+```yaml
+services:
+  db:
+    use: postgres                       # built-in
+    env:
+      POSTGRES_DB: shop                 # merges with the preset's env
+  search:
+    use: ./portler/presets/meili.yml    # a file: relative to the project root
+```
+
+| Built-in | Image | Port | Exports |
+| --- | --- | --- | --- |
+| `postgres` | `postgres:18-alpine` | 5432 | `database_url` |
+| `mysql` | `mysql:8.4` | 3306 | `database_url` |
+| `redis` | `redis:7-alpine` | 6379 | `redis_url` |
+
+Each built-in preset declares a managed volume `@<service>-data`, a readiness command and env entries with development defaults (passwords marked `secret: true`). The files live in [`presets/`](https://github.com/YJJosh/Portler/tree/main/presets).
+
+- The service's own keys replace the preset's, except `env` and `exports`, which merge key by key (as [env layers](#env-entries) do). A list such as `volumes:` replaces the preset's list.
+- A value is a path when it contains `/` or ends in `.yml`/`.yaml`; anything else is a built-in name.
+- `${self.name}` in a preset becomes the service's name when the file loads, so two services using one preset get separate volumes. Other `${self.*}` references resolve later, like in the service itself.
+- A preset cannot `use` another preset.
+- The image pins a major version, because a data volume only opens with the major that wrote it. Postgres 17 and older keep their data in `/var/lib/postgresql/data`, so set `volumes:` too when you set an older `image:`.
+
+## exports
+
+`exports:` gives a service named values that other services read like a property: `${db.database_url}`. A template can use `${self.*}` properties and `${env.KEY}`, the value the exporting service itself gets for `KEY` (from config, your shell or a `use_env` file).
+
+```yaml
+services:
+  db:
+    image: postgres:18-alpine
+    port: 5432
+    env:
+      POSTGRES_PASSWORD: { default: dev, secret: true }
+    exports:
+      database_url: postgres://postgres:${env.POSTGRES_PASSWORD}@${self.address}/app
+  api:
+    env:
+      DATABASE_URL: ${db.database_url}   # right in local, Docker and Kubernetes mode
+```
+
+An export resolves for whoever reads it, so `${self.address}` inside it is the address [as the reader sees it](#service-references). A value that reads a `secret: true` key is hidden by `portler env` too. Names use lowercase letters, digits and `_` and cannot hide a built-in property such as `url`. An export cannot use another export, and the env values an export reads cannot use one either, so exports never form a loop. `${env.KEY}` only works inside `exports`.
+
+## tasks
+
+`tasks:` names commands for [`portler run`](/reference/cli/run). A task is a command, or a mapping:
+
+```yaml
+tasks:
+  psql: docker exec -it ${db.container} psql -U postgres app
+  migrate:
+    run: pnpm db:migrate
+    service: api                 # run with api's env, in api's cwd
+    description: Apply database migrations
+```
+
+| Key | Meaning |
+| --- | --- |
+| `run` | Shell command. [References](#service-references) resolve as seen from this machine, like in a healthcheck command |
+| `service` | Run with that service's env and in its `cwd`. Without it, the command gets the project's env and `PORTLER_*` values, in the project root |
+| `description` | Shown by `portler run` with no name |
+
+Task names use letters, digits, `_`, `:`, `.` and `-`, and cannot be a service name, `docker` or `k8s`.
 
 ## depends_on
 
@@ -226,7 +334,9 @@ See [Proxy: one project URL](/guide/proxy).
 
 ## Service references
 
-Env values (top-level and per-service) can reference other services, either as the whole value (`backend.url`) or interpolated (`${postgres.port}`). Valid properties: `url`, `port`, `host`, `url_host`, `protocol`, `desired_port`, `container`, `image`, `name`. See [Services & environment](/guide/services#service-references).
+Env values (top-level and per-service) can reference other services, either as the whole value (`backend.url`) or interpolated (`${postgres.port}`). Valid properties: `url`, `port`, `host`, `url_host`, `protocol`, `desired_port`, `container`, `image`, `name`, `address`, `address_host`, `address_port`, plus the service's [exports](#exports). `self` names the service whose env, setup, healthcheck or exports it is (`${self.port}`).
+
+`address` is `host:port` as the reader sees it: `localhost:<assigned port>` from a process on your machine (including setup steps, healthcheck commands and `portler run`), `<service>:<port>` from a container on the project network or from a pod in [Kubernetes mode](/guide/kubernetes), and `host.docker.internal:<assigned port>` from a container reaching a local process. `url`, `port` and `host` are always the host-side values. See [Services & environment](/guide/services#service-references).
 
 ## Complete example
 
@@ -243,6 +353,9 @@ use_env: .env
 prefer_declared_port: false
 port_range: {start: 51000, end: 59999}
 
+tasks:
+  psql: docker exec -it ${postgres.container} psql -U postgres app
+
 proxy:
   port: auto
   routes:
@@ -251,24 +364,14 @@ proxy:
 
 services:
   postgres:
-    image: postgres:16-alpine
-    port: 5432
+    use: postgres                 # image, port, volume, healthcheck, exports.database_url
     env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-      POSTGRES_DB: app
-    volumes:
-      - '@postgres-data:/var/lib/postgresql/data'
-    healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
+      POSTGRES_PASSWORD: { default: app, secret: true }
     k8s:
-      volume:
-        size: 1Gi
-        mount_path: /var/lib/postgresql/data
+      volume: 1Gi
 
   backend:
     command: npm run dev
-    setup: npm run generate
     prod:
       command: npm start
       setup: []
@@ -279,18 +382,19 @@ services:
     port_env: PORT
     depends_on:
       - postgres
+    setup:
+      - npm run generate
+      - run: npm run migrate
+        watch: [migrations]
     env:
-      DATABASE_URL: postgres://app:app@localhost:${postgres.port}/app
+      DATABASE_URL: ${postgres.database_url}   # localhost:<port>, postgres:5432 in a container
       PUBLIC_ORIGIN: proxy.url
+      SESSION_SECRET: { required: true, secret: true, description: "Any long random string" }
     docker:
       build:
         context: .
         dockerfile: apps/api/Dockerfile
-      env:
-        DATABASE_URL: postgres://app:app@postgres:5432/app
-    k8s:
-      env:
-        DATABASE_URL: postgres://app:app@postgres:5432/app
+    k8s: true
 
   frontend:
     command: npm run dev

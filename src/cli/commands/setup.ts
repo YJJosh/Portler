@@ -1,6 +1,6 @@
 import { assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { assertProductionRequirements, buildServiceEnv } from '../../env/index.ts';
+import { assertEnvRequirements, buildServiceEnv } from '../../env/index.ts';
 import { buildProjectEnv, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { EnvMap } from '../../types/index.ts';
@@ -25,11 +25,13 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     // often what setup (or the tool that ran it) creates, and its values are read before
     // the steps run anyway. `up` in development still requires it.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true });
-    if (args.prod) assertProductionRequirements(config, names, baseEnv);
-    const projectEnv = buildProjectEnv(config, baseEnv, assignments);
+    assertEnvRequirements(config, names, baseEnv);
+    const projectEnv = buildProjectEnv(config, baseEnv, assignments, generatedEnv);
+    // Setup steps run on this machine, also for a container service, so they get its env as
+    // seen from here: `${db.address}` is the database's port on this machine, not its alias.
     const serviceEnvs = new Map<string, EnvMap>();
     for (const name of names) {
-      serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments).env);
+      serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments, { viewer: 'host' }).env);
     }
     const setupMode = setupModeKey(config, mode, args.prod);
     await pruneSetupReceipts(config, setupMode);

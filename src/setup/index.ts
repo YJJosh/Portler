@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { assertServiceCwd, resolveServiceCwd } from '../config/index.ts';
-import { requiredEnvKeys } from '../env/index.ts';
-import { resolveEnvMap } from '../env/resolve.ts';
+import { composeProjectEnv } from '../env/index.ts';
 import { runShell } from '../process/shell.ts';
 import { portlerDir } from '../state/index.ts';
 import { pathExists } from '../util/fs.ts';
@@ -191,17 +190,13 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
 }
 
 /**
- * Environment for top-level setup steps: the process env, base `.env` files,
- * then root config env. In production the deployment wins instead: root config
- * env, base `.env` files, then the process env, and a key the deployment
+ * Environment for top-level setup steps: `default:` entries, the process env, base
+ * `.env` files, then root config env. In production the deployment wins instead: root
+ * config env, base `.env` files, then the process env, and a key the deployment
  * supplies is not resolved from config at all (see buildServiceEnv).
  */
-export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
-  if (config.production) {
-    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env), ...requiredEnvKeys(config)]);
-    return { ...resolveEnvMap(config.env, assignments, overridden), ...baseEnv, ...process.env } as EnvMap;
-  }
-  return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
+export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments, generatedEnv: EnvMap = {}): EnvMap {
+  return composeProjectEnv(config, baseEnv, assignments, generatedEnv).env;
 }
 
 /**

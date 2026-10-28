@@ -28,7 +28,7 @@ services:
         LOG_LEVEL: info
 ```
 
-Each `setup` entry is a shell command, or a step object with `run` plus one modifier. A plain command runs once per checkout and keeps a receipt; `if_missing: <path>` runs only while nothing exists at that path; `always: true` runs every time; `watch: [files]` makes a plain step run again when one of the listed files changes, a lockfile for an install. See [the configuration reference](/reference/configuration#setup-and-prod).
+Each `setup` entry is a shell command, or a step object with `run` plus one modifier. A plain command runs once per checkout and keeps a receipt; `if_missing: <path>` runs only while nothing exists at that path; `always: true` runs every time; `watch: [paths]` makes a plain step run again when one of the listed files changes, a lockfile for an install, or a file in a listed folder, a migrations folder for a migrate step (see [Migrations](/guide/databases#migrations)). See [the configuration reference](/reference/configuration#setup-and-prod).
 
 ## Fresh checkouts and workspaces
 
@@ -76,6 +76,21 @@ services:
 ```
 
 `prod.require` names what the deployment has to supply. With `--prod`, `up`, `setup`, `start` and `restart` check those keys before running or stopping anything and fail naming the missing ones, so a forgotten platform variable fails the deploy instead of starting the app against a development default. A required key is the deployment's to supply: neither its config value nor a value Portler generates (`PORTLER_*`, a `port_env` name such as `PORT`) counts, and it is forwarded to containers whether or not an `env:` names it. Top-level `require` applies to every service and to top-level setup; a service's `require` to that service only.
+
+The same can be said where the key is defined, with an [env entry](/reference/configuration#env-entries):
+
+```yaml
+env:
+  BETTER_AUTH_SECRET:
+    default: dev-only-secret        # fine on your machine
+    required: prod                  # under --prod the deployment must supply it
+    secret: true
+  STRIPE_KEY:
+    required: true                  # needed everywhere, development too
+    description: Test key from the Stripe dashboard
+```
+
+`required: prod` means what a `prod.require` entry means, at the level where the entry is. `required: true` asks for a non-empty value in every mode: a fresh checkout without the key in its shell or `.env` stops at `up` with every missing key and its description in one message, instead of the app failing later.
 
 `prod.services` names the services that run under `--prod`. The rest are external, a managed database or a hosted queue reached through values the deployment supplies: they are not started, dependencies on them are dropped, a route in `proxy` to one is an error, and naming one on the command line is an error. A reference to a left-out service, such as `${postgres.port}`, must then be replaced by a deployment value, which `require` makes explicit.
 
