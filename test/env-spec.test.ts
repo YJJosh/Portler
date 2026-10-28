@@ -416,6 +416,20 @@ services:
     } finally { process.env.PATH = previous; }
   });
 
+  it('allows injected port_env and service names to satisfy required:true, but not prod.require', async () => {
+    const cfg = await config(`services:
+  api:
+    command: x
+    port: 3000
+    port_env: PORT
+    env: { PORT: { required: true }, PORTLER_SERVICE_NAME: { required: true } }
+`);
+    assert.doesNotThrow(() => assertEnvRequirements(cfg, ['api'], {}));
+    cfg.services.api!.prod = { env: {}, require: ['PORT'] };
+    const prod = applyProduction(cfg, true);
+    assert.throws(() => assertEnvRequirements(prod, ['api'], {}), /requires PORT in production/);
+  });
+
   it('checks resolved empty references when composed envs are available', async () => {
     const cfg = await config(`services:
   api:

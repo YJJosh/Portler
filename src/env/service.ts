@@ -440,6 +440,10 @@ function missingRequiredValues(config: PortlerConfig, supplied: EnvMap, service?
   const missing: string[] = [];
   for (const [key, entry] of Object.entries(ownerEntries(config, service))) {
     if (!isEnvSpec(entry) || entry.required !== true) continue;
+    // REVIEW: required:true checks the final value, unlike prod.require. A
+    // generated service name or injected port already guarantees a value.
+    if (!effective && !deploymentOnly.has(key) && service &&
+      (key === 'PORTLER_SERVICE_NAME' || (service.portEnv.includes(key) && (service.port !== undefined || deploymentPrecedence)))) continue;
     // REVIEW: A supplied key can be empty, and a dev value overrides even a
     // non-empty shell key. Validate the winning layer, not any non-empty layer.
     // Once composed, check the actual result too (references may resolve empty).
