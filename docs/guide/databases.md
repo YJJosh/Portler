@@ -53,7 +53,7 @@ db:
     volume: 1Gi
 ```
 
-The env defaults are `default:` entries, so a `POSTGRES_PASSWORD` in your shell or `.env` replaces them without touching `portler.yml`.
+The env defaults are `default:` entries, so a `POSTGRES_PASSWORD` in your shell or `.env` replaces them without touching `portler.yml`. The export puts the user and password into the URL as they are, so a password with `@`, `/`, `:` or `#` breaks `database_url`: pick one without them, or override the export.
 
 ::: warning Versions
 A preset pins a major version, because a data volume only opens with the major that wrote it. To stay on Postgres 16, set the image and the older data path together:
