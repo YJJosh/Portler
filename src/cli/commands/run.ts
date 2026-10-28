@@ -3,7 +3,7 @@ import { configForRunMode, loadBaseEnv, loadConfig, resolveServiceCwd, type RunM
 import { buildServiceEnv, envRequirementProblems, hostResolveOptions, resolveEnvValue } from '../../env/index.ts';
 import { shellQuote } from '../../process/docker.ts';
 import { readPids } from '../../process/index.ts';
-import { runForeground } from '../../process/shell.ts';
+import { runForeground, runShell } from '../../process/shell.ts';
 import { buildProjectEnv } from '../../setup/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import { didYouMean } from '../../util/suggest.ts';
@@ -87,5 +87,9 @@ export async function commandRun(args: ParsedArgs): Promise<number> {
   });
   // The lock is held only while the env is worked out, not while the command runs: a psql
   // session must not block `up` or `down` for this project.
-  return runForeground(command, cwd, env);
+  // With a terminal the command stays in Portler's process group so it can read from the
+  // terminal (psql, a REPL); a signal sent to Portler alone then reaches only its shell.
+  // Without one (scripts, CI, a supervisor) nothing needs the terminal, so it gets a group
+  // of its own and every signal reaches the whole tree, background children included.
+  return process.stdin.isTTY ? runForeground(command, cwd, env) : runShell(command, cwd, env);
 }

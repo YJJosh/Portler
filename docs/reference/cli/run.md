@@ -33,6 +33,7 @@ portler run api -- sh -c 'echo $DATABASE_URL'
 - **Ports.** A service that is not running gets its port assignment like `portler env`; nothing is started. Start the database first if the command needs it.
 - **Missing values** marked `required: true` (or required under `--prod`) are printed as a warning, not an error: the command may not need them.
 - **Exit code** is the command's. The command runs in the foreground with this terminal, so interactive programs such as `psql` work; Ctrl-C goes to the command, and Portler waits for it to exit.
+- **Signals:** with a terminal, the command shares Portler's process group (that is how it can read from the terminal), so a SIGTERM sent to Portler alone reaches only the command's shell. Without a terminal (a script, CI, a supervisor), the command gets a process group of its own and SIGINT and SIGTERM reach every process in it, including ones it started in the background.
 - `portler run` does not hold the project lock while the command runs, so a long session does not block `up` or `down`.
 
 Task names cannot be a service name, `docker` or `k8s`. See [tasks](/reference/configuration#tasks).

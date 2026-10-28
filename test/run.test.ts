@@ -3,7 +3,7 @@
  * env. These drive the real CLI against a temp project; nothing is started.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,7 +52,38 @@ function run(...args: string[]) {
   return spawnSync(process.execPath, ['--experimental-strip-types', cli, 'run', ...args], { cwd: projectDir, env, encoding: 'utf8' });
 }
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('portler run', () => {
+  it('without a terminal, stops the whole command tree on SIGTERM, background children too', async () => {
+    const child = spawn(process.execPath, ['--experimental-strip-types', cli, 'run', 'api', '--', 'sh', '-c', 'sleep 300 & echo $! > sleeper.pid; wait'], {
+      cwd: projectDir, env, stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    const exited = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)));
+    const pidFile = path.join(projectDir, 'api', 'sleeper.pid');
+    let sleeper = 0;
+    for (let tries = 0; tries < 200 && !sleeper; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      sleeper = Number((await fs.readFile(pidFile, 'utf8').catch(() => '')).trim());
+    }
+    assert.ok(sleeper > 0, 'the command started');
+    try {
+      child.kill('SIGTERM');
+      assert.equal(await exited, 143);
+      for (let tries = 0; tries < 40 && alive(sleeper); tries++) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(alive(sleeper), false, 'the backgrounded sleep was stopped too');
+    } finally {
+      if (alive(sleeper)) process.kill(sleeper, 'SIGKILL');
+    }
+  });
+
   it('lists the tasks when no name is given', () => {
     const result = run();
     assert.equal(result.status, 0, result.stderr);
