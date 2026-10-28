@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { assertServiceCwd, resolveServiceCwd } from '../config/index.ts';
 import { requiredEnvKeys } from '../env/index.ts';
@@ -48,30 +48,61 @@ export function setupFingerprint(command: string, cwd: string, mode: string, occ
 }
 
 /**
- * The content of a plain step's `watch` files, folded into its receipt: the
- * step runs again when any of them changes, appears or disappears. Paths are
- * relative to the step's cwd. A missing file is a state of its own; one that
- * exists but cannot be read is an error. Each file contributes one record, its
- * name and the digest of its content (or null when it is absent), so no content
- * can pass for absence or for another file's entry.
+ * The digest of one watched path: a file's content, or for a folder every file
+ * under it, by relative path and content, in a fixed order. A symlink inside a
+ * folder counts by its target path and is not followed, so a link loop cannot
+ * hang the walk. Null when nothing exists at the path.
+ */
+function pathDigest(filePath: string, label: string): string | null {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(filePath).isDirectory();
+  } catch (error) {
+    // Only absence is a state of its own. A path that exists but cannot be read (EACCES)
+    // must not pass for a missing one and skip the step.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw new Error(`watch path "${label}" cannot be read: ${(error as Error).message}`);
+  }
+  try {
+    return isDirectory ? folderDigest(filePath) : createHash('sha256').update(readFileSync(filePath)).digest('hex');
+  } catch (error) {
+    throw new Error(`watch path "${label}" cannot be read: ${(error as Error).message}`);
+  }
+}
+
+function folderDigest(root: string): string {
+  const hash = createHash('sha256');
+  const walk = (dir: string, relative: string): void => {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const name = relative === '' ? entry.name : `${relative}/${entry.name}`;
+      if (entry.isSymbolicLink()) hash.update(JSON.stringify(['link', name, readlinkSync(full)]));
+      else if (entry.isDirectory()) {
+        hash.update(JSON.stringify(['dir', name]));
+        walk(full, name);
+      } else if (entry.isFile()) {
+        hash.update(JSON.stringify(['file', name, createHash('sha256').update(readFileSync(full)).digest('hex')]));
+      }
+    }
+  };
+  walk(root, '');
+  return `dir:${hash.digest('hex')}`;
+}
+
+/**
+ * The content of a plain step's `watch` paths, folded into its receipt: the
+ * step runs again when any of them changes, appears or disappears. A path may
+ * be a file or a folder (every file under it counts), relative to the step's
+ * cwd. A missing path is a state of its own; one that exists but cannot be
+ * read is an error. Each path contributes one record, its name and its digest
+ * (or null when it is absent), so no content can pass for absence or for
+ * another path's entry.
  */
 function watchDigest(step: SetupStep, cwd: string): string | undefined {
   if (!step.watch) return undefined;
-  const records = step.watch.map((file) => {
-    let content: string | null;
-    try {
-      content = createHash('sha256').update(readFileSync(path.resolve(cwd, file))).digest('hex');
-    } catch (error) {
-      // Only absence is a state of its own. A file that exists but cannot be read
-      // (EACCES, a directory) must not pass for a missing one and skip the step.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        throw new Error(`watch file "${file}" cannot be read: ${(error as Error).message}`);
-      }
-      content = null;
-    }
-    return [file, content];
-  });
+  const records = step.watch.map((file) => [file, pathDigest(path.resolve(cwd, file), file)]);
   return createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 

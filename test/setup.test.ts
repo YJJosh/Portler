@@ -1179,17 +1179,51 @@ services: {app: {command: echo}}
     assert.equal((await lines()).length, 4, 'content cannot pass for the next file\'s entry either');
   });
 
-  it('a watched path that exists but cannot be read is an error, not absence', async () => {
+  it('a watched folder counts every file under it', async () => {
+    const cfg = await config(`setup: [{run: "echo migrate >> steps", watch: migrations}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['migrate'], 'the folder is absent: the step runs once');
+    await fs.mkdir(path.join(dir, 'migrations', 'nested'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'migrations', '001.sql'), 'create table a;');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate'], 'the folder appeared');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate'], 'nothing changed');
+    await fs.writeFile(path.join(dir, 'migrations', 'nested', '002.sql'), 'create table b;');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate', 'migrate'], 'a file was added deeper down');
+    await fs.writeFile(path.join(dir, 'migrations', '001.sql'), 'create table a2;');
+    await run();
+    assert.equal((await lines()).length, 4, 'a file changed');
+    await fs.rename(path.join(dir, 'migrations', '001.sql'), path.join(dir, 'migrations', '003.sql'));
+    await run();
+    assert.equal((await lines()).length, 5, 'a file was renamed');
+    // A link loop inside the folder is recorded by its target, not followed.
+    await fs.symlink('..', path.join(dir, 'migrations', 'nested', 'loop'));
+    await run();
+    assert.equal((await lines()).length, 6);
+    await run();
+    assert.equal((await lines()).length, 6);
+  });
+
+  it('a watched path that exists but cannot be read is an error, not absence', { skip: process.getuid?.() === 0 }, async () => {
     const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
 services: {app: {command: echo}}
 `);
     const run = () => runSetupStep(cfg, null, {}, 'local:dev');
     await run();
     assert.deepEqual(await lines(), ['install'], 'the file is absent: the step runs once');
-    // A directory cannot be read as a file on any platform (EISDIR), like an unreadable file.
-    await fs.mkdir(path.join(dir, 'lock'));
-    await assert.rejects(run(), /watch file "lock" cannot be read/);
-    assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+    await fs.writeFile(path.join(dir, 'lock'), 'x');
+    await fs.chmod(path.join(dir, 'lock'), 0o000);
+    try {
+      await assert.rejects(run(), /watch path "lock" cannot be read/);
+      assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+    } finally {
+      await fs.chmod(path.join(dir, 'lock'), 0o644);
+    }
   });
 
   it('a watch step reads its files when it is reached and records them as they are after it succeeds', async () => {

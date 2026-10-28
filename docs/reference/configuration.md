@@ -79,6 +79,8 @@ setup:
   - {run: pnpm run codegen, always: true} # on every up and setup
   - run: pnpm run db:generate
     watch: [prisma/schema.prisma]         # once per checkout; again when the schema changes
+  - run: pnpm run db:migrate
+    watch: [migrations]                   # a folder: again when a file in it changes, appears or goes
 ```
 
 | Step | When it runs |
@@ -86,7 +88,7 @@ setup:
 | `<command>` or `{run: <command>}` | Once per checkout. A receipt in `.portler/setup.json` records the success; the step runs again when its command or cwd changes, with `up --setup`, or on `portler setup`. Identical commands in one list are separate steps, told apart by their position among all entries with that command; adding or removing one of them runs every entry with that command again. A step that is removed loses its receipt before the next `up` or `setup`, even when its service is not part of that run, and so does every step of a service that leaves the config. |
 | `{run, if_missing: <path>}` | Only while nothing exists at `<path>`, resolved against the step's cwd. A file, a folder, or a link whose target exists all count. No receipt: the path is the receipt, so deleting what the step produced runs it again, and `--setup` does not override it. |
 | `{run, always: true}` | On every `up` (unless `--no-setup`) and every `setup`. No receipt. |
-| `{run, watch: [files]}` | Like a plain step, with the content of the listed files (relative to the step's cwd) folded into its receipt: the step runs again when one of them changes, appears or disappears. The files are read when the step is reached, so a change an earlier step made in the same run counts, and recorded as they are once the step succeeds, so a step that rewrites its own input (an install updating its lockfile) does not run again for that. A listed path that exists but cannot be read (no permission, a directory) stops setup with an error instead of counting as absent. |
+| `{run, watch: [paths]}` | Like a plain step, with the content of the listed files and folders (relative to the step's cwd) folded into its receipt: the step runs again when one of them changes, appears or disappears. A folder counts every file under it by path and content, so adding, changing or removing a file in it counts; a symlink inside it counts by its target path and is not followed. The files are read when the step is reached, so a change an earlier step made in the same run counts, and recorded as they are once the step succeeds, so a step that rewrites its own input (an install updating its lockfile) does not run again for that. A listed path that exists but cannot be read (no permission) stops setup with an error instead of counting as absent. |
 
 Every command, bare or as `run`, must be non-empty; `if_missing`, `always` and `watch` cannot be combined with each other; other keys are rejected.
 
