@@ -78,6 +78,31 @@ services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
     assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
   });
 
+  // REVIEW: Top-level env is also each service's env; do not resolve a
+  // nonexistent top-level setup's self-less view before using the service view.
+  it('allows shared self references when no project setup reads them, or setup is skipped', async () => {
+    const text = `env: { SERVICE_LABEL: '\${self.name}' }
+services:
+  app:
+    command: sleep 300
+    healthcheck: { type: none }
+    setup: echo "$SERVICE_LABEL" >> steps
+`;
+    await config(text);
+    assert.equal(await commandSetup(parseArgs([], 'setup')), 0);
+    assert.deepEqual(await lines(), ['app']);
+    try {
+      assert.equal(await commandUp(parseArgs(['-d'], 'up')), 0);
+      assert.deepEqual(await lines(), ['app'], 'setup receipt is reused');
+    } finally { await commandDown(parseArgs([], 'down')); }
+    await config(`setup: echo must-not-run >> steps\n${text}`);
+    try {
+      assert.equal(await commandUp(parseArgs(['-d', '--no-setup'], 'up')), 0);
+      assert.deepEqual(await lines(), ['app']);
+    } finally { await commandDown(parseArgs([], 'down')); }
+    await assert.rejects(commandSetup(parseArgs([], 'setup')), /"self" only works in a service's own/);
+  });
+
   it('gives the setup steps of a container service its env as seen from this machine', async () => {
     await config(`services:
   db:

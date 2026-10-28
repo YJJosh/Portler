@@ -26,7 +26,8 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     // the steps run anyway. `up` in development still requires it.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true });
     assertEnvRequirements(config, names, baseEnv);
-    const projectEnv = buildProjectEnv(config, baseEnv, assignments, generatedEnv);
+    // REVIEW: An unused project view must not reject shared service self.* env.
+    const projectEnv = config.setup?.length ? buildProjectEnv(config, baseEnv, assignments, generatedEnv) : {};
     // Setup steps run on this machine, also for a container service, so they get its env as
     // seen from here: `${db.address}` is the database's port on this machine, not its alias.
     const serviceEnvs = new Map<string, EnvMap>();

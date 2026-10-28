@@ -551,7 +551,10 @@ export async function startPhase(
       validateHealthcheckReferences(service, assignments, hostResolveOptions(config, service, baseEnv, generatedEnv, assignments));
     }
 
-    const projectEnv = buildProjectEnv(config, baseEnv, assignments, generatedEnv);
+    // REVIEW: Only resolve the project view when a top-level step will read it.
+    // Shared service env may use self.*, which has no meaning for the project.
+    const projectEnv = options.setup !== false && config.setup?.length
+      ? buildProjectEnv(config, baseEnv, assignments, generatedEnv) : {};
     // REVIEW: A non-empty template may resolve to empty; check composed envs
     // before setup or spawning, while retaining the early raw-value preflight.
     assertEnvRequirements(config, selectedNames, baseEnv, {
