@@ -83,7 +83,12 @@ export async function buildStartEnv(
     config,
     viewer: 'host' as const,
     self: service.name,
-    exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments),
+    // REVIEW: Even without --prod, an export must see start's platform/file
+    // precedence, including the explicit platform env used by library callers.
+    exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments, {
+      deploymentPrecedence: true,
+      platformEnv: Object.fromEntries(Object.entries(platformEnv).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    }),
   };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {

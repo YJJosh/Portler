@@ -40,6 +40,10 @@ export interface BuildEnvOptions {
    * command healthchecks run on this machine even for a container service.
    */
   viewer?: EnvViewer;
+  /** start gives the deployment precedence even without applying production overrides. */
+  deploymentPrecedence?: boolean;
+  /** The platform env start is composing; defaults to this process's env. */
+  platformEnv?: EnvMap;
   /** Resolve only this config key (for an export that reads it). */
   only?: string;
   /** false: the env an export reads, which must not use exports itself. */
@@ -61,7 +65,7 @@ interface ConfigLayers {
  * the deployment must supply (`required`).
  */
 function resolveConfigLayers(
-  config: PortlerConfig,
+  deploymentPrecedence: boolean,
   entries: UnknownMap,
   assignments: Assignments,
   supplied: ReadonlySet<string>,
@@ -80,7 +84,7 @@ function resolveConfigLayers(
   const notUsed = new Set([...supplied, ...required]);
   const exportSecrets = new Set<string>();
   const output: ConfigLayers = {
-    values: resolveEnvMap(values, assignments, config.production ? notUsed : undefined, options, exportSecrets),
+    values: resolveEnvMap(values, assignments, deploymentPrecedence ? notUsed : undefined, options, exportSecrets),
     defaults: resolveEnvMap(defaults, assignments, notUsed, options, exportSecrets),
     secrets: new Map(),
   };
@@ -110,16 +114,18 @@ function serviceResolveOptions(
     viewer: options.viewer ?? serviceViewer(config, service),
     self: service.name,
     exports: options.exports,
-    exportEnv: exportEnvReader(config, baseEnv, generatedEnv, assignments),
+    exportEnv: exportEnvReader(config, baseEnv, generatedEnv, assignments, options),
   };
 }
 
 /** `${env.KEY}` in an export: the value the exporting service gets, as it runs. */
-export function exportEnvReader(config: PortlerConfig, baseEnv: EnvMap, generatedEnv: EnvMap, assignments: Assignments): NonNullable<ResolveOptions['exportEnv']> {
+export function exportEnvReader(config: PortlerConfig, baseEnv: EnvMap, generatedEnv: EnvMap, assignments: Assignments, options: Pick<BuildEnvOptions, 'deploymentPrecedence' | 'platformEnv'> = {}): NonNullable<ResolveOptions['exportEnv']> {
   return (exporter, key) => {
     const target = config.services[exporter];
     if (!target) return undefined;
-    const built = buildServiceEnv(config, target, baseEnv, generatedEnv, assignments, { only: key, exports: false });
+    const built = buildServiceEnv(config, target, baseEnv, generatedEnv, assignments, {
+      deploymentPrecedence: options.deploymentPrecedence, platformEnv: options.platformEnv, only: key, exports: false,
+    });
     if (!Object.hasOwn(built.env, key)) return undefined;
     return { value: built.env[key]!, secret: built.secrets.get(key) ?? isSecretEnvKey(key) };
   };
@@ -194,7 +200,10 @@ export function buildServiceEnv(
   assignments: Assignments,
   options: BuildEnvOptions = {},
 ): ServiceEnv {
-  const processEnv = processEnvAsMap();
+  const processEnv = options.platformEnv ?? processEnvAsMap();
+  // REVIEW: start always uses deployment-first precedence, independently of
+  // --prod. Exports must read that same winning value, not up's dev value.
+  const deploymentPrecedence = config.production === true || options.deploymentPrecedence === true;
   // In production a key the deployment supplies (process env or use_env file) is left out
   // of resolution: its config value never applies, and a reference that only resolves in
   // development (a service with no assignment here) must not block the deployment's value.
@@ -207,8 +216,8 @@ export function buildServiceEnv(
   // service can resolve must not block the value this service actually gets.
   const entries = mergeEnvMaps(config.env, service.env);
   const resolveOptions = serviceResolveOptions(config, service, baseEnv, generatedEnv, assignments, options);
-  const layers = resolveConfigLayers(config, entries, assignments, supplied, required, resolveOptions, options.only);
-  const env: EnvMap = config.production
+  const layers = resolveConfigLayers(deploymentPrecedence, entries, assignments, supplied, required, resolveOptions, options.only);
+  const env: EnvMap = deploymentPrecedence
     ? { ...layers.defaults, ...layers.values, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
     : { ...layers.defaults, ...processEnv, ...baseEnv, ...layers.values, ...generatedEnv, PORTLER_SERVICE_NAME: service.name };
 
@@ -251,7 +260,7 @@ export function composeProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assign
   const required = config.production ? requiredEnvKeys(config) : [];
   const supplied = new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]);
   const options = hostResolveOptions(config, null, baseEnv, generatedEnv, assignments);
-  const layers = resolveConfigLayers(config, config.env, assignments, supplied, required, options);
+  const layers = resolveConfigLayers(config.production === true, config.env, assignments, supplied, required, options);
   const env: EnvMap = config.production
     ? { ...layers.defaults, ...layers.values, ...baseEnv, ...processEnv }
     : { ...layers.defaults, ...processEnv, ...baseEnv, ...layers.values };
@@ -283,7 +292,7 @@ export function buildPrintableEnv(
     : hostResolveOptions(config, null, baseEnv, generatedEnv, assignments);
   const supplied = { ...processEnvAsMap(), ...baseEnv };
   // Same rule as buildServiceEnv: a root key the service's own env replaces is not resolved.
-  const layers = resolveConfigLayers({ ...config, production: false }, entries, assignments, new Set(Object.keys(supplied)), [], options);
+  const layers = resolveConfigLayers(false, entries, assignments, new Set(Object.keys(supplied)), [], options);
   for (const [key, secret] of layers.secrets) secrets?.set(key, secret);
   const yielded: EnvMap = {};
   for (const [key, entry] of Object.entries(entries)) {

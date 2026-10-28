@@ -85,6 +85,39 @@ services:
     delete api.env.BROKEN;
   });
 
+  // REVIEW: start is deployment-first even without --prod; exports must not
+  // re-read the exporting service using up's development precedence.
+  it('resolves exports from the same deployment-first env that start hands the service', async () => {
+    const raw = await config(`services:
+  api:
+    command: echo
+    port: 4000
+    port_env: PORT
+    env:
+      CREDENTIAL: { value: config-dev, required: prod }
+      EXPORTED: \${api.credential}
+      LISTEN_PORT: \${api.listen_port}
+    exports:
+      credential: \${env.CREDENTIAL}
+      listen_port: \${env.PORT}
+    prod:
+      env: { CREDENTIAL: config-prod }
+`);
+    for (const prod of [false, true]) {
+      const cfg = applyProduction(raw, prod);
+      const api = cfg.services.api!;
+      const platform = await buildStartEnv(cfg, api, { CREDENTIAL: 'file' }, { CREDENTIAL: 'platform', PORT: '5123' });
+      assert.equal(platform.EXPORTED, platform.CREDENTIAL);
+      assert.equal(platform.EXPORTED, 'platform');
+      assert.equal(platform.LISTEN_PORT, '5123');
+      const file = await buildStartEnv(cfg, api, { CREDENTIAL: 'file' }, {});
+      assert.equal(file.EXPORTED, file.CREDENTIAL);
+      assert.equal(file.EXPORTED, 'file');
+    }
+    const fallback = await buildStartEnv(raw, raw.services.api!, {}, {});
+    assert.equal(fallback.EXPORTED, 'config-dev', 'without --prod, required: prod does not discard the config fallback');
+  });
+
   it('treats toString and constructor as ordinary variable names', async () => {
     // Object.prototype members are valid variable names. A plain `in` or index lookup on the
     // platform or file map found the inherited member and silently dropped the config value.
