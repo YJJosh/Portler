@@ -119,9 +119,10 @@ async function volumeSizes(): Promise<Map<string, string>> {
 
 /** Names of running containers mounting the volume (best effort). */
 async function containersUsing(fullName: string): Promise<string[]> {
-  const result = await runDocker(['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}']);
-  if (result.code !== 0) return [];
-  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  // REVIEW: A failed query is not proof that no container uses a volume.
+  // Refuse a fork/removal rather than bypassing the in-use safety gate.
+  const output = await dockerOrThrow(['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}']);
+  return output.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
 /**

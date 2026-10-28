@@ -48,6 +48,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_DOCKER_CALLS, JSON.stringify(args) + '\\n');
 if (args[0] === 'version') { console.log('25.0.0'); process.exit(0); }
 if (args[0] === 'ps') {
+  if (process.env.MOCK_DOCKER_MODE === 'ps-error') { console.error('Docker query failed'); process.exit(1); }
   if (process.env.MOCK_DOCKER_MODE === 'owned-in-use') console.log('api-container');
   process.exit(0);
 }
@@ -64,7 +65,7 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
     console.log(target ? 'null' : JSON.stringify({'portler.project': process.env.MOCK_VOLUME_ROOT}));
     process.exit(0);
   }
-  if (process.env.MOCK_DOCKER_MODE === 'owned' || process.env.MOCK_DOCKER_MODE === 'owned-in-use') {
+  if (['owned', 'owned-in-use', 'ps-error'].includes(process.env.MOCK_DOCKER_MODE)) {
     console.log(JSON.stringify({'portler.project': process.env.MOCK_VOLUME_ROOT}));
     process.exit(0);
   }
@@ -113,6 +114,13 @@ async function calls(): Promise<string[][]> {
 }
 
 describe('managed volume destructive-operation ownership', () => {
+  // REVIEW: Daemon failures must not look like an unused source volume.
+  it('refuses to fork when Docker cannot establish whether the source is in use', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ps-error';
+    await assert.rejects(forkVolume(makeConfig(), 'data', 'branch'), /docker ps.*failed: Docker query failed/);
+    assert.ok(!(await calls()).some((args) => args[0] === 'run' || (args[0] === 'volume' && args[1] === 'create')));
+  });
+
   it('refuses to fork data from an unlabelled/foreign source volume', async () => {
     const config = makeConfig();
     const source = projectVolumeName(volumeRoot, 'data');
