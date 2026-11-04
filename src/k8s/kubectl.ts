@@ -46,13 +46,52 @@ export async function waitForRollout(
   name: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  await runStreaming(
+  try {
+    await runStreaming(
+      'kubectl',
+      kubectlArgs(cluster, ['rollout', 'status', `deployment/${name}`, '--namespace', config.k8sNamespace, `--timeout=${ROLLOUT_TIMEOUT}`]),
+      serviceName,
+      undefined,
+      signal,
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    // "timed out waiting for the condition" alone does not say why. Name the
+    // pods' waiting reasons (ImagePullBackOff, CrashLoopBackOff, ...) so the
+    // failure points at the cause. Best effort: a failed read keeps the error.
+    const problems = await podProblems(cluster, config.k8sNamespace, name).catch(() => []);
+    if (problems.length === 0) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    const pullHint = problems.some((problem) => /ImagePull|ErrImageNeverPull|InvalidImageName/.test(problem))
+      ? '\nThe cluster could not get the image. Portler only loads locally built images into kind, k3d, minikube and clusters that share the Docker daemon; other clusters must pull it from a registry.'
+      : '';
+    throw new Error(`${reason}\n${serviceName}'s pod did not start: ${problems.join('; ')}${pullHint}`, { cause: error });
+  }
+}
+
+/** Waiting reasons of a Deployment's pods, e.g. `ImagePullBackOff: Back-off pulling image "x"`. */
+async function podProblems(cluster: ClusterInfo, namespace: string, appName: string): Promise<string[]> {
+  const raw = await captureOutput(
     'kubectl',
-    kubectlArgs(cluster, ['rollout', 'status', `deployment/${name}`, '--namespace', config.k8sNamespace, `--timeout=${ROLLOUT_TIMEOUT}`]),
-    serviceName,
-    undefined,
-    signal,
+    kubectlArgs(cluster, ['get', 'pods', '--namespace', namespace, '--selector', `app=${appName}`, '-o', 'json']),
   );
+  const parsed = JSON.parse(raw) as {
+    items?: Array<{
+      status?: {
+        initContainerStatuses?: Array<{ state?: { waiting?: { reason?: string; message?: string } } }>;
+        containerStatuses?: Array<{ state?: { waiting?: { reason?: string; message?: string } } }>;
+      };
+    }>;
+  };
+  const problems = new Set<string>();
+  for (const pod of parsed.items ?? []) {
+    const statuses = [...(pod.status?.initContainerStatuses ?? []), ...(pod.status?.containerStatuses ?? [])];
+    for (const waiting of statuses.map((status) => status.state?.waiting)) {
+      if (!waiting?.reason || waiting.reason === 'ContainerCreating' || waiting.reason === 'PodInitializing') continue;
+      problems.add(waiting.message ? `${waiting.reason}: ${waiting.message.split('\n')[0]}` : waiting.reason);
+    }
+  }
+  return [...problems];
 }
 
 interface PodSnapshot {
