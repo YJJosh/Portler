@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { applyImageOverrides, configForRunMode, loadConfig, proxyServiceConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { buildGeneratedEnv } from '../../env/index.ts';
+import { buildGeneratedEnv, hostResolveOptions } from '../../env/index.ts';
 import {
   applyManifestFiles,
   buildServiceImages,
@@ -353,8 +353,11 @@ async function startK8sPhase(
         await writePortForwardPid(config, serviceName, child, assignment, args.images?.[serviceName]);
         // k8s mode never has command healthchecks (applyK8sMode strips them),
         // so the readiness env is not consulted.
+        // REVIEW: an HTTP healthcheck URL may use an export with ${env.KEY};
+        // resolve it with the shell/env-file values the pod got, not config only.
+        const resolveOptions = hostResolveOptions(config, service, rendered.baseEnv, generatedEnv, assignments);
         readinessWaits.push(
-          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal),
+          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions),
         );
       }
 

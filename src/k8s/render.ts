@@ -5,7 +5,7 @@ import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv } from '../en
 import { formatYamlDocuments } from '../parse/yaml-format.ts';
 import { portlerDir } from '../state/index.ts';
 import { containerEnvEntries, k8sServiceNames, namespaceManifest, serviceManifests } from './manifests.ts';
-import type { Assignments, PortlerConfig } from '../types/index.ts';
+import type { Assignments, EnvMap, PortlerConfig } from '../types/index.ts';
 
 /** The `.portler/k8s/` directory holding the generated manifests. */
 export function k8sManifestDir(projectDir: string): string {
@@ -20,6 +20,8 @@ export interface RenderedManifests {
   files: Array<{ fileName: string; text: string }>;
   /** Portler service name -> sanitized Kubernetes resource name. */
   names: Map<string, string>;
+  /** The shell/env-file values the manifests were built from, for host-side checks. */
+  baseEnv: EnvMap;
 }
 
 /**
@@ -54,7 +56,7 @@ export async function renderManifests(
     files.push({ fileName: `${name}.yml`, text: formatYamlDocuments(manifests) });
   }
 
-  return { files, names };
+  return { files, names, baseEnv };
 }
 
 /** Replace `.portler/k8s/` with the rendered files; returns the directory. */
