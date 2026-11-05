@@ -55,8 +55,11 @@ services:
     port_env: PORT
     depends_on:
       - backend
-    env:
-      VITE_API_URL: backend.url
+
+proxy:
+  routes:
+    /api: backend
+    /: frontend
 ```
 
 Start and manage the stack:
@@ -72,29 +75,11 @@ portler down
 On `portler up`:
 
 - Every service gets a free host port, so this stack can run next to other projects and checkouts. Local processes receive it through `port_env`.
-- `${postgres.database_url}` and `backend.url` resolve to those ports, so `DATABASE_URL` and `VITE_API_URL` always point at the right place. In `portler up docker` the same `DATABASE_URL` becomes `postgres:5432`, the address a container needs.
+- `${postgres.database_url}` resolves to Postgres's assigned port, so `DATABASE_URL` always points at the right place. In `portler up docker` the same `DATABASE_URL` becomes `postgres:5432`, the address a container needs.
 - Postgres runs in Docker. Its data lives in the managed volume `@postgres-data`, which survives restarts and can be forked for another checkout.
 - `npm install` runs only while `node_modules` is missing.
 - The backend starts once Postgres passes its healthcheck, and the frontend once the backend answers.
-
-### One URL for the whole stack
-
-Add a `proxy:` block to reach every service through one URL. The browser only talks to one origin, so CORS stops being a problem:
-
-```yaml
-proxy:
-  routes:
-    /api: backend
-    /: frontend
-```
-
-```text
-$ portler up
-...
-[portler] project url: http://localhost:52000
-```
-
-`/api/users` goes to `backend` with the path unchanged, and everything else goes to `frontend`. WebSockets work too, so dev-server hot reload keeps working.
+- The proxy serves the whole stack on one URL, printed as `project url`. `/api/users` goes to `backend` with the path unchanged, so the backend serves its routes under `/api`, and everything else goes to `frontend`. The browser only talks to one origin, so CORS stops being a problem, and WebSockets work too, so dev-server hot reload keeps working.
 
 ## Highlights
 
