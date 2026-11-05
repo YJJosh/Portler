@@ -77,6 +77,25 @@ On `portler up`:
 - `npm install` runs only while `node_modules` is missing.
 - The backend starts once Postgres passes its healthcheck, and the frontend once the backend answers.
 
+### One URL for the whole stack
+
+Add a `proxy:` block to reach every service through one URL. The browser only talks to one origin, so CORS stops being a problem:
+
+```yaml
+proxy:
+  routes:
+    /api: backend
+    /: frontend
+```
+
+```text
+$ portler up
+...
+[portler] project url: http://localhost:52000
+```
+
+`/api/users` goes to `backend` with the path unchanged, and everything else goes to `frontend`. WebSockets work too, so dev-server hot reload keeps working.
+
 ## Highlights
 
 - **[Automatic ports](https://yjjosh.github.io/Portler/guide/ports)** — let multiple projects and checkouts run side by side.
@@ -85,7 +104,7 @@ On `portler up`:
 - **[Docker](https://yjjosh.github.io/Portler/guide/docker) and [local Kubernetes](https://yjjosh.github.io/Portler/guide/kubernetes)** — use the same configuration.
 - **[Managed volumes](https://yjjosh.github.io/Portler/guide/volumes)** — make it easy to fork local data between checkouts.
 - **[Database presets](https://yjjosh.github.io/Portler/guide/databases)** — `use: postgres@18`, `mysql@8.4` or `redis@8`, or a preset file of your own for any other database.
-- **[Reverse proxy](https://yjjosh.github.io/Portler/guide/proxy)** — serves the stack through one local origin when enabled.
+- **[Reverse proxy](https://yjjosh.github.io/Portler/guide/proxy)** — puts the stack behind one URL, so the browser only talks to one origin.
 - **[Setup & production](https://yjjosh.github.io/Portler/guide/setup-and-production)** — install and build steps live next to the services and run once per checkout, while a path is missing, or every time; `portler start` runs one service on a platform without Docker.
 
 Portler verifies resource ownership before stopping processes or removing managed resources.
