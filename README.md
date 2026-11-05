@@ -28,6 +28,11 @@ portler init
 A `portler.yml` for a web app with a database looks like this:
 
 ```yaml
+proxy:
+  routes:
+    /api: backend
+    /: frontend
+
 services:
   postgres:
     use: postgres@18       # built-in preset: image, port, volume, healthcheck
@@ -55,11 +60,6 @@ services:
     port_env: PORT
     depends_on:
       - backend
-
-proxy:
-  routes:
-    /api: backend
-    /: frontend
 ```
 
 Start and manage the stack:
