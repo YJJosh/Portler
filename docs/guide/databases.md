@@ -36,7 +36,7 @@ tasks:
 | Built-in | Versions | Port | Exports | Env defaults |
 | --- | --- | --- | --- | --- |
 | `postgres` | 18, 17, 16, 15, 14 | 5432 | `database_url` | `POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres`, `POSTGRES_DB=app` |
-| `mysql` | 9.5, 8.4, 8.0 | 3306 | `database_url` | `MYSQL_USER=app`, `MYSQL_PASSWORD=app`, `MYSQL_DATABASE=app`, `MYSQL_ROOT_PASSWORD=mysql` |
+| `mysql` | 9.7, 8.4, 8.0 | 3306 | `database_url` | `MYSQL_USER=app`, `MYSQL_PASSWORD=app`, `MYSQL_DATABASE=app`, `MYSQL_ROOT_PASSWORD=mysql` |
 | `redis` | 8, 7 | 6379 | `redis_url` | — |
 
 Each one keeps its data in a [managed volume](/guide/volumes) named `@<service>-data` and waits for the server to accept connections before dependents start.

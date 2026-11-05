@@ -166,7 +166,7 @@ services:
 | Built-in | Versions | Image | Port | Exports |
 | --- | --- | --- | --- | --- |
 | `postgres` | 18, 17, 16, 15, 14 | `postgres:<version>-alpine` | 5432 | `database_url` |
-| `mysql` | 9.5, 8.4, 8.0 | `mysql:<version>` | 3306 | `database_url` |
+| `mysql` | 9.7, 8.4, 8.0 | `mysql:<version>` | 3306 | `database_url` |
 | `redis` | 8, 7 | `redis:<version>-alpine` | 6379 | `redis_url` |
 
 Each built-in preset declares a managed volume `@<service>-data`, a readiness command and env entries with development defaults (passwords marked `secret: true`). The files live in [`presets/`](https://github.com/YJJosh/Portler/tree/main/presets).
