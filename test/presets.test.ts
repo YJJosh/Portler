@@ -200,5 +200,9 @@ versions:
       /a preset cannot use another preset/,
     );
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: 4}}' })), /services\.db\.use must be a preset name or a path/);
+    const versioned = 'image: x\nversions:\n  "1":\n    env: nope\n';
+    await assert.rejects(loadConfig(await project({ 'p.yml': versioned, 'portler.yml': 'services: {db: {use: ./p.yml@1}}' })), /^Error: preset \.\/p\.yml@1 env\/environment must be a mapping/);
+    await assert.rejects(loadConfig(await project({ 'p.yml': 'image: x\nexports: nope\n', 'portler.yml': 'services: {db: {use: ./p.yml}}' })), /^Error: preset \.\/p\.yml exports must be a mapping/);
+    await assert.rejects(loadConfig(await project({ 'p.yml': 'image: x\n', 'portler.yml': 'services: {db: {use: ./p.yml, exports: nope}}' })), /^Error: services\.db\.exports must be a mapping/);
   });
 });

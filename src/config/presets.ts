@@ -139,8 +139,8 @@ async function readPreset(use: string, version: string | undefined, serviceName:
   };
 }
 
-function readEnvLayer(keys: UnknownMap, name: string): UnknownMap {
-  return normalizeEnvSpecs(normalizeEnvObject(keys.env ?? keys.environment, `${name}.env/environment`), `${name}.env`);
+function readEnvLayer(keys: UnknownMap, label: string): UnknownMap {
+  return normalizeEnvSpecs(normalizeEnvObject(keys.env ?? keys.environment, `${label}env/environment`), `${label}env`);
 }
 
 /**
@@ -148,14 +148,14 @@ function readEnvLayer(keys: UnknownMap, name: string): UnknownMap {
  * key by key: a service that sets `POSTGRES_PASSWORD` keeps the preset's other
  * variables, and a plain value keeps the preset's `secret` and `description`.
  */
-function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerName: string, upperName: string): UnknownMap {
+function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerLabel: string, upperLabel: string): UnknownMap {
   const merged: UnknownMap = { ...lower, ...upper };
   delete merged.environment;
-  merged.env = mergeEnvMaps(readEnvLayer(lower, lowerName), readEnvLayer(upper, upperName));
+  merged.env = mergeEnvMaps(readEnvLayer(lower, lowerLabel), readEnvLayer(upper, upperLabel));
 
   if (lower.exports !== undefined || upper.exports !== undefined) {
-    for (const [keys, name] of [[lower, lowerName], [upper, upperName]] as const) {
-      if (keys.exports !== undefined && keys.exports !== null && !isObject(keys.exports)) throw new Error(`${name}.exports must be a mapping of name: template`);
+    for (const [keys, label] of [[lower, lowerLabel], [upper, upperLabel]] as const) {
+      if (keys.exports !== undefined && keys.exports !== null && !isObject(keys.exports)) throw new Error(`${label}exports must be a mapping of name: template`);
     }
     merged.exports = { ...(lower.exports as UnknownMap | undefined), ...(upper.exports as UnknownMap | undefined) };
   }
@@ -176,6 +176,8 @@ export async function applyServicePreset(rawService: UnknownMap, serviceName: st
   const { keys, override } = await readPreset(target, version, serviceName, projectDir);
   // REVIEW: a version block used to replace env and exports whole, so a preset
   // adding one variable for one version silently lost all the others.
-  const preset = layerServiceKeys(keys, override, `preset ${target}`, `preset ${use}`);
-  return layerServiceKeys(preset, own, `preset ${use}`, `services.${serviceName}`);
+  // REVIEW: labels end in their own separator, because "preset ./db.yml@2.env"
+  // reads as a file name in an error, unlike "preset ./db.yml@2 env" and "services.db.env".
+  const preset = layerServiceKeys(keys, override, `preset ${target} `, `preset ${use} `);
+  return layerServiceKeys(preset, own, `preset ${use} `, `services.${serviceName}.`);
 }
