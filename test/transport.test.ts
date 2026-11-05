@@ -77,14 +77,34 @@ function makeConfig(projectDir: string, services: ServiceConfig[]): PortlerConfi
   };
 }
 
-function occupyUdpPort(host = '127.0.0.1'): Promise<{ port: number; close: () => Promise<void> }> {
+function bindUdp(port: number, host: string): Promise<dgram.Socket | null> {
   return new Promise((resolve, reject) => {
     const socket = dgram.createSocket(net.isIPv6(host) ? 'udp6' : 'udp4');
-    socket.on('error', (error) => { socket.close(); reject(error); });
-    socket.bind(0, host, () => {
-      resolve({ port: socket.address().port, close: () => new Promise((done) => socket.close(() => done())) });
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      socket.close();
+      if (error.code === 'EADDRINUSE') resolve(null);
+      else reject(error);
     });
+    socket.bind(port, host, () => resolve(socket));
   });
+}
+
+/**
+ * Busy on UDP, free on TCP. REVIEW: the OS picks a port 0 bind from the ephemeral
+ * range, where test files running in parallel hold TCP listeners and connections,
+ * so "the TCP side is free" failed CI at random. This range is below the ephemeral
+ * ones of Linux (32768+) and macOS (49152+), and the TCP side is checked too.
+ */
+async function occupyUdpPort(host = '127.0.0.1'): Promise<{ port: number; close: () => Promise<void> }> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = 20000 + Math.floor(Math.random() * 10000);
+    const socket = await bindUdp(port, host);
+    if (!socket) continue;
+    const close = () => new Promise<void>((done) => socket.close(() => done()));
+    if (await isPortFree(port, host, 'tcp')) return { port, close };
+    await close();
+  }
+  throw new Error('no port in the test range is free');
 }
 
 describe('transport in portler.yml', () => {

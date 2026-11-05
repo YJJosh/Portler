@@ -110,7 +110,7 @@ services:
 `${self.name}` becomes the service's name when the file loads, so two services using one preset get separate volumes. Paths are relative to the project root. See [use](/reference/configuration#use-presets) for the exact rules.
 
 <!-- REVIEW: Moved below the service example: between the two, the bare use: above followed a preset with versions:, and copying it was an error. -->
-To offer versions, add a `versions:` map and use `${version}`. A version's keys replace the preset's, and the service must then name one (`use: ./portler/presets/clickhouse.yml@25.3`):
+To offer versions, add a `versions:` map and use `${version}`. A version's keys replace the preset's, except `env` and `exports`, which merge key by key, and the service must then name one (`use: ./portler/presets/clickhouse.yml@25.3`):
 
 ```yaml
 image: clickhouse/clickhouse-server:${version}

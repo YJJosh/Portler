@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseYaml } from '../parse/yaml.ts';
 import { isObject } from '../util/guards.ts';
 import { didYouMean } from '../util/suggest.ts';
-import { mergeEnvEntry, normalizeEnvSpecs } from './env-spec.ts';
+import { mergeEnvMaps, normalizeEnvSpecs } from './env-spec.ts';
 import { normalizeEnvObject } from './scalars.ts';
 import type { UnknownMap } from '../types/index.ts';
 
@@ -70,9 +70,10 @@ function usesVersionPlaceholder(value: unknown): boolean {
 /**
  * A preset with `versions:` never picks one by itself: a default that moves in
  * a later Portler could stop an existing volume from opening (Postgres), or
- * upgrade it with no way back (MySQL, Redis). A version's keys replace the preset's.
+ * upgrade it with no way back (MySQL, Redis). The version's keys are a layer on top of the
+ * preset's, see layerServiceKeys.
  */
-function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; values: Record<string, string> } {
+function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; override: UnknownMap; values: Record<string, string> } {
   const { versions, ...keys } = preset;
   if (versions === undefined) {
     if (version !== undefined) throw new Error(`${field}: preset "${use}" has no versions, so "@${version}" means nothing. Use "${use}".`);
@@ -81,7 +82,7 @@ function applyPresetVersion(preset: UnknownMap, use: string, version: string | u
     if (usesVersionPlaceholder(keys)) {
       throw new Error(`${field}: preset "${use}" uses \${version} but lists no versions. Add a "versions:" mapping to the preset, or remove the placeholder.`);
     }
-    return { keys, values: {} };
+    return { keys, override: {}, values: {} };
   }
   if (!isObject(versions) || Object.keys(versions).length === 0) throw new Error(`${field}: preset "${use}" must list its versions as a mapping of version: service keys`);
   const known = Object.keys(versions).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
@@ -102,10 +103,10 @@ function applyPresetVersion(preset: UnknownMap, use: string, version: string | u
   }
   const override = versions[version] ?? {};
   if (!isObject(override)) throw new Error(`${field}: version "${version}" of preset "${use}" must be a mapping of service keys`);
-  return { keys: { ...keys, ...override }, values: { version } };
+  return { keys, override, values: { version } };
 }
 
-async function readPreset(use: string, version: string | undefined, serviceName: string, projectDir: string): Promise<UnknownMap> {
+async function readPreset(use: string, version: string | undefined, serviceName: string, projectDir: string): Promise<{ keys: UnknownMap; override: UnknownMap }> {
   const field = `services.${serviceName}.use`;
   let filePath: string;
   if (isPresetPath(use)) {
@@ -129,45 +130,54 @@ async function readPreset(use: string, version: string | undefined, serviceName:
   }
   const preset = parseYaml(text, path.basename(filePath));
   if (!isObject(preset)) throw new Error(`${field}: preset ${filePath} must be a mapping of service keys`);
-  const { keys, values } = applyPresetVersion(preset, use, version, field);
-  if (keys.use !== undefined) throw new Error(`${field}: preset ${filePath} sets "use", but a preset cannot use another preset`);
-  return substitutePresetValues(keys, { ...values, 'self.name': serviceName }) as UnknownMap;
+  const { keys, override, values } = applyPresetVersion(preset, use, version, field);
+  if (keys.use !== undefined || override.use !== undefined) throw new Error(`${field}: preset ${filePath} sets "use", but a preset cannot use another preset`);
+  const placeholders = { ...values, 'self.name': serviceName };
+  return {
+    keys: substitutePresetValues(keys, placeholders) as UnknownMap,
+    override: substitutePresetValues(override, placeholders) as UnknownMap,
+  };
+}
+
+function readEnvLayer(keys: UnknownMap, label: string): UnknownMap {
+  return normalizeEnvSpecs(normalizeEnvObject(keys.env ?? keys.environment, `${label}env/environment`), `${label}env`);
 }
 
 /**
- * A service with `use:` starts from the preset's keys. The service's own keys
- * replace the preset's, except `env` and `exports`, which merge key by key: a
- * service that sets `POSTGRES_PASSWORD` keeps the preset's other variables, and
- * a plain value keeps the preset's `secret` and `description` for that key.
+ * The upper keys replace the lower ones, except `env` and `exports`, which merge
+ * key by key: a service that sets `POSTGRES_PASSWORD` keeps the preset's other
+ * variables, and a plain value keeps the preset's `secret` and `description`.
+ */
+function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerLabel: string, upperLabel: string): UnknownMap {
+  const merged: UnknownMap = { ...lower, ...upper };
+  delete merged.environment;
+  merged.env = mergeEnvMaps(readEnvLayer(lower, lowerLabel), readEnvLayer(upper, upperLabel));
+
+  if (lower.exports !== undefined || upper.exports !== undefined) {
+    for (const [keys, label] of [[lower, lowerLabel], [upper, upperLabel]] as const) {
+      if (keys.exports !== undefined && keys.exports !== null && !isObject(keys.exports)) throw new Error(`${label}exports must be a mapping of name: template`);
+    }
+    merged.exports = { ...(lower.exports as UnknownMap | undefined), ...(upper.exports as UnknownMap | undefined) };
+  }
+  return merged;
+}
+
+/**
+ * A service with `use:` starts from the preset's keys, then the chosen version's,
+ * then its own.
  */
 export async function applyServicePreset(rawService: UnknownMap, serviceName: string, projectDir: string): Promise<UnknownMap> {
   const use = rawService.use;
   if (use === undefined || use === null) return rawService;
   if (typeof use !== 'string' || use.trim() === '') throw new Error(`services.${serviceName}.use must be a preset name or a path to a preset file`);
+  const own = Object.fromEntries(Object.entries(rawService).filter(([key]) => key !== 'use'));
 
   const { use: target, version } = parseUse(use);
-  const preset = await readPreset(target, version, serviceName, projectDir);
-  const merged: UnknownMap = { ...preset };
-  for (const [key, value] of Object.entries(rawService)) {
-    if (key !== 'use') merged[key] = value;
-  }
-
-  const presetEnv = normalizeEnvSpecs(normalizeEnvObject(preset.env ?? preset.environment, `preset ${use} env`), `preset ${use} env`);
-  const ownEnv = normalizeEnvSpecs(
-    normalizeEnvObject(rawService.env ?? rawService.environment, `services.${serviceName}.env/environment`),
-    `services.${serviceName}.env`,
-  );
-  const env: UnknownMap = { ...presetEnv };
-  for (const [key, value] of Object.entries(ownEnv)) env[key] = Object.hasOwn(presetEnv, key) ? mergeEnvEntry(presetEnv[key], value) : value;
-  delete merged.environment;
-  merged.env = env;
-
-  if (preset.exports !== undefined || rawService.exports !== undefined) {
-    if (preset.exports !== undefined && !isObject(preset.exports)) throw new Error(`preset ${use}: exports must be a mapping of name: template`);
-    if (rawService.exports !== undefined && rawService.exports !== null && !isObject(rawService.exports)) {
-      throw new Error(`services.${serviceName}.exports must be a mapping of name: template`);
-    }
-    merged.exports = { ...(preset.exports as UnknownMap | undefined), ...(rawService.exports as UnknownMap | undefined) };
-  }
-  return merged;
+  const { keys, override } = await readPreset(target, version, serviceName, projectDir);
+  // REVIEW: a version block used to replace env and exports whole, so a preset
+  // adding one variable for one version silently lost all the others.
+  // REVIEW: labels end in their own separator, because "preset ./db.yml@2.env"
+  // reads as a file name in an error, unlike "preset ./db.yml@2 env" and "services.db.env".
+  const preset = layerServiceKeys(keys, override, `preset ${target} `, `preset ${use} `);
+  return layerServiceKeys(preset, own, `preset ${use} `, `services.${serviceName}.`);
 }
