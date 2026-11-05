@@ -13,9 +13,10 @@ portler ps [service...]
 portler logs [service...] [-f|--follow]
 portler ports
 portler env [docker|k8s] [service] [--prod] [--reveal]
+portler run [docker|k8s] [task|service] [-- <command>...] [--prod] [--volume-set <name>]
 portler clean [--ports] [--global] [--force]
 portler volumes [list] [--prod]
-portler volumes fork <volume> <new-set> [--prod]
+portler volumes fork <volume> <new-set> [--force] [--prod]
 portler volumes remove <volume> [--force] [--prod]
 portler init
 ```
@@ -31,18 +32,18 @@ portler init
 
 | Flag | Applies to | Description |
 | --- | --- | --- |
-| `--prod` | `setup`, `start`, `up`, `restart`, `env`, `volumes` | Use production overrides (not Kubernetes; `restart` refuses to change a running service's mode) |
+| `--prod` | `setup`, `start`, `up`, `restart`, `env`, `run`, `volumes` | Use production overrides (not Kubernetes; `restart` refuses to change a running service's mode) |
 | `--setup` / `--no-setup` | `up`, `restart` | Force / skip setup (not Kubernetes) |
 | `-d, --detach` | `up` | Start services in the background |
 | `-f, --follow` | `logs` | Keep streaming new output |
-| `--reveal` | `env` | With `--prod`, or for a service started with `--prod`, print secret-looking values instead of `***` |
+| `--reveal` | `env` | Print values marked `secret: true` (and, in the production view, secret-looking ones) instead of `***` |
 | `--drain-ms <ms>` | `start` | After the shell exits, wait up to `<ms>` for the rest of its process group (default 10000) |
 | `--image <service>=<image>` | `up`, `restart` | Run that Docker service from this image instead of building it (repeatable) |
 | `--volumes` | `down k8s` | Also delete the project's PersistentVolumeClaims |
 | `--ports` | `clean` | Only release this project's ports |
 | `--global` | `clean` | Prune stale entries from the global registry |
-| `--force` | `clean`, `volumes remove`, `down` | Stop running services first (or, with `clean --global`, reset a corrupt registry) / remove a volume in use / **dangerous last resort:** signal a pid `down` cannot identify ([PID safety](/reference/cli/down#pid-safety)) |
-| `--volume-set <name>` | `up`, `restart`, `volumes` | Use the `<volume>--<name>` variants of managed `@` volumes (env fallback: `PORTLER_VOLUME_SET`) |
+| `--force` | `clean`, `volumes remove`, `volumes fork`, `down` | Stop running services first (or, with `clean --global`, reset a corrupt registry) / remove or copy a volume in use / **dangerous last resort:** signal a pid `down` cannot identify ([PID safety](/reference/cli/down#pid-safety)) |
+| `--volume-set <name>` | `up`, `restart`, `run`, `volumes` | Use the `<volume>--<name>` variants of managed `@` volumes (env fallback: `PORTLER_VOLUME_SET`) |
 
 ## Run modes
 
@@ -67,6 +68,7 @@ portler up k8s         # everything runs in a local Kubernetes cluster
 | [`portler logs`](/reference/cli/logs) | Show captured output of detached services |
 | [`portler ports`](/reference/cli/ports) | Show assigned ports |
 | [`portler env`](/reference/cli/env) | Print resolved environment values |
+| [`portler run`](/reference/cli/run) | Run a task or a command with a service's environment |
 | [`portler clean`](/reference/cli/clean) | Remove runtime files and release ports |
 | [`portler volumes`](/reference/cli/volumes) | List, fork, and remove managed volumes |
 | [`portler k8s render`](/reference/cli/k8s-render) | Generate Kubernetes manifests without applying |

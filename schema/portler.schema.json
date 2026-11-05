@@ -1,0 +1,891 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/YJJosh/Portler/main/schema/portler.schema.json",
+  "title": "portler.yml",
+  "description": "Portler configuration. See https://github.com/YJJosh/Portler/blob/main/docs/reference/configuration.md",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Stable project name used under --prod."
+    },
+    "host": {
+      "type": "string"
+    },
+    "url_host": {
+      "type": "string"
+    },
+    "protocol": {
+      "type": "string"
+    },
+    "port_range": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      }
+    },
+    "port_start": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "port_end": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "prefer_declared_port": {
+      "type": "boolean"
+    },
+    "docker_network": {
+      "type": "string"
+    },
+    "k8s_namespace": {
+      "type": "string"
+    },
+    "use_env": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "env_file": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "env": {
+      "$ref": "#/$defs/env"
+    },
+    "setup": {
+      "$ref": "#/$defs/setup"
+    },
+    "prod": {
+      "type": "object",
+      "properties": {
+        "setup": {
+          "$ref": "#/$defs/setup"
+        },
+        "env": {
+          "$ref": "#/$defs/env"
+        },
+        "require": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Env keys the deployment must supply under --prod."
+        },
+        "services": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          ]
+        },
+        "routes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "allowed_hosts": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "allowedHosts": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "trusted_proxies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "routes"
+      ],
+      "patternProperties": {
+        "^x-": {}
+      }
+    },
+    "tasks": {
+      "type": "object",
+      "description": "Named commands for `portler run <task>`.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string",
+                "description": "Run with this service's env and in its cwd."
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "run"
+            ],
+            "patternProperties": {
+              "^x-": {}
+            }
+          }
+        ]
+      }
+    },
+    "services": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/service"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "services"
+  ],
+  "patternProperties": {
+    "^x-": {}
+  },
+  "$defs": {
+    "envSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An env entry with metadata. Without value or default, the key comes from your shell or a use_env file.",
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ],
+          "description": "The config value. Like a plain value, it wins over your shell and .env files in development."
+        },
+        "default": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ],
+          "description": "Used only when neither your shell nor a use_env file sets the key."
+        },
+        "required": {
+          "description": "true: must be set and non-empty in every mode. \"prod\": under --prod the deployment must supply it (the config value is only for development).",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "const": "prod"
+            }
+          ]
+        },
+        "secret": {
+          "type": "boolean",
+          "description": "Hidden by `portler env` (use --reveal to show it). false keeps a secret-looking name visible."
+        },
+        "description": {
+          "type": "string",
+          "description": "Shown when the key is missing."
+        }
+      },
+      "not": {
+        "required": [
+          "value",
+          "default"
+        ]
+      }
+    },
+    "envValue": {
+      "oneOf": [
+        {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "$ref": "#/$defs/envSpec"
+        }
+      ]
+    },
+    "env": {
+      "description": "KEY: value pairs, or a list of KEY=value strings. Values may reference services: ${api.url}, ${db.address}, ${db.database_url}.",
+      "oneOf": [
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/envValue"
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^=]+=.*$"
+          }
+        }
+      ]
+    },
+    "setupStep": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "run": {
+              "type": "string",
+              "description": "Shell command."
+            },
+            "if_missing": {
+              "type": "string",
+              "description": "Run only while nothing exists at this path."
+            },
+            "always": {
+              "type": "boolean",
+              "description": "Run on every up and setup."
+            },
+            "watch": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Files or folders; the step runs again when their content changes."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "run"
+          ],
+          "patternProperties": {
+            "^x-": {}
+          }
+        }
+      ]
+    },
+    "setup": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/setupStep"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/setupStep"
+          }
+        }
+      ]
+    },
+    "healthcheck": {
+      "oneOf": [
+        {
+          "enum": [
+            "none",
+            "tcp",
+            "http",
+            "command",
+            false
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "none",
+                "tcp",
+                "http",
+                "command"
+              ]
+            },
+            "command": {
+              "type": "string",
+              "description": "Ready when it exits 0. Runs on this machine."
+            },
+            "test": {
+              "type": "string",
+              "description": "Alias of command."
+            },
+            "url": {
+              "type": "string",
+              "description": "Ready on a 2xx/3xx answer (or the accept list)."
+            },
+            "accept": {
+              "oneOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "interval_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "intervalMs": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          }
+        }
+      ]
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "use": {
+          "type": "string",
+          "description": "A built-in preset (postgres, mysql, redis) or a path to a preset file. Your keys replace the preset's; env and exports merge key by key."
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Relative to the project root."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port the service listens on (inside its container for Docker)."
+        },
+        "transport": {
+          "enum": [
+            "tcp",
+            "udp",
+            "tcp+udp"
+          ]
+        },
+        "port_env": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "portEnv": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "env": {
+          "$ref": "#/$defs/env"
+        },
+        "environment": {
+          "$ref": "#/$defs/env"
+        },
+        "host": {
+          "type": "string"
+        },
+        "url_host": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "prefer_declared_port": {
+          "type": "boolean"
+        },
+        "depends_on": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": true
+                  },
+                  {
+                    "enum": [
+                      "started",
+                      "ready",
+                      "healthy",
+                      "service_healthy"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "condition": {
+                        "enum": [
+                          "started",
+                          "ready",
+                          "healthy",
+                          "service_healthy"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false,
+                    "patternProperties": {
+                      "^x-": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "dependsOn": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": true
+                  },
+                  {
+                    "enum": [
+                      "started",
+                      "ready",
+                      "healthy",
+                      "service_healthy"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "condition": {
+                        "enum": [
+                          "started",
+                          "ready",
+                          "healthy",
+                          "service_healthy"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false,
+                    "patternProperties": {
+                      "^x-": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "healthcheck": {
+          "$ref": "#/$defs/healthcheck"
+        },
+        "ready": {
+          "$ref": "#/$defs/healthcheck"
+        },
+        "image": {
+          "type": "string"
+        },
+        "build": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Build context."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "context": {
+                  "type": "string"
+                },
+                "dockerfile": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "args": {
+                  "$ref": "#/$defs/env"
+                }
+              },
+              "additionalProperties": false,
+              "patternProperties": {
+                "^x-": {}
+              }
+            }
+          ]
+        },
+        "dockerfile": {
+          "type": "string"
+        },
+        "volumes": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "type": {
+          "const": "docker"
+        },
+        "container_name": {
+          "type": "string"
+        },
+        "containerName": {
+          "type": "string"
+        },
+        "docker": {
+          "oneOf": [
+            {
+              "const": true
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "image": {
+                  "type": "string"
+                },
+                "build": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "description": "Build context."
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "context": {
+                          "type": "string"
+                        },
+                        "dockerfile": {
+                          "type": "string"
+                        },
+                        "target": {
+                          "type": "string"
+                        },
+                        "args": {
+                          "$ref": "#/$defs/env"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "patternProperties": {
+                        "^x-": {}
+                      }
+                    }
+                  ]
+                },
+                "dockerfile": {
+                  "type": "string"
+                },
+                "volumes": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "container_name": {
+                  "type": "string"
+                },
+                "containerName": {
+                  "type": "string"
+                },
+                "env": {
+                  "$ref": "#/$defs/env"
+                },
+                "environment": {
+                  "$ref": "#/$defs/env"
+                },
+                "command": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "patternProperties": {
+                "^x-": {}
+              }
+            }
+          ]
+        },
+        "k8s": {
+          "oneOf": [
+            {
+              "const": true
+            },
+            {
+              "type": "object",
+              "properties": {
+                "replicas": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "env": {
+                  "$ref": "#/$defs/env"
+                },
+                "environment": {
+                  "$ref": "#/$defs/env"
+                },
+                "volume": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "size": {
+                          "type": "string"
+                        },
+                        "mount_path": {
+                          "type": "string"
+                        },
+                        "mountPath": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "size"
+                      ],
+                      "patternProperties": {
+                        "^x-": {}
+                      }
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "patternProperties": {
+                "^x-": {}
+              }
+            }
+          ]
+        },
+        "setup": {
+          "$ref": "#/$defs/setup"
+        },
+        "prod": {
+          "type": "object",
+          "properties": {
+            "setup": {
+              "$ref": "#/$defs/setup"
+            },
+            "env": {
+              "$ref": "#/$defs/env"
+            },
+            "command": {
+              "type": "string"
+            },
+            "require": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Env keys the deployment must supply under --prod."
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          }
+        },
+        "exports": {
+          "type": "object",
+          "description": "Values others read as ${service.name}, e.g. a connection URL. Templates may use ${self.address} and ${env.KEY} (this service's own env).",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      }
+    }
+  }
+}

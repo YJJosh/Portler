@@ -1,3 +1,4 @@
+import { mergeEnvMaps, normalizeEnvSpecs } from './env-spec.ts';
 import { isObject, normalizeEnvObject, optionalBoolean, optionalString } from './scalars.ts';
 import { namedDockerContainer, namedDockerNetwork } from './naming.ts';
 import type { PortlerConfig, ProductionConfig, SetupStep } from '../types/index.ts';
@@ -44,12 +45,12 @@ function normalizeSetupStep(item: unknown, name: string): SetupStep {
   return step;
 }
 
-/** `watch` is a file or a list of files whose content becomes part of the step's receipt. */
+/** `watch` is a path or a list of paths (files or folders) whose content becomes part of the step's receipt. */
 function normalizeWatch(value: unknown, name: string): string[] | undefined {
   if (value === undefined) return undefined;
   const list = typeof value === 'string' ? [value] : value;
-  if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) throw new Error(`${name} must be a file path or a list of file paths`);
-  if (list.length === 0) throw new Error(`${name} must list at least one file`);
+  if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) throw new Error(`${name} must be a path or a list of paths (files or folders)`);
+  if (list.length === 0) throw new Error(`${name} must list at least one path`);
   if (list.some((entry) => entry.trim() === '')) throw new Error(`${name} must not contain an empty path`);
   return list;
 }
@@ -75,7 +76,7 @@ export function normalizeProduction(value: unknown, name: string, service: boole
   const production: ProductionConfig = {
     setup: normalizeSetup(value.setup, `${name}.setup`),
     command: optionalString(value.command, `${name}.command`),
-    env: normalizeEnvObject(value.env, `${name}.env`),
+    env: normalizeEnvSpecs(normalizeEnvObject(value.env, `${name}.env`), `${name}.env`),
     require: normalizeRequire(value.require, `${name}.require`),
   };
   if (value.services !== undefined) {
@@ -138,12 +139,12 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
     production: true,
     dockerNetwork: projectName !== undefined && !base.dockerNetworkExplicit ? namedDockerNetwork(projectName) : base.dockerNetwork,
     setup: base.prod?.setup ?? base.setup,
-    env: { ...base.env, ...base.prod?.env },
+    env: mergeEnvMaps(base.env, base.prod?.env),
     services: serviceMap(Object.entries(base.services).map(([name, service]) => [name, {
       ...service,
       setup: service.prod?.setup ?? service.setup,
       command: service.prod?.command ?? service.command,
-      env: { ...service.env, ...service.prod?.env },
+      env: mergeEnvMaps(service.env, service.prod?.env),
       docker: service.docker ? {
         ...service.docker,
         ...(projectName !== undefined && !service.docker.containerNameExplicit ? { containerName: namedDockerContainer(projectName, name) } : {}),
@@ -153,7 +154,7 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
         command: service.docker.commandFromService
           ? service.prod?.command ?? service.docker.command
           : service.docker.command,
-        env: { ...service.docker.env, ...service.prod?.env },
+        env: mergeEnvMaps(service.docker.env, service.prod?.env),
       } : undefined,
     }])),
   };

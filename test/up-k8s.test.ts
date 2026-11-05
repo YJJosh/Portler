@@ -278,3 +278,47 @@ if (args.includes('config') && args.includes('current-context')) {
     assert.deepEqual(Object.keys(pids?.services ?? {}), ['worker']);
   });
 });
+
+describe('Kubernetes healthchecks see the env the pods got (fake kubectl)', () => {
+  // REVIEW: an exported health path read ${env.KEY} from config only, ignoring
+  // the use_env file, so a healthy deployment failed readiness and rolled back.
+  it('resolves an export in the healthcheck URL with use_env values', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'portler.yml'),
+      [
+        'port_range: {start: 55000, end: 55999}',
+        'use_env: .env',
+        'services:',
+        '  api:',
+        '    image: example/api:latest',
+        '    port: 8080',
+        '    k8s: true',
+        '    env:',
+        '      CHECK_PATH: { default: fallback }',
+        '    exports:',
+        "      health_path: '/${env.CHECK_PATH}'",
+        '    healthcheck:',
+        "      url: 'http://localhost:${api.port}${api.health_path}'",
+        '      timeout_ms: 4000',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fs.writeFile(path.join(projectDir, '.env'), 'CHECK_PATH=actual\n', 'utf8');
+    const kubectl = path.join(tempDir, 'bin', 'kubectl');
+    const source = await fs.readFile(kubectl, 'utf8');
+    // The forwarded "pod" answers only on the path the env file names.
+    await fs.writeFile(
+      kubectl,
+      source.replace(
+        'const server = net.createServer((socket) => socket.end());',
+        "const server = require('node:http').createServer((req, res) => { res.statusCode = req.url === '/actual' ? 200 : 404; res.end(); });",
+      ),
+      { mode: 0o755 },
+    );
+    assert.equal(await commandUp(parseArgs(['k8s', '--detach'], 'up')), 0);
+    const stopped = await stopServices(projectDir);
+    assert.deepEqual(stopped.failures, []);
+    await releasePorts(projectDir);
+  });
+});

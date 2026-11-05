@@ -4,7 +4,7 @@ Manage this project's Portler-managed Docker volumes. See the [Volumes guide](/g
 
 ```bash
 portler volumes [list] [--prod]
-portler volumes fork <volume> <new-set> [--prod]
+portler volumes fork <volume> <new-set> [--force] [--prod]
 portler volumes remove <volume> [--force] [--prod]
 ```
 
@@ -25,6 +25,7 @@ portler volumes fork postgres-data migration
 - The copy runs `cp -a` inside a throwaway `alpine:3` container; the original is untouched.
 - `<volume>` can be the short name from portler.yml (`postgres-data`), a `name--set` variant (`postgres-data--migration`), or the full Docker volume name.
 - Set names may contain `a-z0-9_.-` but not `--`.
+- A volume that a running container mounts is refused, since copying files under a running database can give a broken copy. Stop the container first (`portler down db`); `--force` copies anyway, with a warning. When Docker cannot say which containers use the volume (`docker ps` fails), the fork is refused too: no answer is not proof that nothing uses it. `remove` refuses in that case the same way; the `volumes` list just shows no users.
 - The target must not exist yet. If two forks into the same target race, only the one that created it copies; the other fails with "another fork created target volume … at the same time" rather than mixing two datasets.
 
 Run the stack against the fork with `portler up --volume-set migration`. A fork made with `--prod` (or `--file`) lives in that scope, so run `up` with the same flags: `portler up --prod --volume-set migration`. Without them `up` would mount the development variant instead. The command Portler prints after the fork already includes them.

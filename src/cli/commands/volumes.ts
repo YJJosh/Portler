@@ -46,8 +46,8 @@ export function forkUpCommand(volumeSet: string, args: Pick<ParsedArgs, 'file' |
 
 export async function commandVolumes(args: ParsedArgs): Promise<number> {
   const [subcommand = 'list', ...rest] = args.positionals;
-  if (args.force && subcommand !== 'remove' && subcommand !== 'rm') {
-    throw new Error('--force only applies to "portler volumes remove"');
+  if (args.force && !['remove', 'rm', 'fork'].includes(subcommand)) {
+    throw new Error('--force only applies to "portler volumes remove" and "portler volumes fork"');
   }
 
   const config = applyProduction(await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet }), args.prod);
@@ -60,8 +60,8 @@ export async function commandVolumes(args: ParsedArgs): Promise<number> {
 
     case 'fork': {
       const [volumeArg, newSet, extra] = rest;
-      if (!volumeArg || !newSet || extra !== undefined) throw new Error('usage: portler volumes fork <volume> <new-set>');
-      const fork = await forkVolume(config, volumeArg, newSet);
+      if (!volumeArg || !newSet || extra !== undefined) throw new Error('usage: portler volumes fork <volume> <new-set> [--force]');
+      const fork = await forkVolume(config, volumeArg, newSet, args.force);
       process.stdout.write(`[portler] forked ${fork.source}\n[portler]     -> ${fork.target}\n`);
       process.stdout.write(`[portler] run against it with "${forkUpCommand(fork.volumeSet, args)}" (or PORTLER_VOLUME_SET=${fork.volumeSet} instead of --volume-set)\n`);
       return 0;

@@ -1,0 +1,20 @@
+# Built-in preset: `use: postgres`. Your service's own keys replace these;
+# env and exports merge key by key. The image pins a major version: Portler
+# does not change it, because a data volume only opens with the major that
+# wrote it. Postgres 17 and older keep their data in /var/lib/postgresql/data,
+# so set `volumes:` too when you set an older `image:`.
+image: postgres:18-alpine
+port: 5432
+volumes:
+  - '@${self.name}-data:/var/lib/postgresql'
+env:
+  POSTGRES_USER: { default: postgres }
+  POSTGRES_PASSWORD: { default: postgres, secret: true }
+  POSTGRES_DB: { default: app }
+healthcheck:
+  # Over TCP: while the image creates the database on first start, its
+  # temporary server only listens on the Unix socket.
+  command: docker exec ${self.container} pg_isready -h 127.0.0.1 -p 5432
+  timeout_ms: 120000
+exports:
+  database_url: postgres://${env.POSTGRES_USER}:${env.POSTGRES_PASSWORD}@${self.address}/${env.POSTGRES_DB}

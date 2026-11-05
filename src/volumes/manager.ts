@@ -117,11 +117,22 @@ async function volumeSizes(): Promise<Map<string, string>> {
   return sizes;
 }
 
-/** Names of running containers mounting the volume (best effort). */
-async function containersUsing(fullName: string): Promise<string[]> {
-  const result = await runDocker(['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}']);
-  if (result.code !== 0) return [];
-  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+/**
+ * Names of running containers mounting the volume. A failed query throws: it is not
+ * proof that nothing uses the volume, so fork and remove refuse. `bestEffort` (the
+ * `volumes` listing) shows nobody instead.
+ */
+async function containersUsing(fullName: string, bestEffort = false): Promise<string[]> {
+  const query = ['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}'];
+  let output: string;
+  if (bestEffort) {
+    const result = await runDocker(query);
+    if (result.code !== 0) return [];
+    output = result.stdout;
+  } else {
+    output = await dockerOrThrow(query);
+  }
+  return output.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
 /**
@@ -155,7 +166,7 @@ export async function listProjectVolumes(config: PortlerConfig): Promise<Project
       volumeSet: parsed.volumeSet,
       driver,
       size: sizes.get(fullName),
-      usedBy: await containersUsing(fullName),
+      usedBy: await containersUsing(fullName, true),
       services: declaredServicesFor(config, parsed.name),
       exists: true,
     });
@@ -187,9 +198,10 @@ async function volumeExists(fullName: string): Promise<boolean> {
 
 /**
  * Clone a volume's data into a new `--<set>` variant so a branch or worktree
- * can experiment (e.g. test a migration) without touching the original.
+ * can experiment (e.g. test a migration) without touching the original. A
+ * volume a running container mounts is refused unless `force`.
  */
-export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string): Promise<ForkResult> {
+export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string, force = false): Promise<ForkResult> {
   await ensureDockerRunning();
 
   const newSet = normalizeVolumeSet(rawNewSet);
@@ -212,11 +224,17 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     throw new Error(`target volume already exists: ${target}. Remove it first with "portler volumes remove ${parsed.name}${VOLUME_SET_SEPARATOR}${newSet}"`);
   }
 
+  // A database writes while it runs, so a file copy of its volume can be broken in ways
+  // that only show later. Copy a volume nothing runs on, unless told otherwise.
   const users = await containersUsing(source);
-  if (users.length > 0) {
-    process.stderr.write(
-      `[portler] warning: volume ${source} is mounted by ${users.join(', ')}; the copy may be inconsistent. Consider "portler down" first.\n`,
+  if (users.length > 0 && !force) {
+    throw new Error(
+      `volume ${source} is in use by ${users.join(', ')}, and a copy of a running database can be broken. ` +
+        'Stop the services that use it (portler down) or pass --force to copy it anyway.',
     );
+  }
+  if (users.length > 0) {
+    process.stderr.write(`[portler] warning: volume ${source} is mounted by ${users.join(', ')}; the copy may be inconsistent.\n`);
   }
 
   const owner = volumeScope(config).owner;
@@ -396,6 +414,20 @@ function managedVolumesFor(config: PortlerConfig, serviceNames: readonly string[
   }
 
   return [...names].sort();
+}
+
+/**
+ * Managed volumes the given services would create because they do not exist yet in
+ * the active volume set (a first start, a new set, or one removed with `volumes
+ * remove` or `docker volume rm`). `undefined` when Docker cannot be asked.
+ */
+export async function missingManagedVolumes(config: PortlerConfig, serviceNames: readonly string[]): Promise<string[] | undefined> {
+  const managed = managedVolumesFor(config, serviceNames);
+  if (managed.length === 0) return [];
+  const result = await runDocker(['volume', 'ls', '--format', '{{.Name}}']);
+  if (result.code !== 0) return undefined;
+  const existing = new Set(result.stdout.split('\n').map((line) => line.trim()).filter(Boolean));
+  return managed.filter((name) => !existing.has(volumeFullName(volumeScope(config).prefix, name, config.volumeSet)));
 }
 
 /**

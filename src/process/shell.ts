@@ -107,3 +107,34 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+/**
+ * A command in Portler's own process group, so it owns the terminal like any
+ * command typed in a shell: an interactive tool (psql, a REPL) can read from
+ * it, and Ctrl-C reaches it straight from the terminal. Portler ignores SIGINT
+ * meanwhile, passes SIGTERM and SIGHUP on to the child it holds, and returns
+ * the command's exit status (128 + signal number when a signal ended it).
+ */
+export async function runForeground(command: string, cwd: string, env: EnvMap): Promise<number> {
+  const child = spawn(command, { cwd, env, shell: true, stdio: 'inherit' });
+  const ignore = (): void => {};
+  const terminate = (): void => {
+    child.kill('SIGTERM');
+  };
+  const hangUp = (): void => {
+    child.kill('SIGHUP');
+  };
+  process.on('SIGINT', ignore);
+  process.on('SIGTERM', terminate);
+  process.on('SIGHUP', hangUp);
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
+    });
+  } finally {
+    process.off('SIGINT', ignore);
+    process.off('SIGTERM', terminate);
+    process.off('SIGHUP', hangUp);
+  }
+}

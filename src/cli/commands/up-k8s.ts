@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { applyImageOverrides, configForRunMode, loadConfig, proxyServiceConfig } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { buildGeneratedEnv } from '../../env/index.ts';
+import { buildGeneratedEnv, hostResolveOptions } from '../../env/index.ts';
 import {
   applyManifestFiles,
   buildServiceImages,
@@ -283,13 +283,14 @@ async function startK8sPhase(
     printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
 
     signal?.throwIfAborted();
+    // REVIEW: Render/validate required env before building images or changing the cluster.
+    const rendered = await renderManifests(config, selectedNames, assignments);
     const builtImages = await buildServiceImages(config, selectedNames, assignments, signal);
 
     for (const image of builtImages) {
       await loadImageIntoCluster(cluster, image, signal);
     }
 
-    const rendered = await renderManifests(config, selectedNames, assignments);
     const manifestDir = await writeManifestFiles(config.projectDir, rendered);
 
     await waitOutTerminatingNamespace(cluster, config, signal);
@@ -352,8 +353,11 @@ async function startK8sPhase(
         await writePortForwardPid(config, serviceName, child, assignment, args.images?.[serviceName]);
         // k8s mode never has command healthchecks (applyK8sMode strips them),
         // so the readiness env is not consulted.
+        // REVIEW: an HTTP healthcheck URL may use an export with ${env.KEY};
+        // resolve it with the shell/env-file values the pod got, not config only.
+        const resolveOptions = hostResolveOptions(config, service, rendered.baseEnv, generatedEnv, assignments);
         readinessWaits.push(
-          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal),
+          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions),
         );
       }
 

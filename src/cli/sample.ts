@@ -14,16 +14,9 @@ use_env: .env
 
 services:
   postgres:
-    image: postgres:16-alpine
-    port: 5432
-    env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-      POSTGRES_DB: app
-    volumes:
-      - '@postgres-data:/var/lib/postgresql/data'
-    healthcheck:
-      command: docker exec $PORTLER_POSTGRES_CONTAINER pg_isready -h 127.0.0.1 -U app -d app
+    # Built-in preset: image, port 5432, the @postgres-data volume, a healthcheck
+    # and exports.database_url. Keys you add here override it.
+    use: postgres
 
   backend:
     command: npm run dev
@@ -36,7 +29,7 @@ services:
     depends_on:
       - postgres
     env:
-      DATABASE_URL: postgres://app:app@localhost:\${postgres.port}/app
+      DATABASE_URL: \${postgres.database_url}
       CORS_ALLOWED_ORIGIN: frontend.url
 
   frontend:

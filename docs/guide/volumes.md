@@ -15,6 +15,8 @@ services:
       - '@postgres-data:/var/lib/postgresql/data'
 ```
 
+The built-in [presets](/guide/databases) (`use: postgres`) declare one for you: `@<service>-data`.
+
 `@postgres-data` becomes the Docker volume `portler-<project>-<hash>-postgres-data`, where `<project>` and `<hash>` come from the project root (under `--prod` with a top-level `name:` it is `portler-<name>--postgres-data` instead, so a release that unpacks into a new folder keeps it; see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server)). Portler creates it with `portler.*` labels before the first run so it can find it again later. Before mounting it, Portler verifies that project label again (including after a concurrent create race); an unlabelled or foreign volume that merely has the expected name is refused rather than exposed to the service.
 
 ::: tip Stable across git worktrees
@@ -41,7 +43,7 @@ Clones a volume's data into a `<volume>--<new-set>` variant:
 portler volumes fork postgres-data migration
 ```
 
-The copy runs `cp -a` inside a throwaway `alpine:3` container, so the original is untouched. `<volume>` can be the short name from portler.yml, a `name--set` variant, or the full Docker volume name. Both the source and the newly-created target must carry this project's ownership label; a name match alone never authorizes reading, overwriting, or rollback-removing volume data. The target also gets a random `portler.fork-attempt` label: when two forks into the same new set race, only the one that created the target copies into it, the other stops with "another fork created target volume … at the same time", and a failed copy only removes a target its own attempt created.
+The copy runs `cp -a` inside a throwaway `alpine:3` container, so the original is untouched. Copying the files of a running database can give a broken copy, so a volume that a running container mounts is refused: stop it first (`portler down postgres`), or pass `--force` to copy anyway. `<volume>` can be the short name from portler.yml, a `name--set` variant, or the full Docker volume name. Both the source and the newly-created target must carry this project's ownership label; a name match alone never authorizes reading, overwriting, or rollback-removing volume data. The target also gets a random `portler.fork-attempt` label: when two forks into the same new set race, only the one that created the target copies into it, the other stops with "another fork created target volume … at the same time", and a failed copy only removes a target its own attempt created.
 
 ## Volume sets
 
@@ -53,6 +55,8 @@ Runs the stack against the `--<name>` variants of **all** `@` volumes. `PORTLER_
 
 `portler restart` comes back on the set a service was started with (it records it), unless you give it another one with `--volume-set`.
 
+[Setup](/guide/setup-and-production) receipts are kept per volume set, so a migration step that ran against one set's database runs again the first time you start another set, such as a fresh empty one. The same happens when `up` creates a volume again after `portler volumes remove`: an empty volume makes every setup step of its set run again.
+
 Starting with a set that was never forked creates a fresh **empty** variant. When the base volume or other sets already exist for that volume — usually a sign of a typo — `up` prints a warning first (with a did-you-mean suggestion) but still proceeds; fork an existing volume instead if you wanted its data.
 
 ### The worktree flow
@@ -61,8 +65,9 @@ Starting with a set that was never forked creates a fresh **empty** variant. Whe
    ```bash
    git worktree add ../myapp-migration migration-branch
    ```
-2. Fork the database volume:
+2. Stop the database and fork its volume:
    ```bash
+   portler down postgres
    portler volumes fork postgres-data my-branch
    ```
 3. Run the worktree's stack against the fork:

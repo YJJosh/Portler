@@ -171,9 +171,9 @@ services:
     ['services: {api: {prod: {setup: false}}}', /services.api.prod.setup must be a string or a list/],
     ['prod: {env: 5}\nservices: {api: {command: echo}}', /prod.env must be a mapping/],
     ['setup: null\nservices: {api: {command: echo}}', /setup must be a string or a list/],
-    ['setup: [{run: x, watch: []}]\nservices: {api: {command: echo}}', /setup\[0\].watch must list at least one file/],
+    ['setup: [{run: x, watch: []}]\nservices: {api: {command: echo}}', /setup\[0\].watch must list at least one path/],
     ['setup: [{run: x, watch: [""]}]\nservices: {api: {command: echo}}', /setup\[0\].watch must not contain an empty path/],
-    ['setup: [{run: x, watch: 4}]\nservices: {api: {command: echo}}', /setup\[0\].watch must be a file path or a list/],
+    ['setup: [{run: x, watch: 4}]\nservices: {api: {command: echo}}', /setup\[0\].watch must be a path or a list/],
     ['setup: [{run: x, watch: [f], always: true}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with always/],
     ['setup: [{run: x, watch: [f], if_missing: p}]\nservices: {api: {command: echo}}', /setup\[0\] cannot combine watch with if_missing/],
     ['prod: {require: [bad-key]}\nservices: {api: {command: echo}}', /prod.require\[0\] must be an environment variable name/],
@@ -267,9 +267,9 @@ services:
     assert.equal(missing.status, 0, missing.stderr);
     assert.match(missing.stderr, /service api requires API_TOKEN in production/);
     assert.doesNotMatch(missing.stdout, /^API_TOKEN=/m);
+    // The development view takes --reveal too: it shows what the config marks secret.
     const dev = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--reveal'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
-    assert.equal(dev.status, 1);
-    assert.match(dev.stderr, /--reveal applies to "env --prod"/);
+    assert.equal(dev.status, 0, dev.stderr);
   });
 
   it('setup --prod fails before running when a key blanked in prod.env is not supplied', async () => {

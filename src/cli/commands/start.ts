@@ -1,7 +1,19 @@
 import net from 'node:net';
 import { assertServiceCwd, loadBaseEnv, loadConfig, resolveServiceCwd } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { assertRequiredEnv, blankRequiredKeys, buildGeneratedEnv, deploymentEnv, requiredEnvKeys, resolveEnvValue } from '../../env/index.ts';
+import { envEntryValue, mergeEnvMaps } from '../../config/env-spec.ts';
+import {
+  assertRequiredEnv,
+  blankRequiredKeys,
+  buildGeneratedEnv,
+  deploymentEnv,
+  envDescriptions,
+  envRequirementProblems,
+  exportEnvReader,
+  requiredEnvKeys,
+  resolveEnvValue,
+  specProductionKeys,
+} from '../../env/index.ts';
 import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -63,9 +75,21 @@ export async function buildStartEnv(
   // file, then config. Only config values are Portler expressions; a file value is used as
   // written, exactly as `up` and `setup` treat it, and a config key the file or the platform
   // supplies is not resolved at all.
-  const configured = { ...config.env, ...service.env };
+  // A `default:` entry and a plain value mean the same here: the deployment wins over both.
+  const configured = mergeEnvMaps(config.env, service.env);
   // A required key is the deployment's to supply; its config value is not used or resolved.
   const required = new Set(config.production ? requiredEnvKeys(config, service) : []);
+  const resolveOptions = {
+    config,
+    viewer: 'host' as const,
+    self: service.name,
+    // REVIEW: Even without --prod, an export must see start's platform/file
+    // precedence, including the explicit platform env used by library callers.
+    exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments, {
+      deploymentPrecedence: true,
+      platformEnv: Object.fromEntries(Object.entries(platformEnv).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    }),
+  };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
     // Own-property checks: `toString` or `constructor` are valid variable names, and a
@@ -73,7 +97,9 @@ export async function buildStartEnv(
     if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key) || required.has(key)) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
-      env[key] = resolveEnvValue(value, assignments);
+      const entry = envEntryValue(value);
+      if (entry === undefined) continue;
+      env[key] = resolveEnvValue(entry.value, assignments, resolveOptions);
     } catch (error) {
       const source = Object.hasOwn(service.env, key) ? `services.${service.name}.env` : 'env';
       throw new Error(`${source}.${key}: ${(error as Error).message}`);
@@ -107,19 +133,25 @@ export function assertStartRequirements(
 ): void {
   const required = requiredEnvKeys(config, service);
   const portKeys = required.filter((key) => service.portEnv.includes(key));
+  // REVIEW: A missing platform PORT must not hide other missing production keys.
+  const messages: string[] = [];
   if (portKeys.length > 0 && (platformEnv.PORT === undefined || platformEnv.PORT === '')) {
-    throw new Error(
+    messages.push(
       `service ${service.name} requires ${portKeys.join(', ')} in production (prod.require), and the platform sets no PORT. ` +
         `start fills its port_env names (${service.portEnv.join(', ')}) with the port it listens on, and only the platform's PORT chooses that port; ` +
         'a use_env file does not.',
     );
   }
-  assertRequiredEnv(
-    `service ${service.name}`,
-    required.filter((key) => !service.portEnv.includes(key)),
-    deploymentEnv(baseEnv),
-    blankRequiredKeys(config, service),
-  );
+  try {
+    assertRequiredEnv(
+      `service ${service.name}`,
+      required.filter((key) => !service.portEnv.includes(key)),
+      deploymentEnv(baseEnv, Object.fromEntries(Object.entries(platformEnv).filter((entry): entry is [string, string] => entry[1] !== undefined))),
+      blankRequiredKeys(config, service),
+      { fromSpec: new Set(specProductionKeys(config, service)), descriptions: envDescriptions(config, service) },
+    );
+  } catch (error) { messages.push((error as Error).message); }
+  if (messages.length > 0) throw new Error(messages.join('\n'));
 }
 
 /** How long `start` waits for the rest of the process group after the shell exits. */
@@ -133,7 +165,18 @@ export async function commandStart(args: ParsedArgs): Promise<number> {
   // Checked against what the platform and the use_env file supply, before buildStartEnv picks
   // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
   // not pass on a free port the platform does not route to.
-  if (args.prod) assertStartRequirements(config, service, baseEnv);
+  // REVIEW: Aggregate start's production errors and required:true errors, and
+  // use start's deployment-first precedence even when --prod was not typed.
+  const missing = envRequirementProblems(config, [service.name], baseEnv, { project: false, deployment: false, deploymentPrecedence: true });
+  if (args.prod) {
+    try { assertStartRequirements(config, service, baseEnv); }
+    catch (error) { missing.unshift((error as Error).message); }
+  }
+  if (missing.length > 0) throw new Error(missing.join('\n'));
   const env = await buildStartEnv(config, service, baseEnv);
+  const resolvedMissing = envRequirementProblems(config, [service.name], baseEnv, {
+    project: false, deployment: false, envs: new Map([[service.name, env]]),
+  });
+  if (resolvedMissing.length > 0) throw new Error(resolvedMissing.join('\n'));
   return runShell(service.command!, resolveServiceCwd(config, service), env, { drainMs: args.drainMs ?? DEFAULT_DRAIN_MS });
 }

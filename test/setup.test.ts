@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/loader.ts';
 import { readPids, writePids } from '../src/process/pids.ts';
 import { readProcessStartToken } from '../src/process/identity.ts';
 import { applyProduction } from '../src/config/production.ts';
-import { buildProjectEnv, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint } from '../src/setup/index.ts';
+import { buildProjectEnv, forgetVolumeSetupReceipts, isPlainSetupStep, pruneSetupReceipts, runSetupStep, setupFingerprint, setupModeKey } from '../src/setup/index.ts';
 
 let dir: string;
 let oldCwd: string;
@@ -57,6 +57,91 @@ describe('setup', () => {
     assert.equal(isPlainSetupStep({ run: 'a' }), true);
     assert.equal(isPlainSetupStep({ run: 'a', ifMissing: 'x' }), false);
     assert.equal(isPlainSetupStep({ run: 'a', always: true }), false);
+  });
+
+  it('keys receipts by volume set only when the project has managed volumes', async () => {
+    const plain = await config('services: {api: {command: echo}}');
+    assert.equal(setupModeKey({ ...plain, volumeSet: 'feature' }, 'local', false), 'local:dev', 'no volumes: a set changes nothing');
+    const withVolumes = await config(`setup: echo migrate >> steps
+services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
+    assert.equal(setupModeKey(withVolumes, 'local', false), 'local:dev');
+    assert.equal(setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'docker', true), 'docker:prod@feature');
+    // A migration that ran against one set's database runs again for an empty one.
+    await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
+    await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
+    assert.deepEqual(await lines(), ['migrate', 'migrate']);
+    // Pruning one set's receipts leaves the others alone.
+    await pruneSetupReceipts({ ...withVolumes, setup: [] }, 'local:dev');
+    const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+    assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
+  });
+
+  // REVIEW: Top-level env is also each service's env; do not resolve a
+  // nonexistent top-level setup's self-less view before using the service view.
+  it('allows shared self references when no project setup reads them, or setup is skipped', async () => {
+    const text = `env: { SERVICE_LABEL: '\${self.name}' }
+services:
+  app:
+    command: sleep 300
+    healthcheck: { type: none }
+    setup: echo "$SERVICE_LABEL" >> steps
+`;
+    await config(text);
+    assert.equal(await commandSetup(parseArgs([], 'setup')), 0);
+    assert.deepEqual(await lines(), ['app']);
+    try {
+      assert.equal(await commandUp(parseArgs(['-d'], 'up')), 0);
+      assert.deepEqual(await lines(), ['app'], 'setup receipt is reused');
+    } finally { await commandDown(parseArgs([], 'down')); }
+    await config(`setup: echo must-not-run >> steps\n${text}`);
+    try {
+      assert.equal(await commandUp(parseArgs(['-d', '--no-setup'], 'up')), 0);
+      assert.deepEqual(await lines(), ['app']);
+    } finally { await commandDown(parseArgs([], 'down')); }
+    await assert.rejects(commandSetup(parseArgs([], 'setup')), /"self" only works in a service's own/);
+  });
+
+  it('gives the setup steps of a container service its env as seen from this machine', async () => {
+    await config(`services:
+  db:
+    image: postgres
+    port: 5432
+  app:
+    image: example/app
+    port: 3000
+    env:
+      DB: \${db.address}
+      SELF: \${self.address}
+    setup: 'echo "$DB $SELF" >> steps'
+`);
+    assert.equal(await commandSetup(parseArgs(['docker', 'app'], 'setup')), 0);
+    assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
+  });
+
+  // REVIEW: Both run modes and both production settings may share a volume;
+  // preserve other volume sets and the separate prod scope of a named project.
+  it('forgets every receipt using the recreated volume scope and set', async () => {
+    const cfg = await config(`setup: echo migrate >> steps
+services: {db: {image: redis, volumes: ['@data:/data']}}`);
+    const modes = ['local:dev', 'docker:dev', 'local:prod', 'docker:prod', 'local:dev@other', 'local:prod@other'];
+    for (const named of [false, true]) {
+      for (const prod of [false, true]) {
+        await fs.rm(path.join(dir, '.portler/setup.json'), { force: true });
+        const scoped = { ...cfg, ...(named ? { name: 'named' } : {}), production: prod };
+        for (const mode of modes) await runSetupStep(scoped, null, {}, mode);
+        assert.equal(await forgetVolumeSetupReceipts(scoped), true);
+        assert.equal(await forgetVolumeSetupReceipts(scoped), false, 'nothing left to forget');
+        const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
+        const preserved = modes.filter((mode) => mode.includes('@other') || (named && mode.endsWith(prod ? ':dev' : ':prod')));
+        assert.deepEqual(Object.keys(state.steps).sort(), preserved.map((mode) => `${mode}:project`).sort());
+        await runSetupStep(scoped, null, {}, setupModeKey(scoped, 'local', prod));
+        const after = (await lines()).length;
+        await runSetupStep(scoped, null, {}, setupModeKey(scoped, 'local', prod));
+        assert.equal((await lines()).length, after, 'the rerun records a new receipt');
+      }
+    }
   });
 
   it('runs once automatically, reruns changed/forced steps, and separates modes', async () => {
@@ -1179,17 +1264,51 @@ services: {app: {command: echo}}
     assert.equal((await lines()).length, 4, 'content cannot pass for the next file\'s entry either');
   });
 
-  it('a watched path that exists but cannot be read is an error, not absence', async () => {
+  it('a watched folder counts every file under it', async () => {
+    const cfg = await config(`setup: [{run: "echo migrate >> steps", watch: migrations}]
+services: {app: {command: echo}}
+`);
+    const run = () => runSetupStep(cfg, null, {}, 'local:dev');
+    await run();
+    assert.deepEqual(await lines(), ['migrate'], 'the folder is absent: the step runs once');
+    await fs.mkdir(path.join(dir, 'migrations', 'nested'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'migrations', '001.sql'), 'create table a;');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate'], 'the folder appeared');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate'], 'nothing changed');
+    await fs.writeFile(path.join(dir, 'migrations', 'nested', '002.sql'), 'create table b;');
+    await run();
+    assert.deepEqual(await lines(), ['migrate', 'migrate', 'migrate'], 'a file was added deeper down');
+    await fs.writeFile(path.join(dir, 'migrations', '001.sql'), 'create table a2;');
+    await run();
+    assert.equal((await lines()).length, 4, 'a file changed');
+    await fs.rename(path.join(dir, 'migrations', '001.sql'), path.join(dir, 'migrations', '003.sql'));
+    await run();
+    assert.equal((await lines()).length, 5, 'a file was renamed');
+    // A link loop inside the folder is recorded by its target, not followed.
+    await fs.symlink('..', path.join(dir, 'migrations', 'nested', 'loop'));
+    await run();
+    assert.equal((await lines()).length, 6);
+    await run();
+    assert.equal((await lines()).length, 6);
+  });
+
+  it('a watched path that exists but cannot be read is an error, not absence', { skip: process.getuid?.() === 0 }, async () => {
     const cfg = await config(`setup: [{run: "echo install >> steps", watch: [lock]}]
 services: {app: {command: echo}}
 `);
     const run = () => runSetupStep(cfg, null, {}, 'local:dev');
     await run();
     assert.deepEqual(await lines(), ['install'], 'the file is absent: the step runs once');
-    // A directory cannot be read as a file on any platform (EISDIR), like an unreadable file.
-    await fs.mkdir(path.join(dir, 'lock'));
-    await assert.rejects(run(), /watch file "lock" cannot be read/);
-    assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+    await fs.writeFile(path.join(dir, 'lock'), 'x');
+    await fs.chmod(path.join(dir, 'lock'), 0o000);
+    try {
+      await assert.rejects(run(), /watch path "lock" cannot be read/);
+      assert.deepEqual(await lines(), ['install'], 'neither skipped as if absent nor run');
+    } finally {
+      await fs.chmod(path.join(dir, 'lock'), 0o644);
+    }
   });
 
   it('a watch step reads its files when it is reached and records them as they are after it succeeds', async () => {

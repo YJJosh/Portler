@@ -1,9 +1,10 @@
 import path from 'node:path';
-import { resolveEnvValue } from '../env/index.ts';
+import { loadBaseEnv } from '../config/index.ts';
+import { buildGeneratedEnv, exportEnvReader, resolveEnvValue, serviceViewer } from '../env/index.ts';
 import { runStreaming } from './exec.ts';
-import type { Assignments, PortlerConfig, ServiceConfig } from '../types/index.ts';
+import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../types/index.ts';
 
-function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignments: Assignments): string[] | undefined {
+function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignments: Assignments, baseEnv: EnvMap): string[] | undefined {
   const docker = service.docker;
   const build = docker?.build;
   if (!docker || !build) return undefined;
@@ -18,8 +19,12 @@ function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignme
   }
   if (build.target) args.push('--target', build.target);
 
+  // Build args resolve as the image will run: in the cluster.
+  // REVIEW: Use the same effective export env as runtime env resolution.
+  const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name,
+    exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments) };
   for (const [key, value] of Object.entries(build.args)) {
-    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments)}`);
+    args.push('--build-arg', `${key}=${resolveEnvValue(value, assignments, resolveOptions)}`);
   }
 
   args.push(path.resolve(config.projectDir, build.context));
@@ -40,10 +45,11 @@ export async function buildServiceImages(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const builtImages: string[] = [];
+  const baseEnv = selectedNames.some((name) => config.services[name]?.docker?.build) ? await loadBaseEnv(config) : {};
 
   for (const serviceName of selectedNames) {
     const service = config.services[serviceName]!;
-    const args = dockerBuildArgs(config, service, assignments);
+    const args = dockerBuildArgs(config, service, assignments, baseEnv);
     if (!args) continue;
 
     process.stdout.write(`[portler] building image ${service.docker!.image} for ${serviceName}...\n`);

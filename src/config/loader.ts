@@ -7,7 +7,10 @@ import { parseYaml } from '../parse/yaml.ts';
 import { isPortTransport, PORT_TRANSPORTS, usesTcp } from '../ports/transport.ts';
 import { pathExists } from '../util/fs.ts';
 import { didYouMean } from '../util/suggest.ts';
+import { REFERENCE_PROPERTIES } from '../env/resolve.ts';
 import { findDependencyCycle, normalizeDependsOn } from './dependencies.ts';
+import { normalizeEnvSpecs } from './env-spec.ts';
+import { applyServicePreset } from './presets.ts';
 import { normalizeDockerModeConfig, normalizeTopLevelDockerConfig } from './docker.ts';
 import { normalizeHealthcheck } from './healthcheck.ts';
 import { normalizeK8sConfig } from './k8s.ts';
@@ -24,7 +27,7 @@ import {
   optionalPort,
   optionalString,
 } from './scalars.ts';
-import type { EnvMap, PortlerConfig, PortRange, PortTransport, ServiceConfig, UnknownMap } from '../types/index.ts';
+import type { EnvMap, PortlerConfig, PortRange, PortTransport, ServiceConfig, TaskConfig, UnknownMap } from '../types/index.ts';
 
 function normalizePortRange(root: UnknownMap): PortRange {
   const rawRange = root.port_range;
@@ -116,6 +119,53 @@ function normalizeTransport(value: unknown, serviceName: string, port: number | 
   return value;
 }
 
+const EXPORT_NAME = /^[a-z][a-z0-9_]*$/;
+
+/** `exports:` maps a name to a template; others read it as `${service.name}`. */
+function normalizeExports(value: unknown, serviceName: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  const field = `services.${serviceName}.exports`;
+  if (!isObject(value)) throw new Error(`${field} must be a mapping of name: template`);
+  const output = Object.create(null) as Record<string, string>;
+  for (const [name, template] of Object.entries(value)) {
+    if (!EXPORT_NAME.test(name)) throw new Error(`${field}.${name}: export names use lowercase letters, digits and "_", starting with a letter`);
+    if (REFERENCE_PROPERTIES.has(name)) throw new Error(`${field}.${name} would hide the built-in "${name}" property; pick another name`);
+    if (typeof template !== 'string' && typeof template !== 'number') throw new Error(`${field}.${name} must be a string template`);
+    output[name] = String(template);
+  }
+  return output;
+}
+
+const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,62}$/;
+const TASK_KEYS = ['run', 'service', 'description'];
+
+/** `tasks:` maps a name to a command, or to `{ run, service, description }`, for `portler run`. */
+function normalizeTasks(value: unknown, services: Record<string, ServiceConfig>): Record<string, TaskConfig> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isObject(value)) throw new Error('tasks must be a mapping of name: command');
+  const output = Object.create(null) as Record<string, TaskConfig>;
+  for (const [name, raw] of Object.entries(value)) {
+    const field = `tasks.${name}`;
+    if (!TASK_NAME.test(name)) throw new Error(`${field}: task names use letters, digits, "_", ":", "." or "-", starting with a letter or digit`);
+    if (name === 'docker' || name === 'k8s') throw new Error(`${field}: "${name}" is reserved (it selects a run mode in "portler run ${name} <name>")`);
+    if (services[name]) throw new Error(`${field} has the same name as a service; "portler run ${name}" must name one or the other`);
+    const spec = typeof raw === 'string' ? { run: raw } : raw;
+    if (!isObject(spec)) throw new Error(`${field} must be a command or a {run, service, description} mapping`);
+    for (const key of Object.keys(spec)) {
+      if (!TASK_KEYS.includes(key)) throw new Error(`unknown key "${field}.${key}"; allowed keys: ${TASK_KEYS.join(', ')}`);
+    }
+    const run = optionalString(spec.run, `${field}.run`);
+    if (run === undefined || run.trim() === '') throw new Error(`${field}.run must be a shell command`);
+    const service = optionalString(spec.service, `${field}.service`);
+    if (service !== undefined && !services[service]) {
+      throw new Error(`${field}.service names unknown service "${service}"${didYouMean(service, Object.keys(services))}`);
+    }
+    const description = optionalString(spec.description, `${field}.description`);
+    output[name] = { run, ...(service === undefined ? {} : { service }), ...(description === undefined ? {} : { description }) };
+  }
+  return output;
+}
+
 export async function findConfigFile(projectDir: string, explicitFile?: string): Promise<string> {
   if (explicitFile) {
     const filePath = path.resolve(projectDir, explicitFile);
@@ -174,7 +224,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     setup: normalizeSetup(root.setup, 'setup'),
     prod: normalizeProduction(root.prod, 'prod', false),
     useEnv: normalizeEnvFiles(root.use_env ?? root.env_file),
-    env: normalizeEnvObject(root.env, 'env'),
+    env: normalizeEnvSpecs(normalizeEnvObject(root.env, 'env'), 'env'),
     host,
     urlHost,
     protocol,
@@ -194,7 +244,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
 
   const serviceByEnvPrefix = new Map<string, string>();
 
-  for (const [serviceName, rawService] of Object.entries(servicesRoot)) {
+  for (const [serviceName, writtenService] of Object.entries(servicesRoot)) {
     validateServiceName(serviceName);
     const envPrefix = generatedEnvPrefix(serviceName);
     const collidingService = serviceByEnvPrefix.get(envPrefix);
@@ -205,7 +255,12 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     }
     serviceByEnvPrefix.set(envPrefix, serviceName);
 
-    if (!isObject(rawService)) throw new Error(`services.${serviceName} must be an object`);
+    if (!isObject(writtenService)) throw new Error(`services.${serviceName} must be an object`);
+    if (serviceName === 'self' || serviceName === 'env') {
+      const meaning = serviceName === 'self' ? '${self.port} names the service itself' : '${env.KEY} reads a service\'s own env in its exports';
+      throw new Error(`service name "${serviceName}" is reserved (${meaning}); rename the service`);
+    }
+    const rawService = await applyServicePreset(writtenService, serviceName, projectDir);
     if (serviceName === 'docker') {
       throw new Error('service name "docker" is reserved (it selects Docker run mode in "portler up docker"); rename the service');
     }
@@ -220,7 +275,11 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     const transport = normalizeTransport(rawService.transport, serviceName, port);
     const command = optionalString(rawService.command, `services.${serviceName}.command`);
     const cwd = optionalString(rawService.cwd, `services.${serviceName}.cwd`) ?? '.';
-    const serviceEnv = normalizeEnvObject(rawService.env ?? rawService.environment, `services.${serviceName}.env/environment`);
+    const serviceEnv = normalizeEnvSpecs(
+      normalizeEnvObject(rawService.env ?? rawService.environment, `services.${serviceName}.env/environment`),
+      `services.${serviceName}.env`,
+    );
+    const exports = normalizeExports(rawService.exports, serviceName);
 
     const topLevelDocker = normalizeTopLevelDockerConfig(rawService, serviceName, projectDir);
     const dockerModeOverride = normalizeDockerModeConfig(rawService, serviceName, projectDir, topLevelDocker);
@@ -248,6 +307,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
       docker: topLevelDocker,
       dockerModeOverride,
       k8s: normalizeK8sConfig(rawService, serviceName),
+      ...(exports === undefined ? {} : { exports }),
     };
 
     validateHealthcheckShape(service);
@@ -283,6 +343,8 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
   }
 
   config.proxy = normalizeProxyConfig(root, config.services);
+  const tasks = normalizeTasks(root.tasks, config.services);
+  if (tasks !== undefined) config.tasks = tasks;
 
   config.volumes = collectDeclaredVolumes(config.services);
 
@@ -294,7 +356,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
  * source archive that never contains the gitignored env files; the platform
  * injects that env instead, so missing files are skipped there.
  */
-export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing?: boolean } = {}): Promise<EnvMap> {
+export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing?: boolean; quiet?: boolean } = {}): Promise<EnvMap> {
   const env: EnvMap = {};
 
   for (const envFile of config.useEnv) {
@@ -302,7 +364,7 @@ export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing
 
     if (!(await pathExists(filePath))) {
       if (options.allowMissing) {
-        process.stderr.write(`[portler] env file "${envFile}" not found; skipping it\n`);
+        if (!options.quiet) process.stderr.write(`[portler] env file "${envFile}" not found; skipping it\n`);
         continue;
       }
       throw new Error(

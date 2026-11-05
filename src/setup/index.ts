@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { assertServiceCwd, resolveServiceCwd } from '../config/index.ts';
-import { requiredEnvKeys } from '../env/index.ts';
-import { resolveEnvMap } from '../env/resolve.ts';
+import { composeProjectEnv } from '../env/index.ts';
 import { runShell } from '../process/shell.ts';
 import { portlerDir } from '../state/index.ts';
 import { pathExists } from '../util/fs.ts';
@@ -36,6 +35,17 @@ function isSetupState(value: unknown): value is SetupState {
 }
 
 /**
+ * The run a receipt belongs to: run mode, dev or prod, and the volume set when the
+ * project has managed volumes. A step such as a migration that ran against one volume
+ * set's database has not run against another's, so switching sets runs the steps
+ * again for that set (once); a project without managed volumes is not affected.
+ */
+export function setupModeKey(config: PortlerConfig, mode: string, prod?: boolean): string {
+  const set = config.volumeSet && config.volumes.length > 0 ? `@${config.volumeSet}` : '';
+  return `${mode}:${prod ? 'prod' : 'dev'}${set}`;
+}
+
+/**
  * What a plain step's receipt stands for: this command, in this cwd, in this
  * mode, as entry number `occurrence` of the `total` entries of its list, of
  * any kind, that run the same command. Carrying the total means adding or
@@ -48,30 +58,61 @@ export function setupFingerprint(command: string, cwd: string, mode: string, occ
 }
 
 /**
- * The content of a plain step's `watch` files, folded into its receipt: the
- * step runs again when any of them changes, appears or disappears. Paths are
- * relative to the step's cwd. A missing file is a state of its own; one that
- * exists but cannot be read is an error. Each file contributes one record, its
- * name and the digest of its content (or null when it is absent), so no content
- * can pass for absence or for another file's entry.
+ * The digest of one watched path: a file's content, or for a folder every file
+ * under it, by relative path and content, in a fixed order. A symlink inside a
+ * folder counts by its target path and is not followed, so a link loop cannot
+ * hang the walk. Null when nothing exists at the path.
+ */
+function pathDigest(filePath: string, label: string): string | null {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(filePath).isDirectory();
+  } catch (error) {
+    // Only absence is a state of its own. A path that exists but cannot be read (EACCES)
+    // must not pass for a missing one and skip the step.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw new Error(`watch path "${label}" cannot be read: ${(error as Error).message}`);
+  }
+  try {
+    return isDirectory ? folderDigest(filePath) : createHash('sha256').update(readFileSync(filePath)).digest('hex');
+  } catch (error) {
+    throw new Error(`watch path "${label}" cannot be read: ${(error as Error).message}`);
+  }
+}
+
+function folderDigest(root: string): string {
+  const hash = createHash('sha256');
+  const walk = (dir: string, relative: string): void => {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const name = relative === '' ? entry.name : `${relative}/${entry.name}`;
+      if (entry.isSymbolicLink()) hash.update(JSON.stringify(['link', name, readlinkSync(full)]));
+      else if (entry.isDirectory()) {
+        hash.update(JSON.stringify(['dir', name]));
+        walk(full, name);
+      } else if (entry.isFile()) {
+        hash.update(JSON.stringify(['file', name, createHash('sha256').update(readFileSync(full)).digest('hex')]));
+      }
+    }
+  };
+  walk(root, '');
+  return `dir:${hash.digest('hex')}`;
+}
+
+/**
+ * The content of a plain step's `watch` paths, folded into its receipt: the
+ * step runs again when any of them changes, appears or disappears. A path may
+ * be a file or a folder (every file under it counts), relative to the step's
+ * cwd. A missing path is a state of its own; one that exists but cannot be
+ * read is an error. Each path contributes one record, its name and its digest
+ * (or null when it is absent), so no content can pass for absence or for
+ * another path's entry.
  */
 function watchDigest(step: SetupStep, cwd: string): string | undefined {
   if (!step.watch) return undefined;
-  const records = step.watch.map((file) => {
-    let content: string | null;
-    try {
-      content = createHash('sha256').update(readFileSync(path.resolve(cwd, file))).digest('hex');
-    } catch (error) {
-      // Only absence is a state of its own. A file that exists but cannot be read
-      // (EACCES, a directory) must not pass for a missing one and skip the step.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        throw new Error(`watch file "${file}" cannot be read: ${(error as Error).message}`);
-      }
-      content = null;
-    }
-    return [file, content];
-  });
+  const records = step.watch.map((file) => [file, pathDigest(path.resolve(cwd, file), file)]);
   return createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 
@@ -149,17 +190,39 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
 }
 
 /**
- * Environment for top-level setup steps: the process env, base `.env` files,
- * then root config env. In production the deployment wins instead: root config
- * env, base `.env` files, then the process env, and a key the deployment
+ * Drops receipts for the active volume scope and set, so all their steps run again.
+ * `up` calls it when a managed volume is about to be created empty: a migration that
+ * ran against the volume that was there before has not run against the new one.
+ * Writes only when something was dropped, and returns whether it did. Caller holds
+ * the lifecycle lock.
+ */
+export async function forgetVolumeSetupReceipts(config: PortlerConfig): Promise<boolean> {
+  // REVIEW: Without name:, dev and prod mount the same volumes. Recreating
+  // one must invalidate both modes, including when this up uses --no-setup.
+  // A named project's production volumes are separate from its dev volumes.
+  const productions = config.name ? [config.production === true] : [false, true];
+  const modes = productions.flatMap((prod) => (['local', 'docker'] as const).map((mode) => setupModeKey(config, mode, prod)));
+  const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
+  const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
+  if (!previous || previous.project !== config.projectDir) return false;
+  let changed = false;
+  for (const key of Object.keys(previous.steps)) {
+    if (!modes.some((mode) => key.startsWith(`${mode}:`))) continue;
+    delete previous.steps[key];
+    changed = true;
+  }
+  if (changed) await writeJsonFile(filePath, previous);
+  return changed;
+}
+
+/**
+ * Environment for top-level setup steps: `default:` entries, the process env, base
+ * `.env` files, then root config env. In production the deployment wins instead: root
+ * config env, base `.env` files, then the process env, and a key the deployment
  * supplies is not resolved from config at all (see buildServiceEnv).
  */
-export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments): EnvMap {
-  if (config.production) {
-    const overridden = new Set([...Object.keys(baseEnv), ...Object.keys(process.env), ...requiredEnvKeys(config)]);
-    return { ...resolveEnvMap(config.env, assignments, overridden), ...baseEnv, ...process.env } as EnvMap;
-  }
-  return { ...process.env, ...baseEnv, ...resolveEnvMap(config.env, assignments) } as EnvMap;
+export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments, generatedEnv: EnvMap = {}): EnvMap {
+  return composeProjectEnv(config, baseEnv, assignments, generatedEnv).env;
 }
 
 /**

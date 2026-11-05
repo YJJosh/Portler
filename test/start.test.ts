@@ -85,6 +85,39 @@ services:
     delete api.env.BROKEN;
   });
 
+  // REVIEW: start is deployment-first even without --prod; exports must not
+  // re-read the exporting service using up's development precedence.
+  it('resolves exports from the same deployment-first env that start hands the service', async () => {
+    const raw = await config(`services:
+  api:
+    command: echo
+    port: 4000
+    port_env: PORT
+    env:
+      CREDENTIAL: { value: config-dev, required: prod }
+      EXPORTED: \${api.credential}
+      LISTEN_PORT: \${api.listen_port}
+    exports:
+      credential: \${env.CREDENTIAL}
+      listen_port: \${env.PORT}
+    prod:
+      env: { CREDENTIAL: config-prod }
+`);
+    for (const prod of [false, true]) {
+      const cfg = applyProduction(raw, prod);
+      const api = cfg.services.api!;
+      const platform = await buildStartEnv(cfg, api, { CREDENTIAL: 'file' }, { CREDENTIAL: 'platform', PORT: '5123' });
+      assert.equal(platform.EXPORTED, platform.CREDENTIAL);
+      assert.equal(platform.EXPORTED, 'platform');
+      assert.equal(platform.LISTEN_PORT, '5123');
+      const file = await buildStartEnv(cfg, api, { CREDENTIAL: 'file' }, {});
+      assert.equal(file.EXPORTED, file.CREDENTIAL);
+      assert.equal(file.EXPORTED, 'file');
+    }
+    const fallback = await buildStartEnv(raw, raw.services.api!, {}, {});
+    assert.equal(fallback.EXPORTED, 'config-dev', 'without --prod, required: prod does not discard the config fallback');
+  });
+
   it('treats toString and constructor as ordinary variable names', async () => {
     // Object.prototype members are valid variable names. A plain `in` or index lookup on the
     // platform or file map found the inherited member and silently dropped the config value.
@@ -266,6 +299,26 @@ services:
     const ok = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', 'api', '--prod', '--drain-ms', '0'], { cwd: cfg.projectDir, env: { ...env, PORT: '4567' }, encoding: 'utf8' });
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
+  });
+
+  // REVIEW: One diagnostic must include platform PORT and every other missing key.
+  it('aggregates start port requirements with production and required:true keys', async () => {
+    const cfg = await config(`services:
+  api:
+    command: echo started > started
+    port_env: PORT
+    prod: { require: [PORT, REVIEW_DEPLOY_TOKEN] }
+    env: { REVIEW_REQUIRED: { required: true } }
+`);
+    const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
+    const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
+    delete env.PORT;
+    delete env.REVIEW_DEPLOY_TOKEN;
+    delete env.REVIEW_REQUIRED;
+    const refused = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'start', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
+    assert.equal(refused.status, 1);
+    for (const key of ['PORT', 'REVIEW_DEPLOY_TOKEN', 'REVIEW_REQUIRED']) assert.ok(refused.stderr.includes(key), refused.stderr);
+    await assert.rejects(fs.access(path.join(cfg.projectDir, 'started')));
   });
 
   it('returns the shell exit code and runs in the requested cwd', async () => {

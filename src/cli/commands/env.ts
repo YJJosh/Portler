@@ -3,7 +3,7 @@ import path from 'node:path';
 import { applyProduction, productionServices } from '../../config/production.ts';
 import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertRequiredEnv, blankRequiredKeys, buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, deploymentEnv, maskSecrets, requiredEnvKeys } from '../../env/index.ts';
+import { buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, envRequirementProblems, maskSecrets } from '../../env/index.ts';
 import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
 import { formatDotEnv } from '../../parse/dotenv.ts';
 import { allocateAssignments } from '../../ports/index.ts';
@@ -143,6 +143,11 @@ async function deployedInCluster(config: PortlerConfig, serviceName: string): Pr
   }
 }
 
+/** Hide the keys in `secrets`, leaving every other value as it is. */
+function maskConfigSecrets(env: EnvMap, secrets: ReadonlyMap<string, boolean>): EnvMap {
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, secrets.get(key) && value !== '' ? '***' : value]));
+}
+
 export async function commandEnv(args: ParsedArgs): Promise<number> {
   const { mode: requestedMode, requested } = parseRunMode(args.positionals);
   const modeExplicit = requested.length < args.positionals.length;
@@ -180,9 +185,6 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     const prod = args.prod === true || recordedProd;
     if (mode === 'k8s' && prod) {
       throw new Error(`--prod does not apply to k8s mode${modeExplicit ? '' : `, and ${serviceName} was started with "portler up k8s"`}`);
-    }
-    if (args.reveal && !prod) {
-      throw new Error('--reveal applies to "env --prod" (or a service started with --prod): the development view prints config values, not the deployment\'s secrets');
     }
     if (recordedMode) {
       const started = upCommand(recordedMode, recordedProd);
@@ -223,25 +225,25 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     // manually deleted file comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);
 
+    // A missing required value is reported, not fatal: this view is how one finds out.
+    const baseEnv = await loadBaseEnv(config, { allowMissing: true, quiet: !prod });
+    for (const problem of envRequirementProblems(config, service ? [service.name] : [], baseEnv, { project: !service })) {
+      process.stderr.write(`[portler] ${problem}\n`);
+    }
+    const secrets = new Map<string, boolean>();
     if (!prod) {
-      process.stdout.write(formatDotEnv(buildPrintableEnv(config, service, generatedEnv, assignments)));
+      // The development view prints config values, so only what the config marks secret
+      // (`secret: true`, or a value read from one through an export) is hidden, and a
+      // secret-looking value it shows from the shell or a use_env file.
+      const printable = buildPrintableEnv(config, service, generatedEnv, assignments, baseEnv, secrets);
+      const marked = new Map([...secrets].filter(([, secret]) => secret));
+      process.stdout.write(formatDotEnv(args.reveal ? printable : maskConfigSecrets(printable, marked)));
       return 0;
     }
     // The deployment view: what `up --prod` hands the service, with the deployment's values
     // (process env, then the use_env file, then config) and only the keys it forwards.
-    const baseEnv = await loadBaseEnv(config, { allowMissing: true });
-    const effective = buildEffectiveEnv(config, service, baseEnv, generatedEnv, assignments);
-    try {
-      assertRequiredEnv(
-        service ? `service ${service.name}` : 'the project',
-        service ? requiredEnvKeys(config, service) : requiredEnvKeys(config),
-        deploymentEnv(baseEnv),
-        blankRequiredKeys(config, service ?? undefined),
-      );
-    } catch (error) {
-      process.stderr.write(`[portler] ${(error as Error).message}\n`);
-    }
-    process.stdout.write(formatDotEnv(maskSecrets(effective, args.reveal)));
+    const effective = buildEffectiveEnv(config, service, baseEnv, generatedEnv, assignments, secrets);
+    process.stdout.write(formatDotEnv(maskSecrets(effective, args.reveal, secrets)));
     return 0;
   });
 }

@@ -16,6 +16,8 @@
   },
   "files": [
     "dist",
+    "presets",
+    "schema",
     "README.md",
     "LICENSE"
   ],

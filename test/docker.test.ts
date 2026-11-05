@@ -185,7 +185,10 @@ describe('dockerShellCommand', () => {
       parts[3],
       'docker run --rm --name db-container ' +
         `--label portler.project=${PROJECT_DIR} --label portler.service=api ` +
-        '--network portler-net --network-alias api -p 127.0.0.1:52001:5432 postgres:16',
+        '--network portler-net --network-alias api ' +
+        // REVIEW: Linux needs the host-gateway mapping; Desktop supplies it itself.
+        (process.platform === 'linux' ? '--add-host host.docker.internal:host-gateway ' : '') +
+        '-p 127.0.0.1:52001:5432 postgres:16',
     );
   });
 

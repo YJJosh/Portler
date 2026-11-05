@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { projectVolumeName } from '../src/config/naming.ts';
-import { forkVolume, removeVolume } from '../src/volumes/manager.ts';
+import { forkVolume, listProjectVolumes, missingManagedVolumes, removeVolume } from '../src/volumes/manager.ts';
 import type { PortlerConfig } from '../src/types/index.ts';
 
 let tempDir: string;
@@ -48,6 +48,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_DOCKER_CALLS, JSON.stringify(args) + '\\n');
 if (args[0] === 'version') { console.log('25.0.0'); process.exit(0); }
 if (args[0] === 'ps') {
+  if (process.env.MOCK_DOCKER_MODE === 'ps-error') { console.error('Docker query failed'); process.exit(1); }
   if (process.env.MOCK_DOCKER_MODE === 'owned-in-use') console.log('api-container');
   process.exit(0);
 }
@@ -64,7 +65,7 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
     console.log(target ? 'null' : JSON.stringify({'portler.project': process.env.MOCK_VOLUME_ROOT}));
     process.exit(0);
   }
-  if (process.env.MOCK_DOCKER_MODE === 'owned' || process.env.MOCK_DOCKER_MODE === 'owned-in-use') {
+  if (['owned', 'owned-in-use', 'ps-error'].includes(process.env.MOCK_DOCKER_MODE)) {
     console.log(JSON.stringify({'portler.project': process.env.MOCK_VOLUME_ROOT}));
     process.exit(0);
   }
@@ -82,6 +83,11 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   }
   // Existing but unlabelled: it is foreign, however convincing its name is.
   console.log('null');
+  process.exit(0);
+}
+if (args[0] === 'volume' && args[1] === 'ls') {
+  if (process.env.MOCK_DOCKER_MODE === 'ls-error') process.exit(1);
+  for (const name of (process.env.MOCK_VOLUMES ?? '').split(',').filter(Boolean)) console.log(name);
   process.exit(0);
 }
 if (args[0] === 'volume' && args[1] === 'rm') process.exit(0);
@@ -102,6 +108,7 @@ afterEach(async () => {
   process.env.PATH = oldPath;
   delete process.env.MOCK_DOCKER_CALLS;
   delete process.env.MOCK_VOLUME_ROOT;
+  delete process.env.MOCK_VOLUMES;
   if (oldMode === undefined) delete process.env.MOCK_DOCKER_MODE;
   else process.env.MOCK_DOCKER_MODE = oldMode;
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -112,7 +119,45 @@ async function calls(): Promise<string[][]> {
   return text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
 }
 
+describe('volume lookups', () => {
+  function withService(volumeSet?: string): PortlerConfig {
+    const config = makeConfig();
+    config.volumeSet = volumeSet;
+    config.services = { api: { name: 'api', docker: { volumes: ['@data:/data', './src:/src'] } } } as unknown as PortlerConfig['services'];
+    return config;
+  }
+
+  it('names the managed volumes that do not exist yet in the active set', async () => {
+    process.env.MOCK_VOLUMES = projectVolumeName(volumeRoot, 'data');
+    assert.deepEqual(await missingManagedVolumes(withService(), ['api']), []);
+    assert.deepEqual(await missingManagedVolumes(withService('fresh'), ['api']), ['data']);
+    process.env.MOCK_VOLUMES = '';
+    assert.deepEqual(await missingManagedVolumes(withService(), ['api']), ['data']);
+    assert.deepEqual(await missingManagedVolumes(withService(), []), [], 'no services, no Docker call needed');
+  });
+
+  it('lists volumes even when Docker cannot say who uses them', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ps-error';
+    process.env.MOCK_VOLUMES = projectVolumeName(volumeRoot, 'data');
+    const [volume] = await listProjectVolumes(withService());
+    assert.equal(volume?.name, 'data');
+    assert.deepEqual(volume?.usedBy, []);
+  });
+
+  it('says nothing when Docker cannot be asked', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ls-error';
+    assert.equal(await missingManagedVolumes(withService(), ['api']), undefined);
+  });
+});
+
 describe('managed volume destructive-operation ownership', () => {
+  // REVIEW: Daemon failures must not look like an unused source volume.
+  it('refuses to fork when Docker cannot establish whether the source is in use', async () => {
+    process.env.MOCK_DOCKER_MODE = 'ps-error';
+    await assert.rejects(forkVolume(makeConfig(), 'data', 'branch'), /docker ps.*failed: Docker query failed/);
+    assert.ok(!(await calls()).some((args) => args[0] === 'run' || (args[0] === 'volume' && args[1] === 'create')));
+  });
+
   it('refuses to fork data from an unlabelled/foreign source volume', async () => {
     const config = makeConfig();
     const source = projectVolumeName(volumeRoot, 'data');
@@ -123,6 +168,20 @@ describe('managed volume destructive-operation ownership', () => {
     assert.ok(invoked.some((args) => args[0] === 'volume' && args[1] === 'inspect' && args.at(-1) === source));
     assert.equal(invoked.some((args) => args[0] === 'run'), false, 'foreign data must never be copied');
     assert.equal(invoked.some((args) => args[0] === 'volume' && args[1] === 'create'), false);
+  });
+
+  it('refuses to fork a volume a running container mounts, unless --force', async () => {
+    process.env.MOCK_DOCKER_MODE = 'owned-in-use';
+    const config = makeConfig();
+
+    await assert.rejects(forkVolume(config, 'data', 'branch'), /volume .* is in use by api-container, and a copy of a running database can be broken.*--force/);
+    const refused = await calls();
+    assert.equal(refused.some((args) => args[0] === 'volume' && args[1] === 'create'), false, 'nothing is created');
+    assert.equal(refused.some((args) => args[0] === 'run'), false, 'nothing is copied');
+
+    // With --force the in-use check lets it through; this fake then fails it for another reason.
+    await assert.rejects(forkVolume(config, 'data', 'branch', true), (error: Error) => !/is in use by/.test(error.message));
+    assert.ok((await calls()).some((args) => args[0] === 'volume' && args[1] === 'create'));
   });
 
   it('refuses a foreign target that wins the exists/create race', async () => {

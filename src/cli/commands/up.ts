@@ -1,8 +1,8 @@
 import { applyImageOverrides, assertServiceCwd, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { buildProjectEnv, pruneSetupReceipts, runSetupStep } from '../../setup/index.ts';
+import { buildProjectEnv, forgetVolumeSetupReceipts, pruneSetupReceipts, runSetupStep, setupModeKey } from '../../setup/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
-import { assertProductionRequirements, buildGeneratedEnv, buildServiceEnv, resolveEnvValue } from '../../env/index.ts';
+import { assertEnvRequirements, buildGeneratedEnv, buildServiceEnv, hostResolveOptions, resolveEnvValue, type ResolveOptions } from '../../env/index.ts';
 import type { ServiceEnv } from '../../env/index.ts';
 import { allocateAssignments, releasePorts } from '../../ports/index.ts';
 import { shellQuote } from '../../process/docker.ts';
@@ -23,8 +23,8 @@ import { proxyPidInfoFor, spawnProxy } from '../../proxy/index.ts';
 import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../readiness/index.ts';
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
-import { warnMissingVolumeSetVariants } from '../../volumes/index.ts';
-import type { Assignments, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import { missingManagedVolumes, warnMissingVolumeSetVariants } from '../../volumes/index.ts';
+import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
 import { commandUpK8s } from './up-k8s.ts';
@@ -91,13 +91,13 @@ function validateDockerContainerNames(config: PortlerConfig): void {
  * Resolve every service reference the healthcheck will use, so typos like
  * `backend.urll` fail before any service starts instead of mid-poll.
  */
-function validateHealthcheckReferences(service: ServiceConfig, assignments: Assignments): void {
+function validateHealthcheckReferences(service: ServiceConfig, assignments: Assignments, options: ResolveOptions): void {
   const healthcheck = service.healthcheck;
   if (!healthcheck) return;
 
   try {
-    if (healthcheck.url) resolveEnvValue(healthcheck.url, assignments);
-    if (healthcheck.command) resolveEnvValue(healthcheck.command, assignments);
+    if (healthcheck.url) resolveEnvValue(healthcheck.url, assignments, options);
+    if (healthcheck.command) resolveEnvValue(healthcheck.command, assignments, options);
   } catch (error) {
     throw new Error(`services.${service.name}.healthcheck: ${(error as Error).message}`);
   }
@@ -402,6 +402,8 @@ export async function startPhase(
   }
   // Fires exactly when a set variant is about to be created empty (typo guard).
   await warnMissingVolumeSetVariants(config, selectedNames);
+  // Asked before anything spawns: starting a Docker service creates its volumes.
+  const newVolumes = await missingManagedVolumes(config, selectedNames);
 
   const startedEntries = new Map<string, PidServiceInfo>();
   const children = new Map<string, ReturnType<typeof spawnService>>();
@@ -530,26 +532,49 @@ export async function startPhase(
 
   try {
     options.signal?.throwIfAborted();
-    // prod.require: a deployment that forgot a value fails here, before setup runs or
-    // anything is spawned, naming the key instead of failing somewhere inside the app.
-    if (options.prod) assertProductionRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
+    // prod.require and `required:` entries: a missing value fails here, before setup runs
+    // or anything is spawned, naming every missing key instead of failing inside the app.
+    assertEnvRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
 
     // Resolve every selected service's env (and healthcheck references) up
     // front, so config mistakes like `backend.urll` fail before anything is
-    // spawned instead of after some services have already started.
+    // spawned instead of after some services have already started. A container
+    // service gets a second env as seen from this machine, for its setup steps and
+    // healthcheck command, which run here: `${db.address}` differs between the two.
     const serviceEnvs = new Map<string, ServiceEnv>();
+    const hostEnvs = new Map<string, EnvMap>();
     for (const serviceName of selectedNames) {
       const service = config.services[serviceName]!;
-      serviceEnvs.set(serviceName, buildServiceEnv(config, service, baseEnv, generatedEnv, assignments));
-      validateHealthcheckReferences(service, assignments);
+      const built = buildServiceEnv(config, service, baseEnv, generatedEnv, assignments);
+      serviceEnvs.set(serviceName, built);
+      hostEnvs.set(serviceName, service.docker ? buildServiceEnv(config, service, baseEnv, generatedEnv, assignments, { viewer: 'host' }).env : built.env);
+      validateHealthcheckReferences(service, assignments, hostResolveOptions(config, service, baseEnv, generatedEnv, assignments));
     }
 
-    const projectEnv = buildProjectEnv(config, baseEnv, assignments);
+    // REVIEW: Only resolve the project view when a top-level step will read it.
+    // Shared service env may use self.*, which has no meaning for the project.
+    const projectEnv = options.setup !== false && config.setup?.length
+      ? buildProjectEnv(config, baseEnv, assignments, generatedEnv) : {};
+    // REVIEW: A non-empty template may resolve to empty; check composed envs
+    // before setup or spawning, while retaining the early raw-value preflight.
+    assertEnvRequirements(config, selectedNames, baseEnv, {
+      projectSetup: options.setup !== false,
+      projectEnv,
+      envs: new Map([...serviceEnvs].map(([name, built]) => [name, built.env])),
+    });
 
-    const setupMode = `${mode}:${options.prod ? 'prod' : 'dev'}`;
+    const setupMode = setupModeKey(config, mode, options.prod);
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);
+    // A managed volume about to be created is empty, so a migration's receipt no longer
+    // holds for it, in either run mode that mounts the same volumes. Also done with
+    // --no-setup, which still creates the volume.
+    if (newVolumes?.length) {
+      if (await forgetVolumeSetupReceipts(config)) {
+        process.stdout.write(`[portler] new volume ${newVolumes.join(', ')}: setup steps run again\n`);
+      }
+    }
     if (options.setup !== false) {
       await runSetupStep(config, null, projectEnv, setupMode, options.setup, options.signal);
     }
@@ -627,13 +652,14 @@ export async function startPhase(
         options.signal?.throwIfAborted();
         const service = config.services[serviceName]!;
         const { env: serviceEnv, explicitKeys } = serviceEnvs.get(serviceName)!;
+        const hostEnv = hostEnvs.get(serviceName)!;
         if (options.setup !== false) {
-          await runSetupStep(config, service, serviceEnv, setupMode, options.setup, options.signal);
+          await runSetupStep(config, service, hostEnv, setupMode, options.setup, options.signal);
         }
         options.signal?.throwIfAborted();
         let childExited = false;
         const logFilePath = options.detach ? serviceLogPath(config.projectDir, serviceName) : undefined;
-        const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath);
+        const child = spawnService(config, service, serviceEnv, explicitKeys, assignments[serviceName], assignments, !options.detach, logFilePath, baseEnv);
         child.once('exit', () => {
           childExited = true;
         });
@@ -652,13 +678,14 @@ export async function startPhase(
             waitForServiceReady(
               config,
               service,
-              serviceEnv,
+              hostEnv,
               assignments,
               assignments[serviceName],
               () => childExited,
               service.docker ? DOCKER_TCP_HOLD_MS : 0,
               logFilePath,
               options.signal,
+              hostResolveOptions(config, service, baseEnv, generatedEnv, assignments),
             ),
           );
         }
