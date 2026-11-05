@@ -1,9 +1,12 @@
-# Built-in preset: `use: redis`. Your service's own keys replace these;
+# Built-in preset: `use: redis@8`. Your service's own keys replace these;
 # env and exports merge key by key.
-image: redis:7-alpine
+image: redis:${version}-alpine
 port: 6379
 volumes:
   - '@${self.name}-data:/data'
+versions:
+  "8":
+  "7":
 healthcheck:
   command: docker exec ${self.container} redis-cli ping
 exports:

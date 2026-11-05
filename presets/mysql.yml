@@ -1,10 +1,14 @@
-# Built-in preset: `use: mysql`. Your service's own keys replace these;
-# env and exports merge key by key. The image pins a version line: Portler
-# does not change it, because a data volume only opens with a compatible server.
-image: mysql:8.4
+# Built-in preset: `use: mysql@8.4`. Your service's own keys replace these;
+# env and exports merge key by key. A data volume only opens with a compatible
+# server, so the version is required and Portler never changes it.
+image: mysql:${version}
 port: 3306
 volumes:
   - '@${self.name}-data:/var/lib/mysql'
+versions:
+  "9.7":
+  "8.4":
+  "8.0":
 env:
   MYSQL_ROOT_PASSWORD: { default: mysql, secret: true }
   MYSQL_DATABASE: { default: app }

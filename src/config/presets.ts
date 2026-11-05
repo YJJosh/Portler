@@ -36,15 +36,76 @@ function isPresetPath(use: string): boolean {
   return use.includes('/') || /\.ya?ml$/.test(use);
 }
 
-/** `${self.name}` is the one value a preset needs before the service exists, e.g. in a volume name. */
-function substituteSelfName(value: unknown, serviceName: string): unknown {
-  if (typeof value === 'string') return value.replaceAll('${self.name}', serviceName);
-  if (Array.isArray(value)) return value.map((item) => substituteSelfName(item, serviceName));
-  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substituteSelfName(item, serviceName)]));
+/**
+ * `postgres@16` and `./db.yml@2` name a version. An `@` in the file part of a
+ * path (`./db@2.yml`, `../@scope/db.yml`) does not.
+ */
+function parseUse(value: string): { use: string; version?: string } {
+  const at = value.lastIndexOf('@');
+  if (at <= 0) return { use: value };
+  const suffix = value.slice(at + 1);
+  if (suffix.includes('/') || /\.ya?ml$/.test(suffix)) return { use: value };
+  return { use: value.slice(0, at), version: suffix };
+}
+
+/** `${self.name}` and `${version}` are known before the service exists, e.g. for an image or a volume name. */
+function substitutePresetValues(value: unknown, values: Record<string, string>): unknown {
+  if (typeof value === 'string') {
+    // REVIEW: replacer function, so a version containing "$&" is inserted literally instead of as a replacement pattern.
+    return Object.entries(values).reduce((text, [name, replacement]) => text.replaceAll(`\${${name}}`, () => replacement), value);
+  }
+  if (Array.isArray(value)) return value.map((item) => substitutePresetValues(item, values));
+  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitutePresetValues(item, values)]));
   return value;
 }
 
-async function readPreset(use: string, serviceName: string, projectDir: string): Promise<UnknownMap> {
+// REVIEW: recursive scan mirroring substitutePresetValues, for the no-versions error above.
+function usesVersionPlaceholder(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('${version}');
+  if (Array.isArray(value)) return value.some((item) => usesVersionPlaceholder(item));
+  if (isObject(value)) return Object.entries(value).some(([key, item]) => key.includes('${version}') || usesVersionPlaceholder(item));
+  return false;
+}
+
+/**
+ * A preset with `versions:` never picks one by itself: a default that moves in
+ * a later Portler could stop an existing volume from opening (Postgres), or
+ * upgrade it with no way back (MySQL, Redis). A version's keys replace the preset's.
+ */
+function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; values: Record<string, string> } {
+  const { versions, ...keys } = preset;
+  if (versions === undefined) {
+    if (version !== undefined) throw new Error(`${field}: preset "${use}" has no versions, so "@${version}" means nothing. Use "${use}".`);
+    // REVIEW: without versions there is nothing to substitute, and a literal ${version}
+    // would otherwise leak into the image/env and fail far from its cause.
+    if (usesVersionPlaceholder(keys)) {
+      throw new Error(`${field}: preset "${use}" uses \${version} but lists no versions. Add a "versions:" mapping to the preset, or remove the placeholder.`);
+    }
+    return { keys, values: {} };
+  }
+  if (!isObject(versions) || Object.keys(versions).length === 0) throw new Error(`${field}: preset "${use}" must list its versions as a mapping of version: service keys`);
+  const known = Object.keys(versions).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  if (version === undefined) {
+    throw new Error(
+      `${field}: preset "${use}" needs a version, for example "${use}@${known[0]}". Versions: ${known.join(', ')}. ` +
+        'Portler does not pick one, because a data volume may not open with a different version.',
+    );
+  }
+  if (!Object.hasOwn(versions, version)) {
+    // REVIEW: A service that followed the old advice and kept "postgres@13" next
+    // to its own image and volumes got this same error again, so name the step
+    // that was missing: use: has to stay on a listed version.
+    throw new Error(
+      `${field}: preset "${use}" has no version "${version}". Versions: ${known.join(', ')}. ` +
+        'For another version, keep a listed one here and set image: and volumes: on the service yourself.',
+    );
+  }
+  const override = versions[version] ?? {};
+  if (!isObject(override)) throw new Error(`${field}: version "${version}" of preset "${use}" must be a mapping of service keys`);
+  return { keys: { ...keys, ...override }, values: { version } };
+}
+
+async function readPreset(use: string, version: string | undefined, serviceName: string, projectDir: string): Promise<UnknownMap> {
   const field = `services.${serviceName}.use`;
   let filePath: string;
   if (isPresetPath(use)) {
@@ -68,8 +129,9 @@ async function readPreset(use: string, serviceName: string, projectDir: string):
   }
   const preset = parseYaml(text, path.basename(filePath));
   if (!isObject(preset)) throw new Error(`${field}: preset ${filePath} must be a mapping of service keys`);
-  if (preset.use !== undefined) throw new Error(`${field}: preset ${filePath} sets "use", but a preset cannot use another preset`);
-  return substituteSelfName(preset, serviceName) as UnknownMap;
+  const { keys, values } = applyPresetVersion(preset, use, version, field);
+  if (keys.use !== undefined) throw new Error(`${field}: preset ${filePath} sets "use", but a preset cannot use another preset`);
+  return substitutePresetValues(keys, { ...values, 'self.name': serviceName }) as UnknownMap;
 }
 
 /**
@@ -83,7 +145,8 @@ export async function applyServicePreset(rawService: UnknownMap, serviceName: st
   if (use === undefined || use === null) return rawService;
   if (typeof use !== 'string' || use.trim() === '') throw new Error(`services.${serviceName}.use must be a preset name or a path to a preset file`);
 
-  const preset = await readPreset(use, serviceName, projectDir);
+  const { use: target, version } = parseUse(use);
+  const preset = await readPreset(target, version, serviceName, projectDir);
   const merged: UnknownMap = { ...preset };
   for (const [key, value] of Object.entries(rawService)) {
     if (key !== 'use') merged[key] = value;

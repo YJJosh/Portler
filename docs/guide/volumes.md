@@ -15,7 +15,7 @@ services:
       - '@postgres-data:/var/lib/postgresql/data'
 ```
 
-The built-in [presets](/guide/databases) (`use: postgres`) declare one for you: `@<service>-data`.
+The built-in [presets](/guide/databases) (`use: postgres@18`) declare one for you: `@<service>-data`.
 
 `@postgres-data` becomes the Docker volume `portler-<project>-<hash>-postgres-data`, where `<project>` and `<hash>` come from the project root (under `--prod` with a top-level `name:` it is `portler-<name>--postgres-data` instead, so a release that unpacks into a new folder keeps it; see [Stable identity on a server](/guide/setup-and-production#stable-identity-on-a-server)). Portler creates it with `portler.*` labels before the first run so it can find it again later. Before mounting it, Portler verifies that project label again (including after a concurrent create race); an unlabelled or foreign volume that merely has the expected name is refused rather than exposed to the service.
 

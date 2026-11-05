@@ -47,7 +47,7 @@ Each entry under `services:` accepts the options below. Service names must be 1�
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `use` | string | — | Start from a preset: a built-in name (`postgres`, `mysql`, `redis`) or a path to a preset file. See [use](#use-presets) |
+| `use` | string | — | Start from a preset: a built-in name with its version (`postgres@18`, `mysql@8.4`, `redis@8`) or a path to a preset file. See [use](#use-presets) |
 | `exports` | mapping | — | Named values other services read as `${service.name}`, such as a connection URL. See [exports](#exports) |
 | `setup` | string \| list of commands and steps | — | Host shell commands in service cwd, with resolved service env; steps as at the top level |
 | `prod` | object | — | Production `setup`, `command` replacements, `env` overrides and `require` |
@@ -151,31 +151,32 @@ A key the deployment must supply (`prod.require`, `required: prod`, a blank `pro
 
 ## use (presets) {#use-presets}
 
-`use:` starts a service from a preset: a built-in one by name, or a YAML file of your own by path. A preset holds ordinary service keys, so a new database needs no change to Portler.
+`use:` starts a service from a preset: a built-in one by name and version, or a YAML file of your own by path. A preset holds ordinary service keys, so a new database needs no change to Portler.
 
 ```yaml
 services:
   db:
-    use: postgres                       # built-in
+    use: postgres@18                    # built-in, at a version
     env:
       POSTGRES_DB: shop                 # merges with the preset's env
   search:
     use: ./portler/presets/meili.yml    # a file: relative to the project root
 ```
 
-| Built-in | Image | Port | Exports |
-| --- | --- | --- | --- |
-| `postgres` | `postgres:18-alpine` | 5432 | `database_url` |
-| `mysql` | `mysql:8.4` | 3306 | `database_url` |
-| `redis` | `redis:7-alpine` | 6379 | `redis_url` |
+| Built-in | Versions | Image | Port | Exports |
+| --- | --- | --- | --- | --- |
+| `postgres` | 18, 17, 16, 15, 14 | `postgres:<version>-alpine` | 5432 | `database_url` |
+| `mysql` | 9.7, 8.4, 8.0 | `mysql:<version>` | 3306 | `database_url` |
+| `redis` | 8, 7 | `redis:<version>-alpine` | 6379 | `redis_url` |
 
 Each built-in preset declares a managed volume `@<service>-data`, a readiness command and env entries with development defaults (passwords marked `secret: true`). The files live in [`presets/`](https://github.com/YJJosh/Portler/tree/main/presets).
 
 - The service's own keys replace the preset's, except `env` and `exports`, which merge key by key (as [env layers](#env-entries) do). A list such as `volumes:` replaces the preset's list.
-- A value is a path when it contains `/` or ends in `.yml`/`.yaml`; anything else is a built-in name.
+- Apart from its `@version`, a value is a path when it contains `/` or ends in `.yml`/`.yaml`; anything else is a built-in name.
 - `${self.name}` in a preset becomes the service's name when the file loads, so two services using one preset get separate volumes. Other `${self.*}` references resolve later, like in the service itself.
 - A preset cannot `use` another preset.
-- The image pins a major version, because a data volume only opens with the major that wrote it. Postgres 17 and older keep their data in `/var/lib/postgresql/data`, so set `volumes:` too when you set an older `image:`.
+- A built-in preset needs a version: bare `use: postgres` is an error that lists the choices, and so is a version it doesn't list. Portler never picks one, because a data volume may not open with a different version. For a version that isn't listed, keep a listed one in `use:` and set `image:` and `volumes:` on the service yourself. What changing the version does to existing data depends on the database: see [Versions](/guide/databases#versions).
+- A preset of your own can list `versions:` too, a mapping of version to the service keys that differ. `${version}` in the preset becomes the chosen version when the file loads, and the version's keys replace the preset's. `@` after a file name picks a version (`./db.yml@2`); an `@` inside a file name doesn't (`./db@2.yml`).
 
 ## exports
 
@@ -378,7 +379,7 @@ proxy:
 
 services:
   postgres:
-    use: postgres                 # image, port, volume, healthcheck, exports.database_url
+    use: postgres@18              # image, port, volume, healthcheck, exports.database_url
     env:
       POSTGRES_PASSWORD: { default: app, secret: true }
     k8s:

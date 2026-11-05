@@ -32,8 +32,8 @@ describe('use: presets', () => {
     const presetDir = new URL('../presets/', import.meta.url);
     for (const name of builtInPresetNames()) {
       const preset = parseYaml(await fs.readFile(new URL(`${name}.yml`, presetDir), 'utf8'));
-      assert.equal(typeof preset.image, 'string', `${name} names an image`);
-      assert.match(String(preset.image), /:\d/, `${name} pins a version, so a data volume keeps opening`);
+      assert.match(String(preset.image), /:\$\{version\}/, `${name} takes its image tag from the version`);
+      assert.ok(Object.keys(preset.versions as object).length > 1, `${name} lists its versions, so a data volume keeps opening`);
       assert.ok(preset.exports, `${name} exports a connection value`);
     }
   });
@@ -42,7 +42,7 @@ describe('use: presets', () => {
     const dir = await project({
       'portler.yml': `services:
   db:
-    use: postgres
+    use: postgres@18
     env:
       POSTGRES_DB: shop
       POSTGRES_PASSWORD: s3cret
@@ -82,7 +82,7 @@ describe('use: presets', () => {
   });
 
   it('gives two services that use the same preset their own volumes', async () => {
-    const cfg = await loadConfig(await project({ 'portler.yml': 'services:\n  main: {use: postgres}\n  analytics: {use: postgres}\n' }));
+    const cfg = await loadConfig(await project({ 'portler.yml': 'services:\n  main: {use: postgres@18}\n  analytics: {use: postgres@18}\n' }));
     assert.deepEqual(cfg.volumes.map((volume) => volume.name).sort(), ['analytics-data', 'main-data']);
   });
 
@@ -97,11 +97,75 @@ describe('use: presets', () => {
     assert.deepEqual({ ...cfg.services.cache!.exports }, { cache_url: 'redis://${self.address}' });
   });
 
+  it('uses the data path of the chosen Postgres version', async () => {
+    const cfg = await loadConfig(await project({ 'portler.yml': 'services:\n  old: {use: postgres@16}\n  new: {use: postgres@18}\n' }));
+    assert.equal(cfg.services.old!.docker?.image, 'postgres:16-alpine');
+    assert.deepEqual(cfg.services.old!.docker?.volumes, ['@old-data:/var/lib/postgresql/data']);
+    assert.equal(cfg.services.new!.docker?.image, 'postgres:18-alpine');
+    assert.deepEqual(cfg.services.new!.docker?.volumes, ['@new-data:/var/lib/postgresql']);
+  });
+
+  it('loads every version of every built-in preset', async () => {
+    const presetDir = new URL('../presets/', import.meta.url);
+    for (const name of builtInPresetNames()) {
+      const preset = parseYaml(await fs.readFile(new URL(`${name}.yml`, presetDir), 'utf8'));
+      for (const version of Object.keys(preset.versions as object)) {
+        const cfg = await loadConfig(await project({ 'portler.yml': `services:\n  db:\n    use: ${name}@${version}\n` }));
+        assert.ok(cfg.services.db!.docker?.image.includes(`:${version}`), `${name}@${version}`);
+        assert.ok(!JSON.stringify(cfg.services.db).includes('${version}'), `${name}@${version} replaces every placeholder`);
+      }
+    }
+  });
+
+  it('lets the service replace the keys of a version', async () => {
+    const cfg = await loadConfig(await project({ 'portler.yml': "services:\n  db:\n    use: postgres@16\n    volumes: ['@mine:/pg']\n" }));
+    assert.deepEqual(cfg.services.db!.docker?.volumes, ['@mine:/pg']);
+  });
+
+  it('never picks a version for a preset that lists them', async () => {
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres}}' })), /preset "postgres" needs a version, for example "postgres@18"\. Versions: 18, 17, 16, 15, 14/);
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@99}}' })), /preset "postgres" has no version "99"\. Versions: 18, 17.*keep a listed one here and set image: and volumes:/);
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@__proto__}}' })), /has no version "__proto__"/);
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@}}' })), /has no version ""/);
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgress@16}}' })), /no built-in preset "postgress".*did you mean "postgres"/s);
+  });
+
+  it('gives a preset file of the project versions too', async () => {
+    const files = {
+      'db.yml': 'image: acme/db:${version}\nversions:\n  "2":\n  "1":\n    port: 1111\n',
+      'plain@2.yml': 'image: acme/plain:1\n',
+    };
+    const dir = await project({ ...files, 'portler.yml': 'services:\n  one: {use: ./db.yml@1}\n  plain: {use: ./plain@2.yml}\n' });
+    const cfg = await loadConfig(dir);
+    assert.equal(cfg.services.one!.docker?.image, 'acme/db:1');
+    assert.equal(cfg.services.one!.port, 1111);
+    assert.equal(cfg.services.plain!.docker?.image, 'acme/plain:1', 'an @ in the file name is not a version');
+    await assert.rejects(loadConfig(await project({ ...files, 'portler.yml': 'services: {db: {use: ./plain@2.yml@3}}' })), /has no versions, so "@3" means nothing/);
+    await assert.rejects(loadConfig(await project({ 'v.yml': 'image: x\nversions: [1]\n', 'portler.yml': 'services: {db: {use: ./v.yml@1}}' })), /must list its versions as a mapping/);
+    await assert.rejects(loadConfig(await project({ 'v.yml': 'image: x\nversions:\n  "1": nope\n', 'portler.yml': 'services: {db: {use: ./v.yml@1}}' })), /version "1" of preset .* must be a mapping/);
+  });
+
+  // REVIEW: the three cases below passed silently with a wrong or literal value before the fix.
+  it('rejects a preset that uses ${version} without listing versions', async () => {
+    await assert.rejects(
+      loadConfig(await project({ 'p.yml': 'image: acme/db:${version}\n', 'portler.yml': 'services: {db: {use: ./p.yml}}' })),
+      /uses \$\{version\} but lists no versions/,
+    );
+  });
+
+  it('keeps a flow-style version key as written, and inserts $-patterns literally', async () => {
+    const files = { 'p.yml': 'image: acme/db:${version}\nversions: {8.0: {}, "2$&": {}}\n' };
+    const cfg = await loadConfig(await project({ ...files, 'portler.yml': 'services: {db: {use: ./p.yml@8.0}}' }));
+    assert.equal(cfg.services.db!.docker?.image, 'acme/db:8.0');
+    const odd = await loadConfig(await project({ ...files, 'portler.yml': 'services:\n  db:\n    use: "./p.yml@2$&"\n' }));
+    assert.equal(odd.services.db!.docker?.image, 'acme/db:2$&');
+  });
+
   it('names what is wrong with a preset', async () => {
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgress}}' })), /no built-in preset "postgress".*did you mean "postgres"/s);
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: ./missing.yml}}' })), /services\.db\.use: cannot read preset file .*missing\.yml/);
     await assert.rejects(
-      loadConfig(await project({ 'a.yml': 'use: postgres\n', 'portler.yml': 'services: {db: {use: ./a.yml}}' })),
+      loadConfig(await project({ 'a.yml': 'use: postgres@18\n', 'portler.yml': 'services: {db: {use: ./a.yml}}' })),
       /a preset cannot use another preset/,
     );
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: 4}}' })), /services\.db\.use must be a preset name or a path/);

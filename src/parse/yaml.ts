@@ -354,7 +354,9 @@ class FlowParser {
 
     if (raw.startsWith('&') || raw.startsWith('*')) this.fail('YAML anchors and aliases (& / *) are not supported');
     if (raw.startsWith('!')) this.fail('YAML tags (!...) are not supported');
-    return typedScalar(raw);
+    // REVIEW: flow mapping keys (the stopAtColon call) keep their written form like block
+    // keys do, so a versions key written 8.0 stays "8.0" instead of becoming the number 8.
+    return stopAtColon ? raw : typedScalar(raw);
   }
 }
 

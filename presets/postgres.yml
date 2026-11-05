@@ -1,12 +1,25 @@
-# Built-in preset: `use: postgres`. Your service's own keys replace these;
-# env and exports merge key by key. The image pins a major version: Portler
-# does not change it, because a data volume only opens with the major that
-# wrote it. Postgres 17 and older keep their data in /var/lib/postgresql/data,
-# so set `volumes:` too when you set an older `image:`.
-image: postgres:18-alpine
+# Built-in preset: `use: postgres@18`. Your service's own keys replace these;
+# env and exports merge key by key. A data volume only opens with the major
+# version that wrote it, so the version is required and Portler never changes it.
+# Postgres 17 and older keep their data in /var/lib/postgresql/data.
+image: postgres:${version}-alpine
 port: 5432
 volumes:
   - '@${self.name}-data:/var/lib/postgresql'
+versions:
+  "18":
+  "17":
+    volumes:
+      - '@${self.name}-data:/var/lib/postgresql/data'
+  "16":
+    volumes:
+      - '@${self.name}-data:/var/lib/postgresql/data'
+  "15":
+    volumes:
+      - '@${self.name}-data:/var/lib/postgresql/data'
+  "14":
+    volumes:
+      - '@${self.name}-data:/var/lib/postgresql/data'
 env:
   POSTGRES_USER: { default: postgres }
   POSTGRES_PASSWORD: { default: postgres, secret: true }

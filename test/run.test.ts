@@ -19,7 +19,7 @@ tasks:
   where: pwd
 services:
   db:
-    use: postgres
+    use: postgres@18
   api:
     command: node server.js
     cwd: api

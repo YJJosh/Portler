@@ -26,7 +26,7 @@ use_env: .env
 
 services:
   postgres:
-    use: postgres
+    use: postgres@18
 
   backend:
     command: npm run dev
@@ -50,7 +50,7 @@ services:
       VITE_API_URL: backend.url
 ```
 
-Adapt it to your project: each entry under `services:` is one process (or container) with a `command`, an `image` or a [preset](/guide/databases) (`use: postgres`), an optional preferred `port`, and its environment.
+Adapt it to your project: each entry under `services:` is one process (or container) with a `command`, an `image` or a [preset](/guide/databases) (`use: postgres@18`), an optional preferred `port`, and its environment.
 
 ::: warning Env files must exist
 The sample lists `use_env: .env`, and every file listed in `use_env` is required — `portler up` fails with an error when one is missing. Create it first (`touch .env`) or remove the `use_env` line if you don't need it.
