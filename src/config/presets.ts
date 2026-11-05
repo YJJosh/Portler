@@ -51,11 +51,20 @@ function parseUse(value: string): { use: string; version?: string } {
 /** `${self.name}` and `${version}` are known before the service exists, e.g. for an image or a volume name. */
 function substitutePresetValues(value: unknown, values: Record<string, string>): unknown {
   if (typeof value === 'string') {
-    return Object.entries(values).reduce((text, [name, replacement]) => text.replaceAll(`\${${name}}`, replacement), value);
+    // REVIEW: replacer function, so a version containing "$&" is inserted literally instead of as a replacement pattern.
+    return Object.entries(values).reduce((text, [name, replacement]) => text.replaceAll(`\${${name}}`, () => replacement), value);
   }
   if (Array.isArray(value)) return value.map((item) => substitutePresetValues(item, values));
   if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitutePresetValues(item, values)]));
   return value;
+}
+
+// REVIEW: recursive scan mirroring substitutePresetValues, for the no-versions error above.
+function usesVersionPlaceholder(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('${version}');
+  if (Array.isArray(value)) return value.some((item) => usesVersionPlaceholder(item));
+  if (isObject(value)) return Object.entries(value).some(([key, item]) => key.includes('${version}') || usesVersionPlaceholder(item));
+  return false;
 }
 
 /**
@@ -67,6 +76,11 @@ function applyPresetVersion(preset: UnknownMap, use: string, version: string | u
   const { versions, ...keys } = preset;
   if (versions === undefined) {
     if (version !== undefined) throw new Error(`${field}: preset "${use}" has no versions, so "@${version}" means nothing. Use "${use}".`);
+    // REVIEW: without versions there is nothing to substitute, and a literal ${version}
+    // would otherwise leak into the image/env and fail far from its cause.
+    if (usesVersionPlaceholder(keys)) {
+      throw new Error(`${field}: preset "${use}" uses \${version} but lists no versions. Add a "versions:" mapping to the preset, or remove the placeholder.`);
+    }
     return { keys, values: {} };
   }
   if (!isObject(versions) || Object.keys(versions).length === 0) throw new Error(`${field}: preset "${use}" must list its versions as a mapping of version: service keys`);

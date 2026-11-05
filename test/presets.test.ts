@@ -145,6 +145,22 @@ describe('use: presets', () => {
     await assert.rejects(loadConfig(await project({ 'v.yml': 'image: x\nversions:\n  "1": nope\n', 'portler.yml': 'services: {db: {use: ./v.yml@1}}' })), /version "1" of preset .* must be a mapping/);
   });
 
+  // REVIEW: the three cases below passed silently with a wrong or literal value before the fix.
+  it('rejects a preset that uses ${version} without listing versions', async () => {
+    await assert.rejects(
+      loadConfig(await project({ 'p.yml': 'image: acme/db:${version}\n', 'portler.yml': 'services: {db: {use: ./p.yml}}' })),
+      /uses \$\{version\} but lists no versions/,
+    );
+  });
+
+  it('keeps a flow-style version key as written, and inserts $-patterns literally', async () => {
+    const files = { 'p.yml': 'image: acme/db:${version}\nversions: {8.0: {}, "2$&": {}}\n' };
+    const cfg = await loadConfig(await project({ ...files, 'portler.yml': 'services: {db: {use: ./p.yml@8.0}}' }));
+    assert.equal(cfg.services.db!.docker?.image, 'acme/db:8.0');
+    const odd = await loadConfig(await project({ ...files, 'portler.yml': 'services:\n  db:\n    use: "./p.yml@2$&"\n' }));
+    assert.equal(odd.services.db!.docker?.image, 'acme/db:2$&');
+  });
+
   it('names what is wrong with a preset', async () => {
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgress}}' })), /no built-in preset "postgress".*did you mean "postgres"/s);
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: ./missing.yml}}' })), /services\.db\.use: cannot read preset file .*missing\.yml/);
