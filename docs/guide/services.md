@@ -88,7 +88,7 @@ A service can publish values built from its own properties and env, so the servi
 ```yaml
 services:
   postgres:
-    use: postgres          # the built-in preset already exports database_url
+    use: postgres@18       # the built-in preset already exports database_url
   api:
     env:
       DATABASE_URL: ${postgres.database_url}

@@ -16,7 +16,7 @@ services:
   postgres:
     # Built-in preset: image, port 5432, the @postgres-data volume, a healthcheck
     # and exports.database_url. Keys you add here override it.
-    use: postgres
+    use: postgres@18
 
   backend:
     command: npm run dev

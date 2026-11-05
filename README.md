@@ -30,7 +30,7 @@ A `portler.yml` for a web app with a database looks like this:
 ```yaml
 services:
   postgres:
-    use: postgres          # built-in preset: image, port, volume, healthcheck
+    use: postgres@18       # built-in preset: image, port, volume, healthcheck
 
   backend:
     command: npm run dev
@@ -84,7 +84,7 @@ On `portler up`:
 - **[Dependency and health checks](https://yjjosh.github.io/Portler/guide/dependencies)** — control startup order.
 - **[Docker](https://yjjosh.github.io/Portler/guide/docker) and [local Kubernetes](https://yjjosh.github.io/Portler/guide/kubernetes)** — use the same configuration.
 - **[Managed volumes](https://yjjosh.github.io/Portler/guide/volumes)** — make it easy to fork local data between checkouts.
-- **[Database presets](https://yjjosh.github.io/Portler/guide/databases)** — `use: postgres`, `mysql` or `redis`, or a preset file of your own for any other database.
+- **[Database presets](https://yjjosh.github.io/Portler/guide/databases)** — `use: postgres@18`, `mysql@8.4` or `redis@8`, or a preset file of your own for any other database.
 - **[Reverse proxy](https://yjjosh.github.io/Portler/guide/proxy)** — serves the stack through one local origin when enabled.
 - **[Setup & production](https://yjjosh.github.io/Portler/guide/setup-and-production)** — install and build steps live next to the services and run once per checkout, while a path is missing, or every time; `portler start` runs one service on a platform without Docker.
 

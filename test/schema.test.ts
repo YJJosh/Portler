@@ -38,7 +38,9 @@ describe('portler.yml JSON schema', () => {
     const dir = new URL('../presets/', import.meta.url);
     for (const file of await fs.readdir(dir)) {
       const preset = parseYaml(await fs.readFile(new URL(file, dir), 'utf8'));
-      for (const key of Object.keys(preset)) assert.ok(service[key], `${file}: "${key}" is not a service key`);
+      const { versions, ...keys } = preset as { versions: Record<string, Record<string, unknown> | null> };
+      const versionKeys = Object.values(versions).flatMap((override) => Object.keys(override ?? {}));
+      for (const key of [...Object.keys(keys), ...versionKeys]) assert.ok(service[key], `${file}: "${key}" is not a service key`);
     }
   });
 });

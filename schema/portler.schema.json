@@ -466,7 +466,7 @@
       "properties": {
         "use": {
           "type": "string",
-          "description": "A built-in preset (postgres, mysql, redis) or a path to a preset file. Your keys replace the preset's; env and exports merge key by key."
+          "description": "A built-in preset with its version (postgres@18, mysql@8.4, redis@8) or a path to a preset file (./db.yml, or ./db.yml@2 if the file lists versions). Your keys replace the preset's; env and exports merge key by key."
         },
         "command": {
           "type": "string"

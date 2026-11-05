@@ -2,7 +2,7 @@
 
 Portler has no code for any particular database. A database is a Docker service like any other, and four generic features take the repetition out of it:
 
-- **Presets** (`use: postgres`) hold the image, port, volume, readiness check and env.
+- **Presets** (`use: postgres@18`) hold the image, port, volume, readiness check and env.
 - **Exports** (`${db.database_url}`) let the database publish its connection URL once.
 - **`address`** resolves to the right host and port in local, Docker and Kubernetes mode.
 - **Tasks** (`portler run psql`) run one-off commands with the right env.
@@ -10,9 +10,9 @@ Portler has no code for any particular database. A database is a Docker service 
 ```yaml
 services:
   db:
-    use: postgres
+    use: postgres@18
   cache:
-    use: redis
+    use: redis@8
   api:
     command: pnpm dev
     port: 4000
@@ -31,13 +31,13 @@ tasks:
 
 ## Presets
 
-`use: <name>` starts a service from a built-in preset; `use: ./path.yml` from a file of your own.
+`use: <name>@<version>` starts a service from a built-in preset; `use: ./path.yml` from a file of your own.
 
-| Built-in | Image | Port | Exports | Env defaults |
+| Built-in | Versions | Port | Exports | Env defaults |
 | --- | --- | --- | --- | --- |
-| `postgres` | `postgres:18-alpine` | 5432 | `database_url` | `POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres`, `POSTGRES_DB=app` |
-| `mysql` | `mysql:8.4` | 3306 | `database_url` | `MYSQL_USER=app`, `MYSQL_PASSWORD=app`, `MYSQL_DATABASE=app`, `MYSQL_ROOT_PASSWORD=mysql` |
-| `redis` | `redis:7-alpine` | 6379 | `redis_url` | — |
+| `postgres` | 18, 17, 16, 15, 14 | 5432 | `database_url` | `POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres`, `POSTGRES_DB=app` |
+| `mysql` | 9.5, 8.4, 8.0 | 3306 | `database_url` | `MYSQL_USER=app`, `MYSQL_PASSWORD=app`, `MYSQL_DATABASE=app`, `MYSQL_ROOT_PASSWORD=mysql` |
+| `redis` | 8, 7 | 6379 | `redis_url` | — |
 
 Each one keeps its data in a [managed volume](/guide/volumes) named `@<service>-data` and waits for the server to accept connections before dependents start.
 
@@ -45,7 +45,7 @@ Anything the service sets itself wins. `env` and `exports` merge key by key, so 
 
 ```yaml
 db:
-  use: postgres
+  use: postgres@18
   env:
     POSTGRES_DB: shop                # the other POSTGRES_* defaults stay
     POSTGRES_PASSWORD: { default: dev, secret: true }
@@ -55,16 +55,27 @@ db:
 
 The env defaults are `default:` entries, so a `POSTGRES_PASSWORD` in your shell or `.env` replaces them without touching `portler.yml`. The export puts the user and password into the URL as they are, so a password with `@`, `/`, `:` or `#` breaks `database_url`: pick one without them, or override the export.
 
-::: warning Versions
-A preset pins a major version, because a data volume only opens with the major that wrote it. To stay on Postgres 16, set the image and the older data path together:
+### Versions
+
+A built-in preset has no default version: bare `use: postgres` is an error that lists the versions. A data volume only opens with the major version that wrote it, so a default that moved in a later Portler would break existing volumes. Each version also knows its own data path: Postgres 17 and older keep their data in `/var/lib/postgresql/data`, 18 in `/var/lib/postgresql`.
 
 ```yaml
 db:
-  use: postgres
-  image: postgres:16-alpine
+  use: postgres@16
+```
+
+::: warning Changing the version does not upgrade the data
+Moving an existing volume to another major version (`@16` to `@17`, or `@17` to `@18`) does not migrate it: the database does not start, and `up` fails with `service "db" exited before it became ready`. The data stays in the volume, so going back to the old version works. To upgrade, use `pg_upgrade` or a dump and restore.
+:::
+
+For a version the preset doesn't list, set `image:` and `volumes:` yourself. Set both: with only `image:` set to an older Postgres, the data lands outside the managed volume and is gone after `portler down`.
+
+```yaml
+db:
+  use: postgres@18
+  image: postgres:13-alpine
   volumes: ['@db-data:/var/lib/postgresql/data']
 ```
-:::
 
 ### A database Portler doesn't ship
 
@@ -83,6 +94,15 @@ healthcheck:
   url: http://localhost:${self.port}/ping
 exports:
   http_url: http://${env.CLICKHOUSE_USER}:${env.CLICKHOUSE_PASSWORD}@${self.address}
+```
+
+To offer versions, add a `versions:` map and use `${version}`. A version's keys replace the preset's, and the service must then name one (`use: ./portler/presets/clickhouse.yml@25.3`):
+
+```yaml
+image: clickhouse/clickhouse-server:${version}
+versions:
+  "25.3":
+  "24.8":
 ```
 
 ```yaml

@@ -47,7 +47,7 @@ features:
 ```yaml [portler.yml]
 services:
   postgres:
-    use: postgres          # image, port, volume, healthcheck
+    use: postgres@18       # image, port, volume, healthcheck
 
   backend:
     command: npm run dev
