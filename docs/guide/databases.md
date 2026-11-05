@@ -57,18 +57,23 @@ The env defaults are `default:` entries, so a `POSTGRES_PASSWORD` in your shell 
 
 ### Versions
 
-A built-in preset has no default version: bare `use: postgres` is an error that lists the versions. A data volume only opens with the major version that wrote it, so a default that moved in a later Portler would break existing volumes. Each version also knows its own data path: Postgres 17 and older keep their data in `/var/lib/postgresql/data`, 18 in `/var/lib/postgresql`.
+A built-in preset has no default version: bare `use: postgres` is an error that lists the versions. A default that moved in a later Portler could stop an existing volume from opening, or upgrade it with no way back. Each version also knows its own data path: Postgres 17 and older keep their data in `/var/lib/postgresql/data`, 18 in `/var/lib/postgresql`.
 
 ```yaml
 db:
   use: postgres@16
 ```
 
-::: warning Changing the version does not upgrade the data
-Moving an existing volume to another major version (`@16` to `@17`, or `@17` to `@18`) does not migrate it: the database does not start, and `up` fails with `service "db" exited before it became ready`. The data stays in the volume, so going back to the old version works. To upgrade, use `pg_upgrade` or a dump and restore.
+<!-- REVIEW: The warning only held for Postgres. With real Docker, mysql@8.0 to @8.4 and redis@7 to @8 upgraded the volume on start, then the old version refused it, so "going back works" would have cost a MySQL or Redis user their way back. -->
+::: warning Changing the version of an existing volume
+What happens depends on the database, and in both cases a failed start reads `service "db" exited before it became ready`:
+
+- **Postgres** does not migrate. Another major version (`@16` to `@17`, `@18` to `@17`) does not start, and the data stays in the volume, so going back to the old version works. To upgrade, use `pg_upgrade` or a dump and restore.
+- **MySQL and Redis** upgrade the data when a newer version starts (`mysql@8.0` to `@8.4`, `redis@7` to `@8`), and the older version can't open it afterwards. To keep a way back, copy the volume first with `portler volumes fork db-data before-upgrade`; `portler up --volume-set before-upgrade` then runs the old version on the copy.
 :::
 
-For a version the preset doesn't list, set `image:` and `volumes:` yourself. Set both: with only `image:` set to an older Postgres, the data lands outside the managed volume and is gone after `portler down`.
+<!-- REVIEW: "use: postgres@13" with its own image is still an error, so say that use: keeps a listed version. -->
+For a version the preset doesn't list, keep a listed one in `use:` and set `image:` and `volumes:` yourself. Set both: with only `image:` set to an older Postgres, the data lands outside the managed volume and is gone after `portler down`.
 
 ```yaml
 db:
@@ -96,6 +101,15 @@ exports:
   http_url: http://${env.CLICKHOUSE_USER}:${env.CLICKHOUSE_PASSWORD}@${self.address}
 ```
 
+```yaml
+services:
+  analytics:
+    use: ./portler/presets/clickhouse.yml
+```
+
+`${self.name}` becomes the service's name when the file loads, so two services using one preset get separate volumes. Paths are relative to the project root. See [use](/reference/configuration#use-presets) for the exact rules.
+
+<!-- REVIEW: Moved below the service example: between the two, the bare use: above followed a preset with versions:, and copying it was an error. -->
 To offer versions, add a `versions:` map and use `${version}`. A version's keys replace the preset's, and the service must then name one (`use: ./portler/presets/clickhouse.yml@25.3`):
 
 ```yaml
@@ -104,14 +118,6 @@ versions:
   "25.3":
   "24.8":
 ```
-
-```yaml
-services:
-  analytics:
-    use: ./portler/presets/clickhouse.yml
-```
-
-`${self.name}` becomes the service's name when the file loads, so two services using one preset get separate volumes. Paths are relative to the project root. See [use](/reference/configuration#use-presets) for the exact rules.
 
 ## One URL for every mode
 

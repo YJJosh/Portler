@@ -59,9 +59,9 @@ function substitutePresetValues(value: unknown, values: Record<string, string>):
 }
 
 /**
- * A preset with `versions:` never picks one by itself: a data volume only opens
- * with the major version that wrote it, so a default that moves in a later
- * Portler would break existing volumes. A version's keys replace the preset's.
+ * A preset with `versions:` never picks one by itself: a default that moves in
+ * a later Portler could stop an existing volume from opening (Postgres), or
+ * upgrade it with no way back (MySQL, Redis). A version's keys replace the preset's.
  */
 function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; values: Record<string, string> } {
   const { versions, ...keys } = preset;
@@ -74,13 +74,16 @@ function applyPresetVersion(preset: UnknownMap, use: string, version: string | u
   if (version === undefined) {
     throw new Error(
       `${field}: preset "${use}" needs a version, for example "${use}@${known[0]}". Versions: ${known.join(', ')}. ` +
-        'Portler does not pick one, because a data volume only opens with the major version that wrote it.',
+        'Portler does not pick one, because a data volume may not open with a different version.',
     );
   }
   if (!Object.hasOwn(versions, version)) {
+    // REVIEW: A service that followed the old advice and kept "postgres@13" next
+    // to its own image and volumes got this same error again, so name the step
+    // that was missing: use: has to stay on a listed version.
     throw new Error(
       `${field}: preset "${use}" has no version "${version}". Versions: ${known.join(', ')}. ` +
-        'For another version, set image: and volumes: on the service yourself.',
+        'For another version, keep a listed one here and set image: and volumes: on the service yourself.',
     );
   }
   const override = versions[version] ?? {};

@@ -124,7 +124,7 @@ describe('use: presets', () => {
 
   it('never picks a version for a preset that lists them', async () => {
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres}}' })), /preset "postgres" needs a version, for example "postgres@18"\. Versions: 18, 17, 16, 15, 14/);
-    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@99}}' })), /preset "postgres" has no version "99"\. Versions: 18, 17/);
+    await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@99}}' })), /preset "postgres" has no version "99"\. Versions: 18, 17.*keep a listed one here and set image: and volumes:/);
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@__proto__}}' })), /has no version "__proto__"/);
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgres@}}' })), /has no version ""/);
     await assert.rejects(loadConfig(await project({ 'portler.yml': 'services: {db: {use: postgress@16}}' })), /no built-in preset "postgress".*did you mean "postgres"/s);
