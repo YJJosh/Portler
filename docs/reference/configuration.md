@@ -176,7 +176,7 @@ Each built-in preset declares a managed volume `@<service>-data`, a readiness co
 - `${self.name}` in a preset becomes the service's name when the file loads, so two services using one preset get separate volumes. Other `${self.*}` references resolve later, like in the service itself.
 - A preset cannot `use` another preset.
 - A built-in preset needs a version: bare `use: postgres` is an error that lists the choices, and so is a version it doesn't list. Portler never picks one, because a data volume may not open with a different version. For a version that isn't listed, keep a listed one in `use:` and set `image:` and `volumes:` on the service yourself. What changing the version does to existing data depends on the database: see [Versions](/guide/databases#versions).
-- A preset of your own can list `versions:` too, a mapping of version to the service keys that differ. `${version}` in the preset becomes the chosen version when the file loads, and the version's keys replace the preset's. `@` after a file name picks a version (`./db.yml@2`); an `@` inside a file name doesn't (`./db@2.yml`).
+- A preset of your own can list `versions:` too, a mapping of version to the service keys that differ. `${version}` in the preset becomes the chosen version when the file loads, and the version's keys replace the preset's, except `env` and `exports`, which merge key by key. `@` after a file name picks a version (`./db.yml@2`); an `@` inside a file name doesn't (`./db@2.yml`).
 
 ## exports
 

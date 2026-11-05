@@ -117,6 +117,37 @@ describe('use: presets', () => {
     }
   });
 
+  it('merges env and exports of a version with the preset, and the service on top', async () => {
+    const dir = await project({
+      'db.yml': `image: acme/db:\${version}
+port: 5000
+env:
+  USER_NAME: { default: app }
+  PASSWORD: { default: dev, secret: true }
+  DROPPED_NOTHING: kept
+exports:
+  a_url: a://\${self.address}
+versions:
+  "2":
+    port: 6000
+    env:
+      EXTRA_FLAG: "1"
+      PASSWORD: { description: From version 2 }
+    exports:
+      b_url: b://\${self.address}
+`,
+      'portler.yml': 'services:\n  db:\n    use: ./db.yml@2\n    env:\n      USER_NAME: me\n',
+    });
+    const db = (await loadConfig(dir)).services.db!;
+    assert.equal(db.port, 6000, 'other keys of a version replace the preset\'s');
+    assert.equal(db.env.DROPPED_NOTHING, 'kept');
+    assert.equal(db.env.EXTRA_FLAG, '1');
+    const password = db.env.PASSWORD as EnvSpec;
+    assert.deepEqual([password.default, password.secret, password.description], ['dev', true, 'From version 2']);
+    assert.equal((db.env.USER_NAME as EnvSpec).value, 'me');
+    assert.deepEqual({ ...db.exports }, { a_url: 'a://${self.address}', b_url: 'b://${self.address}' });
+  });
+
   it('lets the service replace the keys of a version', async () => {
     const cfg = await loadConfig(await project({ 'portler.yml': "services:\n  db:\n    use: postgres@16\n    volumes: ['@mine:/pg']\n" }));
     assert.deepEqual(cfg.services.db!.docker?.volumes, ['@mine:/pg']);
