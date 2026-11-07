@@ -309,22 +309,29 @@ describe('pruneRegistry', () => {
   it('drops stale entries with free ports, keeps busy and fresh ones', async () => {
     const { port: busyPort, close } = await occupyPort();
     try {
-      const freePort = await findFreePort();
       const staleTime = new Date(Date.now() - 10 * 60_000).toISOString();
-      const registry: RegistryFile = {
-        version: 1,
-        ports: {
-          [String(freePort)]: { project: '/a', service: 'stale-free', port: freePort, assignedAt: staleTime },
-          [String(busyPort)]: { project: '/a', service: 'stale-busy', port: busyPort, assignedAt: staleTime },
-          '52350': { project: '/a', service: 'fresh', port: 52350, assignedAt: new Date().toISOString() },
-        },
-      };
+      // REVIEW: test files run in parallel, so another one can take the "free"
+      // port right after it is released and the entry is rightly kept. Try a new
+      // port then. A prune that never drops free ports still fails all attempts.
+      let dropped = false;
+      for (let attempt = 0; attempt < 5 && !dropped; attempt += 1) {
+        const freePort = await findFreePort();
+        const registry: RegistryFile = {
+          version: 1,
+          ports: {
+            [String(freePort)]: { project: '/a', service: 'stale-free', port: freePort, assignedAt: staleTime },
+            [String(busyPort)]: { project: '/a', service: 'stale-busy', port: busyPort, assignedAt: staleTime },
+            '52350': { project: '/a', service: 'fresh', port: 52350, assignedAt: new Date().toISOString() },
+          },
+        };
 
-      await pruneRegistry(registry);
+        await pruneRegistry(registry);
 
-      assert.equal(registry.ports[String(freePort)], undefined);
-      assert.equal(registry.ports[String(busyPort)]?.service, 'stale-busy');
-      assert.equal(registry.ports['52350']?.service, 'fresh');
+        assert.equal(registry.ports[String(busyPort)]?.service, 'stale-busy');
+        assert.equal(registry.ports['52350']?.service, 'fresh');
+        dropped = registry.ports[String(freePort)] === undefined;
+      }
+      assert.ok(dropped, 'a stale entry on a free port should be dropped');
     } finally {
       await close();
     }
