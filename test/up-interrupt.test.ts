@@ -14,7 +14,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 for (const scenario of ['http', 'hanging-http', 'command', 'interval', 'project-setup', 'service-setup'] as const) {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    it(`foreground up rolls back ${scenario} startup on ${signal}`, { timeout: 20_000 }, async () => {
+    it(`foreground up rolls back ${scenario} startup on ${signal}`, { timeout: 30_000 }, async () => {
       const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'portler-interrupt-')));
       const globalDir = path.join(dir, 'global');
       const env = { ...process.env, PORTLER_GLOBAL_DIR: globalDir };
@@ -73,7 +73,9 @@ ${scenario === 'service-setup' ? step : ''}
         const exited = once(child, 'exit');
         const marker = setup || scenario === 'command' ? 'step.pid' : scenario === 'interval' ? 'listening' : 'probed';
         let reached = false;
-        for (let i = 0; i < 200; i++) {
+        // REVIEW: 5 seconds was too short on a busy machine: the marker had not
+        // appeared yet and the test failed before anything was interrupted.
+        for (let i = 0; i < 600; i++) {
           reached = await fs.access(path.join(dir, marker)).then(() => true, () => false);
           if (reached) break;
           await sleep(25);
