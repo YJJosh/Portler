@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { constants } from 'node:os';
 import type { EnvMap } from '../types/index.ts';
 import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
@@ -19,10 +20,14 @@ export interface ShellOptions {
 /** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
 export async function runShell(command: string, cwd: string, env: EnvMap, options: ShellOptions = {}): Promise<number> {
   options.signal?.throwIfAborted();
-  const child = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
+  // REVIEW: handlers go in before spawn. Once the command runs, a signal can
+  // arrive before spawn returns to this code, and with no handler yet it killed
+  // Portler outright and left the command running. Handlers only run after this
+  // synchronous part, so `child` is always set by then.
+  let child: ChildProcess | undefined;
   const forward = (signal: NodeJS.Signals): void => {
     options.onSignal?.(signal);
-    if (child.pid) signalOwnedProcessGroup(child.pid, signal);
+    if (child?.pid) signalOwnedProcessGroup(child.pid, signal);
   };
   const interrupt = (): void => forward('SIGINT');
   const terminate = (): void => forward('SIGTERM');
@@ -40,13 +45,15 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     process.on('SIGTERM', terminate);
   }
   try {
+    const started = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
+    child = started;
     const code = await new Promise<number>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
+      started.once('error', reject);
+      started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
-    if (drainMs !== undefined && child.pid) await drainOwnedProcessGroup(child.pid, drainMs);
+    if (drainMs !== undefined && started.pid) await drainOwnedProcessGroup(started.pid, drainMs);
     return code;
   } finally {
     clearTimeout(killTimer);
@@ -116,21 +123,24 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
  * the command's exit status (128 + signal number when a signal ended it).
  */
 export async function runForeground(command: string, cwd: string, env: EnvMap): Promise<number> {
-  const child = spawn(command, { cwd, env, shell: true, stdio: 'inherit' });
+  // Handlers go in before spawn, for the same reason as in runShell.
+  let child: ChildProcess | undefined;
   const ignore = (): void => {};
   const terminate = (): void => {
-    child.kill('SIGTERM');
+    child?.kill('SIGTERM');
   };
   const hangUp = (): void => {
-    child.kill('SIGHUP');
+    child?.kill('SIGHUP');
   };
   process.on('SIGINT', ignore);
   process.on('SIGTERM', terminate);
   process.on('SIGHUP', hangUp);
   try {
+    const started = spawn(command, { cwd, env, shell: true, stdio: 'inherit' });
+    child = started;
     return await new Promise<number>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
+      started.once('error', reject);
+      started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
   } finally {
     process.off('SIGINT', ignore);
