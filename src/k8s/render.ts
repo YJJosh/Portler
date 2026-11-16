@@ -15,7 +15,10 @@ export function k8sManifestDir(projectDir: string): string {
 export const NAMESPACE_MANIFEST_FILE = '00-namespace.yml';
 
 export interface RenderedManifests {
-  /** One YAML file per resource group, NAMESPACE_MANIFEST_FILE first. */
+  /**
+   * One YAML file per resource group. NAMESPACE_MANIFEST_FILE sorts first, so
+   * `kubectl apply -f <dir>` creates the namespace before the resources in it.
+   */
   files: Array<{ fileName: string; text: string }>;
   /** Portler service name -> sanitized Kubernetes resource name. */
   names: Map<string, string>;
@@ -23,7 +26,7 @@ export interface RenderedManifests {
   baseEnv: EnvMap;
 }
 
-/** `config` is a k8s-mode config. Throws on missing required env before anything is written. */
+/** `config` is a k8s-mode config. Writes nothing (see writeManifestFiles); throws on missing required env. */
 export async function renderManifests(
   config: PortlerConfig,
   selectedNames: string[],

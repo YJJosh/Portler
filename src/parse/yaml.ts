@@ -622,9 +622,9 @@ class YamlParser {
 
 /**
  * Parses the YAML subset portler.yml and Compose-style files use: block and flow
- * collections, quoted strings, `|` and `>` block scalars, booleans, null, decimal
- * numbers and a leading `---`. Throws YamlParseError for unsupported anchors,
- * aliases, tags, multiple documents, `? ` keys and tab indentation.
+ * collections, quoted strings, `|` and `>` block scalars, true/false/null/~,
+ * decimal numbers and a leading `---`. Throws YamlParseError, also for what is not
+ * supported: anchors, aliases, tags, multiple documents, `? ` keys and tab indentation.
  */
 export function parseYaml(text: string, sourceName = 'YAML'): UnknownMap {
   return new YamlParser(text, sourceName).parse();
