@@ -102,6 +102,23 @@ path in the PR description.
 - Change `.portler/` state and the registry only under the existing locks
   (`src/state/lock.ts`, `src/ports/lock.ts`).
 
+## Comments
+
+- Default: no comment. Clear names come first.
+- Comment only what the code can't say: why, a hidden limit, a security reason,
+  a fact about an outside system (OS, Docker, k8s, git, a protocol). Name the system.
+- Never repeat the name, type or the next line.
+- Present tense only. No history ("used to", "previously", "now"). That goes in the commit.
+- No review or change notes: no `REVIEW:`, "moved", "reverted", "verified with".
+- 1–2 lines is normal. More than ~5 belongs in docs/, with a 1-line pointer.
+- JSDoc only for the contract: defaults, errors, units, side effects.
+- Tests: the test name says what is checked. Comment only unusual setup or timing.
+- TODO only for a real, current limit, and say what blocks it.
+- When you change code, fix or delete comments that are now wrong.
+- Never touch directives, shebangs, `"use client"`, or text inside strings.
+- Comments at the paths in 'Rules that must hold' are part of those rules:
+  shorten them, don't drop them.
+
 ## Keep docs in sync
 
 A change to a command, flag or config key also updates:
