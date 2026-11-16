@@ -59,10 +59,9 @@ function belongsToProject(value: unknown, projectDir: string): value is PidsFile
 }
 
 export async function readPids(projectDir: string): Promise<PidsFile | null> {
-  // Copying a checkout can copy `.portler/pids.json` too. A matching start token
-  // proves that the recorded process still exists, but not that the NEW checkout
-  // owns it; accepting a file whose `project` differs would let `down` in the copy
-  // kill the original checkout's live process group.
+  // A copied checkout carries `.portler/pids.json`. A matching start token does
+  // not prove the copy owns the process, so a different `project` is rejected:
+  // `down` in the copy would kill the original's process group.
   return readValidatedJsonFile(
     pidsPath(projectDir),
     'Portler PID file',
@@ -84,16 +83,10 @@ export async function writePids(projectDir: string, pids: PidsFile): Promise<voi
 }
 
 /**
- * Read-modify-write the PID file under the project lock, so concurrent Portler
- * invocations in the same project cannot clobber each other's entries (a lost
- * write here orphans a running process: `down` never learns its pid).
- * The file is removed entirely once no services remain.
- *
- * The read is STRICT: a corrupt pids.json throws instead of being treated as an
- * empty file. Treating it as empty here would have `portler up` overwrite the
- * only record of the pids it cannot parse, orphaning those processes for good.
- * Only the explicit recovery paths (`clean --force`) may ignore corruption, and
- * they say out loud that processes may be left behind.
+ * Read-modify-write under the project lock: a lost write orphans a running
+ * process. Removes the file once no services remain. A corrupt pids.json
+ * throws: overwriting it would lose the only record of those pids. Only
+ * recovery paths (`clean --force`) ignore corruption.
  */
 export async function updatePids(projectDir: string, mutate: (pids: PidsFile) => void): Promise<void> {
   await withProjectLock(projectDir, async () => {
@@ -129,10 +122,8 @@ export async function removePidEntries(projectDir: string, serviceNames?: string
 }
 
 /**
- * Whether a process with this pid EXISTS. EPERM counts as existing: the pid is
- * held by a process we may not signal (another user's — e.g. one that recycled
- * the number). Reporting it as "not running" would be the dangerous direction,
- * since callers use this to decide whether an entry is stale.
+ * Whether the pid exists. EPERM (another user's process) counts as existing:
+ * callers use this to decide whether an entry is stale.
  */
 export function isPidRunning(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -146,13 +137,10 @@ export function isPidRunning(pid: number): boolean {
 }
 
 /**
- * Like isPidRunning, but a zombie counts as dead. kill(pid, 0) succeeds for a
- * process that exited and has not been reaped by its parent, and under a PID 1
- * that does not reap orphans (a container without an init) a dead service's
- * leader stays one, so the existence check alone would call it alive. The
- * state comes from /proc on Linux and `ps` on macOS, the two platforms Portler
- * supports; anywhere else, or when the state cannot be read, the existence
- * check decides.
+ * Like isPidRunning, but a zombie counts as dead: kill(pid, 0) succeeds for an
+ * unreaped process, and under a PID 1 that does not reap orphans a dead leader
+ * stays one. State comes from /proc (Linux) or `ps` (macOS); elsewhere, or when
+ * it is unreadable, the existence check decides.
  */
 export function isPidAlive(pid: number): boolean {
   if (!isPidRunning(pid)) return false;
@@ -161,12 +149,9 @@ export function isPidAlive(pid: number): boolean {
     try {
       stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
     } catch {
-      // A zombie still has a /proc entry, so a failed read never means
-      // "zombie". It means gone since the existence check, or that the state
-      // is unreadable: no /proc mount, a permission error, or a procfs with
-      // hidepid, which answers ENOENT for a live process of another user.
-      // Ask the existence check again and take its answer. A hidden zombie
-      // stays indistinguishable from a hidden live process.
+      // A zombie keeps its /proc entry, so a failed read means gone or
+      // unreadable (no /proc, EPERM, or hidepid answering ENOENT for another
+      // user's process). The existence check decides.
       return isPidRunning(pid);
     }
     // `pid (comm) S ...`; comm may contain spaces or parentheses.
@@ -183,21 +168,13 @@ export function isPidAlive(pid: number): boolean {
 }
 
 /**
- * True while the process group still holds a process that can run.
- * kill(-pgid, 0) also succeeds for a group whose only members are zombies, and
- * under a PID 1 that does not reap orphans (a container without an init) a
- * stopped service's group stays like that for good, so the signal check alone
- * would never see it go. On Linux, once the signal check says the group is
- * there, its members are read from /proc and the group counts as gone only when
- * two consecutive scans find the same members, all zombies (see
- * groupHoldsOnlyZombies). A member counts as a zombie only when every one of its
- * threads is: a multithreaded process whose main thread has exited reads as a
- * zombie in /proc/<pid>/stat while its other threads keep running. Anything
- * unclear keeps the answer "alive": no /proc, a member or thread whose state
- * cannot be read, or a procfs mounted with hidepid,
- * which hides other users' processes. On macOS launchd reaps orphans, and
- * elsewhere the signal check decides. EPERM counts as alive: the group is
- * there, just not ours to signal.
+ * True while the group holds a process that can run. kill(-pgid, 0) also
+ * succeeds for an all-zombie group, which never goes away under a PID 1 that
+ * does not reap orphans. On Linux the group is gone only when /proc scans agree
+ * it holds only zombies (groupHoldsOnlyZombies); a process counts as a zombie
+ * only if all its threads are. Anything unclear (no /proc, unreadable state,
+ * hidepid) and EPERM count as alive. On macOS launchd reaps orphans, so the
+ * signal check decides.
  */
 export function processGroupAlive(pgid: number): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) return false;
@@ -216,12 +193,10 @@ function linuxGroupHasLiveMember(pgid: number): boolean {
 }
 
 /**
- * Like processGroupAlive, for a group the caller has just sent SIGKILL. The kernel
- * delivers a group signal to every member, a fork in progress included, so after it no
- * member can start another process: one scan sees the whole group, and something that
- * exits while the scan reads it is simply gone. Unlike processGroupAlive this needs no
- * two matching scans, so other processes starting and exiting on a busy host cannot keep
- * it from answering. A member SIGKILL has not finished yet still counts as alive.
+ * processGroupAlive for a group just sent SIGKILL. The kernel delivers a group
+ * signal to every member, forks in progress included, so no member can start
+ * another process and one scan is enough, even on a busy host. A member still
+ * dying counts as alive.
  */
 export function processGroupAliveAfterKill(pgid: number): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) return false;
@@ -235,7 +210,7 @@ export function processGroupAliveAfterKill(pgid: number): boolean {
   return !groupDeadAfterKill(scanProcGroup(pgid));
 }
 
-/** The decision of processGroupAliveAfterKill for one scan: no member or thread read can run. */
+/** processGroupAliveAfterKill's verdict on one scan. */
 export function groupDeadAfterKill(scan: GroupScan): boolean {
   return scan !== 'unknown' && !scan.live;
 }
@@ -249,16 +224,14 @@ function procShowsEveryProcess(): boolean {
 }
 
 /**
- * One pass over /proc: what it saw of the group, or 'unknown' when a member's state
- * cannot be read. `members` holds every member pid it read and every thread of a zombie
- * member it read (`pid/tid`). `settled` is false when a process or thread exited
- * between the listing and its own read: it may have been ours and may have started one
- * the listing missed, and its id can be reused by the next one, so groupHoldsOnlyZombies
- * never matches such a scan.
+ * One /proc pass, or 'unknown' when a member's state is unreadable. `members`:
+ * each member pid read, plus each thread of a zombie member (`pid/tid`).
+ * `settled` is false when a process or thread exited between the listing and its
+ * read: it may have forked one the listing missed, and its id can be reused.
  */
 export type GroupScan = { members: string[]; live: boolean; settled: boolean } | 'unknown';
 
-/** One pass over a procfs (`procRoot` is only for tests). */
+/** `procRoot` is for tests. */
 export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
   let entries: string[];
   try {
@@ -271,8 +244,6 @@ export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const stat = readProcState(`${procRoot}/${entry}/stat`);
-    // It exited after the listing. It may have been ours and may have forked a
-    // process this listing missed.
     if (stat === 'gone') {
       settled = false;
       continue;
@@ -281,7 +252,7 @@ export function scanProcGroup(pgid: number, procRoot = '/proc'): GroupScan {
     if (stat.pgrp !== pgid) continue;
     members.push(entry);
     if (!isZombieState(stat.state)) return { members, live: true, settled };
-    // The /proc/<pid>/stat state is the main thread's. Its other threads may still run.
+    // /proc/<pid>/stat shows the main thread's state; other threads may still run.
     const threads = readThreads(`${procRoot}/${entry}/task`);
     if (threads === 'gone') {
       settled = false; // reaped since its stat was read
@@ -299,7 +270,7 @@ function isZombieState(state: string): boolean {
   return state === 'Z' || state === 'X';
 }
 
-/** A stat file's state and process group; 'gone' when the process or thread has exited since the listing. */
+/** 'gone' when the process or thread exited since the listing. */
 function readProcState(path: string): { state: string; pgrp: number } | 'gone' | 'unknown' {
   let stat: string;
   try {
@@ -315,10 +286,8 @@ function readProcState(path: string): { state: string; pgrp: number } | 'gone' |
 }
 
 /**
- * A process's thread ids that were read, whether any of them can run, and whether all
- * listed threads could be read; 'gone' when the process has been reaped since. A thread
- * that exited between the listing and its own read may have started one this listing
- * missed, so it leaves the result unsettled.
+ * 'gone' when the process was reaped since. A thread that exited before its read
+ * leaves the result unsettled: it may have started one the listing missed.
  */
 function readThreads(taskDir: string): { tids: string[]; live: boolean; settled: boolean } | 'gone' | 'unknown' {
   let entries: string[];
@@ -345,19 +314,11 @@ function readThreads(taskDir: string): { tids: string[]; live: boolean; settled:
 }
 
 /**
- * Decides from repeated scans whether a group holds only zombies. One scan is not
- * enough: a live process or thread can start another after the listing and exit
- * before its own state is read, so the new one is missed. The answer is yes only when
- * two consecutive scans are both settled (nothing exited between a listing and its
- * read), record the same processes and threads, and none of them can run. Every
- * process and thread of the second scan was then read as a zombie by the first one,
- * before the second listing, so none of them could start one the second listing
- * missed. Ids are not compared across a mid-read exit, since a new process or thread
- * can reuse the id. A live member, an unreadable one, or scans that keep changing or
- * stay unsettled for `attempts` scans keep the answer no. On a busy host other
- * processes exiting mid-read can keep every scan unsettled; the answer then stays no
- * until the caller has sent the group SIGKILL, after which processGroupAliveAfterKill
- * answers from one scan.
+ * One scan is not enough: a process can fork after the listing and exit before
+ * its read, so the child is missed. Yes only when two consecutive scans are
+ * settled, list the same processes and threads, and none can run: all of the
+ * second scan were zombies before its listing. On a busy host scans can stay
+ * unsettled for all `attempts`; then only processGroupAliveAfterKill answers.
  */
 export function groupHoldsOnlyZombies(scan: () => GroupScan, attempts = 4): boolean {
   let previous = scan();
@@ -404,11 +365,6 @@ export function runningServices(pids: PidsFile | null, serviceNames?: string[]):
   return running;
 }
 
-/**
- * Build the PID-file record describing a freshly spawned service, capturing the
- * process's start token so a later `down` can prove the pid still refers to
- * this process and not to something the OS recycled the number onto.
- */
 export interface LaunchPlan {
   runMode: 'local' | 'docker' | 'k8s';
   /** The `--image` pin for this service, if one was given. */
@@ -417,6 +373,10 @@ export interface LaunchPlan {
   setup?: boolean;
 }
 
+/**
+ * The PID entry for a spawned service, with its start token so `down` can prove
+ * the pid was not recycled.
+ */
 export async function pidInfoFor(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -440,15 +400,12 @@ export async function pidInfoFor(
     ...(launch ? { runMode: launch.runMode } : {}),
     ...(launch?.image !== undefined ? { image: launch.image } : {}),
     ...(launch?.setup === false ? { setup: false } : {}),
-    // Recorded whenever the container mounts a managed volume, '' for the base
-    // volumes: an entry without the field was written by an older Portler, which
-    // is a different fact from "the base volumes".
+    // '' means the base volumes; a missing field means an older Portler wrote it.
     ...(service.docker?.volumes.some((volume) => managedVolumeName(volume) !== undefined)
       ? { volumeSet: config.volumeSet ?? '' }
       : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
-    // Always recorded, empty included: an entry without the field was written
-    // by an older Portler, which is a different fact from "no dependencies".
+    // Always recorded, even empty: a missing field means an older Portler wrote it.
     dependsOn: service.dependsOn.map((dependency) => dependency.service),
     startedAt: new Date().toISOString(),
   };

@@ -2,16 +2,14 @@ import path from 'node:path';
 import { withDirLock } from '../util/lock.ts';
 import { portlerDir } from './index.ts';
 
-// Critical sections are short (read one JSON file, mutate, write it), so a
-// lock still held after this long belongs to a crashed process. A LIVE holder
-// is never taken over regardless of age (see util/lock.ts), so these staleness
-// windows only bound how long a crash blocks the next run.
+// Critical sections are short, so a lock held this long is a crashed process's.
+// A live holder is never taken over (see util/lock.ts); these windows only bound
+// how long a crash blocks the next run.
 const LOCK_STALE_MS = 15_000;
 const LOCK_WAIT_MS = 10_000;
 
-// The lifecycle lock is held across a whole start/stop decision — which can
-// include a Docker build or a rollout wait — so it must wait far longer before
-// giving up. It is still only stolen from a provably dead owner.
+// Held across a whole start/stop decision (a Docker build, a rollout wait), so
+// it waits far longer. Still only stolen from a provably dead owner.
 const LIFECYCLE_STALE_MS = 30_000;
 const LIFECYCLE_WAIT_MS = 120_000;
 
@@ -24,14 +22,9 @@ function lifecycleLockDir(projectDir: string): string {
 }
 
 /**
- * Serialize read-modify-write cycles on a project's `.portler/` files across
- * concurrent Portler invocations. Two `portler up <service>` runs in the same
- * project each read pids.json, add their own service, and write it back — with
- * no lock, the second write drops the first service's entry and `portler down`
- * then leaves that process orphaned.
- *
- * This is the INNER lock: it is taken and released around each file update, and
- * never wraps a lifecycle lock acquisition.
+ * Serializes read-modify-write of `.portler/` files: two concurrent `up` runs
+ * would otherwise drop one's pids.json entry and orphan its process. The inner
+ * lock: taken per file update, never around a lifecycle lock acquisition.
  */
 export async function withProjectLock<T>(projectDir: string, fn: () => Promise<T>): Promise<T> {
   return withDirLock(
@@ -42,23 +35,12 @@ export async function withProjectLock<T>(projectDir: string, fn: () => Promise<T
 }
 
 /**
- * Serialize whole lifecycle DECISIONS (`up`, `down`, `restart`) in one project.
- * The project lock only makes each individual pids.json write atomic, which is
- * not enough: `up` reads the running set, decides "api is not running", and
- * spawns it, while a concurrent `down` reads the same file and decides to stop
- * everything. Both writes are individually well-ordered and the result is still
- * wrong (a service running with no pid entry, or stopped a moment after being
- * started). This lock makes those read-decide-write cycles mutually exclusive.
- *
- * Ordering rule that keeps it deadlock-free: this is the OUTER lock. It is
- * acquired only at the top of a command, and the project lock is always taken
- * (and released) inside it — never the reverse. Nothing holding the project
- * lock ever asks for this one.
- *
- * It deliberately does NOT cover the foreground wait of `portler up` (which
- * lasts until the user hits Ctrl-C): holding it there would block every other
- * command in the project for the lifetime of the run. The TEARDOWN at the end of
- * that wait does run under the lock again — see withLifecycleLockForTeardown.
+ * Serializes lifecycle decisions (`up`, `down`, `restart`): with only per-write
+ * locking, `up` and a concurrent `down` can act on the same read and leave a
+ * service running without an entry. The outer lock: taken only at the top of a
+ * command, with the project lock always inside it, never the reverse. The
+ * foreground wait of `up` is unlocked; its teardown takes the lock again
+ * (withLifecycleLockForTeardown).
  */
 export async function withLifecycleLock<T>(
   projectDir: string,
@@ -78,18 +60,10 @@ export async function withLifecycleLock<T>(
 }
 
 /**
- * The lifecycle lock around the teardown that ends a FOREGROUND run (Ctrl-C, or
- * a service exiting). The long wait itself is unlocked, but the teardown is a
- * read-decide-write cycle exactly like `down`: it signals process groups, prunes
- * pids.json entries and releases port reservations. Racing it against a
- * concurrent `up` in the same project is how a freshly started service loses its
- * PID entry or has its port handed to someone else.
- *
- * If the lock cannot be acquired, teardown fails closed rather than running
- * unlocked. An unlocked old foreground teardown can race a newer `up`, read its
- * freshly written PID records, and stop the new services. Leaving the old run
- * visible for an explicit later `portler down` is safer than touching a newer
- * lifecycle decision without serialization.
+ * The teardown ending a foreground run signals groups, prunes entries and frees
+ * ports like `down`, so it takes the lifecycle lock. If that fails it fails
+ * closed: unlocked, it could stop a newer `up`'s services. The old run stays
+ * visible for a later `portler down`.
  */
 export function withLifecycleLockForTeardown<T>(
   projectDir: string,

@@ -7,55 +7,35 @@ function childExitCode(code: number | null, signal: NodeJS.Signals | null): numb
   return 1;
 }
 
-/** What the supervisor asks of a foreground teardown. */
 export interface ForegroundTeardownOptions {
   /**
-   * Leave this run's services running while a service another run started
-   * depends on them (the default). The stop that follows, once the user has been
-   * told which services stayed up, passes false: Ctrl-C then stops them too.
+   * Default true: leave this run's services up while a service of another run
+   * depends on them. The stop after the user is told which stayed up passes false.
    */
   keepAdopted?: boolean;
 }
 
-/**
- * Stop the run's services. Returns the names of this run's own services it left
- * running because another run depends on them; a teardown with nothing to
- * report may return nothing.
- */
+/** Returns this run's services it left running because another run depends on them. */
 export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promise<string[] | void>;
 
 export interface ForegroundWaitOptions {
   /**
-   * Whether every service of another run that the last teardown kept something
-   * for is still alive. They are not this process's children, so nothing
-   * reports their exit; while attached the supervisor asks this every
-   * `recheckMs` and runs the teardown again as soon as it says no.
+   * Whether the other runs' services the last teardown kept something for are
+   * all alive. They are not our children, so while attached this is polled every
+   * `recheckMs` (default 2000) and a no runs the teardown again.
    */
   dependentsAlive?: () => Promise<boolean>;
   recheckMs?: number;
 }
 
 /**
- * Supervise foreground services: on SIGINT/SIGTERM or the first child exit,
- * run `teardown` once and resolve with the resulting exit code.
- *
- * A teardown that throws (it now takes the project lifecycle lock, and it can
- * fail to stop something) must not leave this promise pending forever — the
- * process would hang with no output. Report it and exit non-zero instead.
- *
- * A teardown can leave some of this run's own children running because a
- * service another run started depends on them (`portler restart api` keeps the
- * db this run started). Their output is piped through this process, so it
- * cannot exit without cutting them off: it says so, keeps relaying until they
- * exit (`portler down` from elsewhere), and a Ctrl-C then stops them too. Each
- * time one of them exits on its own, the teardown runs again, staying attached
- * to the ones still running: their entries still name this run, and only a
- * teardown prunes a dead one and gives its port back. The services of other
- * runs it kept them for are not children of this process, so it also polls
- * `dependentsAlive`, and runs the teardown again as soon as one of them is
- * gone: whatever nothing depends on any more is then stopped. While a teardown is in
- * progress the signal handlers are off, so a second Ctrl-C still quits at once,
- * as it always has.
+ * On SIGINT/SIGTERM or the first child exit, runs `teardown` and resolves with
+ * the exit code; a throwing teardown is reported and exits non-zero instead of
+ * hanging. Children kept for another run stay attached (their output is piped
+ * here) until they exit or Ctrl-C stops them. Each exit of one, or a
+ * `dependentsAlive` no, runs the teardown again: only a teardown prunes an entry
+ * and frees its port. Handlers are off during a teardown, so a second Ctrl-C
+ * quits at once.
  */
 export function waitForForegroundServices(
   children: Map<string, ChildProcess>,

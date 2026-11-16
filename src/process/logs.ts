@@ -3,21 +3,18 @@ import { closeSync, mkdirSync, openSync, renameSync, unlinkSync } from 'node:fs'
 import path from 'node:path';
 import { portlerDir } from '../state/index.ts';
 
-/** The `.portler/logs/` directory holding captured output of detached services. */
 export function logsDir(projectDir: string): string {
   return path.join(portlerDir(projectDir), 'logs');
 }
 
-/** The log file capturing one detached service's stdout/stderr. */
 export function serviceLogPath(projectDir: string, serviceName: string): string {
   return path.join(logsDir(projectDir), `${serviceName}.log`);
 }
 
 /**
- * Start a fresh captured log generation. Create the new inode before replacing
- * the old one so even a restart between follower polls is detectable, without
- * an interval where the log path is missing (or immediate inode reuse).
- * The caller owns the returned descriptor.
+ * Starts a new log generation: a new inode is renamed over the old one, so
+ * followers detect even a quick restart and the path never goes missing. The
+ * caller owns the returned descriptor.
  */
 export function openServiceLog(filePath: string): number {
   mkdirSync(path.dirname(filePath), { recursive: true });
@@ -38,10 +35,7 @@ export interface LinePrinter {
   flush(): void;
 }
 
-/**
- * Buffer arbitrary chunks and emit whole lines prefixed with the service name
- * so interleaved logs stay readable. `flush` emits a trailing partial line.
- */
+/** Emits whole lines with a `[service]` prefix; `flush` emits a trailing partial line. */
 export function createLinePrinter(serviceName: string, output: NodeJS.WritableStream): LinePrinter {
   let buffer = '';
   const prefix = `[${serviceName}]`;
@@ -65,7 +59,6 @@ export function createLinePrinter(serviceName: string, output: NodeJS.WritableSt
   };
 }
 
-/** Pipe a child's output stream to ours line-by-line with a service prefix. */
 export function prefixStream(serviceName: string, stream: NodeJS.ReadableStream, output: NodeJS.WritableStream): void {
   const printer = createLinePrinter(serviceName, output);
 

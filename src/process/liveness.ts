@@ -17,24 +17,17 @@ export type ServiceLiveness =
   | { status: 'unknown'; message: string };
 
 /**
- * Whether a pids.json entry still names something alive. The pid first, by
- * identity: a live pid whose start token differs from the recorded one was
- * recycled by the OS for an unrelated process, so the entry is as dead as one
- * whose pid and group are gone (under a PID 1 that does not reap orphans, an
- * exited service keeps its pid and start token). A surviving group without a
- * leader is conservatively running, not proof of ownership. A live pid that cannot be
- * identified (no recorded token, or the platform will not say) counts as
- * running. Then, for a Docker service, its container: `docker run` is
- * supervised by a shell whose pid can be gone while the container runs on. A
- * failed inspect is reported as such, never guessed either way.
+ * A live pid with a different start token was recycled, so the entry is dead. An
+ * unidentifiable live pid counts as running, and so does a group that outlived
+ * its leader, without being proven ours. A Docker container can run on after its
+ * `docker run` shell is gone; a failed inspect is reported, never guessed.
  */
 export async function serviceLiveness(projectDir: string, info: PidServiceInfo, run: CommandRunner = runCommand): Promise<ServiceLiveness> {
   const exists = isPidAlive(info.pid);
   const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
   if (verdict === 'match' || verdict === 'unverifiable') return { status: 'running', via: 'pid' };
-  // A vanished leader is not a vanished service: keep unproven surviving
-  // groups tracked, without granting permission to signal them. A mismatched
-  // start token positively identifies a replacement, so its group is not ours.
+  // Track a surviving group without permission to signal it. A mismatched token
+  // identifies a replacement, whose group is not ours.
   if (verdict === 'gone' && processGroupAlive(info.pid)) {
     return { status: 'running', via: 'group', message: `leader PID ${info.pid} is gone but its process group still exists; ownership cannot be verified` };
   }
@@ -46,10 +39,9 @@ export async function serviceLiveness(projectDir: string, info: PidServiceInfo, 
 }
 
 /**
- * The services in pids.json that are running by serviceLiveness: by pid, group, or the
- * Docker container a gone `docker run` shell left running. One whose container cannot
- * be inspected counts as running too: starting it again would remove that container if
- * it is up. `onUncertain` hears about failed inspections and unverified groups.
+ * Services running by serviceLiveness. One whose container cannot be inspected
+ * counts as running: starting it again would remove that container if it is up.
+ * `onUncertain` hears about failed inspections and unverified groups.
  */
 export async function liveServiceNames(
   projectDir: string,

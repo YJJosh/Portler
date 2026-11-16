@@ -1,47 +1,29 @@
 /**
- * Docker resource ownership. Container and network names are derived from the
- * project directory, but a name is not a claim: an unrelated container can
- * already hold the name Portler wants (the hash makes it unlikely, not
- * impossible — and users can set `container_name`/`docker_network` freely).
- *
- * `docker rm -f <name>` on such a collision would destroy a stranger's
- * container. So every resource Portler creates is labelled with the project it
- * belongs to, and every removal:
- *
- * 1. inspects the resource, capturing its immutable ID together with its labels
- *    in ONE call,
- * 2. verifies the label,
- * 3. removes it BY ID.
- *
- * Removing by name would re-resolve the name at removal time: between the
- * inspect and the `rm`, a container can be replaced by a different one under
- * the same name (`docker run --name` after a stop), and the verified label
- * would then belong to a container that no longer exists. An ID never moves.
- *
- * A failed inspect is not the same as "no such resource": a stopped daemon, a
- * permission error, or a missing docker CLI all fail too, and treating those as
- * 'absent' would silently report a successful cleanup that never happened.
+ * Docker ownership. A name is not a claim: a stranger's container or network can
+ * hold it (users set `container_name`/`docker_network` freely). Resources Portler
+ * creates carry a project label, and every removal inspects ID and labels in one
+ * call, checks the label, then removes by ID, since the name can point at another
+ * container by the time `rm` runs. A failed inspect (daemon down, EPERM, no CLI)
+ * is an error, never 'absent'.
  */
 import { runCommand } from '../util/exec.ts';
 import type { CommandRunner } from '../util/exec.ts';
 
-/** Label carrying the owning project directory. Matches the volume convention. */
+/** Holds the owning project directory; volumes use the same label. */
 export const PROJECT_LABEL = 'portler.project';
 export const SERVICE_LABEL = 'portler.service';
 
 export type OwnershipVerdict =
-  /** Labelled as ours — safe to remove. */
+  /** Labelled as ours: safe to remove. */
   | 'owned'
-  /** Exists but is not ours (unlabelled, or another project) — must not be touched. */
+  /** Unlabelled or another project's: never touch it. */
   | 'foreign'
-  /** No such resource — nothing to remove. */
+  /** No such resource. */
   | 'absent';
 
 /**
- * Classify a Docker resource from its labels. `labels === null` means the
- * resource does not exist. An unlabelled resource is deliberately 'foreign':
- * we cannot prove we created it, and destroying data on a guess is exactly the
- * failure this module exists to prevent.
+ * `labels === null` means the resource does not exist. Unlabelled is 'foreign':
+ * Portler cannot prove it created it.
  */
 export function ownershipVerdict(labels: Record<string, string> | null, projectDir: string): OwnershipVerdict {
   if (labels === null) return 'absent';
@@ -83,9 +65,8 @@ export type Inspection =
   | { status: 'error'; message: string };
 
 /**
- * The Go template asks docker to emit the id and the labels as one JSON object,
- * so the ID and the labels we authorize the removal on come from the SAME
- * inspect — they cannot drift apart between two calls.
+ * One inspect returns both ID and labels, so a removal is authorized on the
+ * same resource it removes.
  */
 export function inspectArgs(kind: ResourceKind, name: string): string[] {
   const template =
@@ -105,9 +86,8 @@ export function isNotFoundError(stderr: string): boolean {
 
 export function parseInspection(code: number, stdout: string, stderr: string): Inspection {
   if (code !== 0) {
-    // ONLY a genuine "no such object" is absent. A dead daemon ("Cannot connect
-    // to the Docker daemon"), a permission error, or a missing binary must not
-    // masquerade as a clean, already-removed resource.
+    // Only "no such object" is absent: a dead daemon, EPERM or a missing binary
+    // must not read as already removed.
     if (isNotFoundError(stderr)) return { status: 'absent' };
     return { status: 'error', message: stderr.trim().split('\n')[0] || `docker inspect exited ${code}` };
   }
@@ -144,7 +124,7 @@ export type RemovalOutcome =
   | { status: 'foreign' }
   /** The resource is ours but `docker rm` failed. */
   | { status: 'failed'; message: string }
-  /** We could not even establish what the resource is (daemon/permission error). */
+  /** Could not inspect it (daemon or permission error). */
   | { status: 'error'; message: string };
 
 async function removeOwned(
@@ -167,18 +147,16 @@ async function removeOwned(
     return { status: 'removed', id: inspection.id, ...(inspection.running !== undefined ? { running: inspection.running } : {}) };
   }
 
-  // Someone removed it between the inspect and the rm — that is a success for us.
+  // Removed by someone else since the inspect: a success.
   if (isNotFoundError(result.stderr)) return { status: 'absent' };
 
   return { status: 'failed', message: result.stderr.trim().split('\n')[0] || `docker rm exited ${result.code}` };
 }
 
 /**
- * Remove a Docker container only when it carries this project's label, and only
- * by the ID captured while checking that label. A foreign container with a
- * colliding name is left strictly alone. `-v` drops the container's anonymous
- * volumes with it, as `docker run --rm` would have on a clean exit (an image
- * VOLUME such as postgres' data dir); named volumes are never touched.
+ * Removes the container by the ID whose label was checked; a foreign one is left
+ * alone. `-v` also drops its anonymous volumes (an image VOLUME such as
+ * postgres' data dir), as `docker run --rm` would; named volumes are kept.
  */
 export function removeOwnedContainer(name: string, projectDir: string, run: CommandRunner = runCommand): Promise<RemovalOutcome> {
   return removeOwned('container', name, projectDir, (id) => ['rm', '-f', '-v', id], run);
@@ -187,18 +165,15 @@ export function removeOwnedContainer(name: string, projectDir: string, run: Comm
 export type ContainerLiveness =
   /** Carries this project's label and is running. */
   | { status: 'running'; id: string }
-  /** No such container, a stranger's under that name, or ours but exited: nothing of the service is alive. */
+  /** Absent, a stranger's under that name, or ours but exited. */
   | { status: 'gone' }
   /** The daemon could not be asked (down, permission error, missing CLI). */
   | { status: 'error'; message: string };
 
 /**
- * Whether this project's container of that name is still running. A `docker
- * run` container outlives the shell pid that supervises it, so a pids.json
- * entry whose pid is gone can still name a live service. Only a container that
- * carries this project's label counts: a stranger's container under the name
- * is not our service, and an exited one of ours is nothing to keep. A failed
- * inspect is reported as such, never guessed either way.
+ * A `docker run` container outlives its shell pid, so an entry whose pid is gone
+ * can still name a live service. Only a running container with this project's
+ * label counts; a failed inspect is reported, never guessed.
  */
 export async function ownedContainerLiveness(
   name: string,
@@ -217,17 +192,15 @@ export type MountedVolumeSet =
   | { status: 'set'; set: string }
   /** It mounts no Portler-managed volume. */
   | { status: 'none' }
-  /** Could not tell: the container is gone or not this project's, an inspect failed, or its volumes disagree. */
+  /** The container is gone or not ours, an inspect failed, or its volumes disagree. */
   | { status: 'unknown'; reason: string };
 
 /**
- * The volume set a container of this project was started on, read from the
- * volumes mounted at its `@name` paths (`expected`): Portler labels every managed
- * volume `portler.volume`, and one made for a set also `portler.volume-set`. Other
- * volumes the container mounts do not follow the set and are not read. Entries in pids.json written
- * before the set was recorded have nothing else to go on, and guessing the base
- * volumes would bring a database back with other data. Anything short of a
- * clear answer is reported as unknown, never guessed.
+ * The volume set a container was started on, read from the volumes at its
+ * `@name` paths (`expected`), labelled `portler.volume` and, for a set,
+ * `portler.volume-set`. pids.json entries without a recorded set rely on this,
+ * and guessing the base set could bring a database back on other data, so
+ * anything unclear is 'unknown'.
  */
 export async function mountedVolumeSet(
   name: string,
@@ -248,8 +221,7 @@ export async function mountedVolumeSet(
     if (isNotFoundError(container.stderr)) return { status: 'unknown', reason: 'its container is gone' };
     return { status: 'unknown', reason: container.stderr.trim().split('\n')[0] || `docker inspect exited ${container.code}` };
   }
-  // Only the service's `@name` entries follow the volume set, so only the volumes mounted at
-  // their paths vote; any other volume, Portler-labelled or not, says nothing about the set.
+  // Only volumes at the `@name` paths follow the set; other mounts say nothing about it.
   const expectedAt = new Map(expected.map((mount) => [mount.destination, mount.name]));
   let volumes: Array<{ volume: string; managedName: string; destination: string }>;
   let elsewhere: Array<{ volume: string; destination: string }>;
@@ -288,10 +260,8 @@ export async function mountedVolumeSet(
     lines.forEach((line, index) => {
       const entry = volumes[index]!;
       const labels = parseInspectLabels(line);
-      // The volume at a managed path must be that managed volume, and this project's. Anything
-      // else there (a config change, a hand-made volume, another project's volume of the same
-      // name) means the container's data came from somewhere Portler cannot name, so the answer
-      // is unknown rather than "base": guessing base could restart the service on other data.
+      // Anything but this project's managed volume at a managed path means data Portler
+      // cannot name: unknown, not base, which could restart the service on other data.
       if (labels['portler.volume'] !== entry.managedName || !volumeOwners.includes(labels[PROJECT_LABEL] ?? '')) {
         stranger ??= entry;
         return;
@@ -313,10 +283,9 @@ export async function mountedVolumeSet(
 }
 
 /**
- * For `@` entries with no volume at their path, look for this project's volume of that name
- * mounted somewhere else: the config moved the path since the container started, so its data
- * still came from that volume and the base set is not a safe guess. Returns an unknown answer
- * naming the volume, or undefined when nothing was moved (or nothing needs checking).
+ * For `@` entries with no volume at their path: this project's volume of that
+ * name mounted elsewhere means the config moved the path, so the base set is not
+ * a safe guess. Returns 'unknown' naming the volume, or undefined.
  */
 async function movedManagedVolume(
   unmatched: ReadonlyArray<{ name: string; destination: string }>,
@@ -349,12 +318,11 @@ async function movedManagedVolume(
   return undefined;
 }
 
-/** Remove a Docker network only when it carries this project's label (by ID). */
+/** Removes the network by ID, only when it carries this project's label. */
 export function removeOwnedNetwork(name: string, projectDir: string, run: CommandRunner = runCommand): Promise<RemovalOutcome> {
   return removeOwned('network', name, projectDir, (id) => ['network', 'rm', id], run);
 }
 
-/** Warn (once, specifically) about a name collision we refused to act on. */
 export function warnForeignResource(kind: ResourceKind, name: string): void {
   process.stderr.write(
     `[portler] warning: ${kind} "${name}" exists but is not labelled as this project's ` +
