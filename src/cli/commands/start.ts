@@ -69,8 +69,8 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  // The deployment wins: platform env, then the use_env file, then config. Only config values
-  // are resolved; a file value is used as written, as in `up` and `setup`.
+  // Deployment wins: platform env, then the use_env file, then config. Only config values resolve, and
+  // not for a key the file or platform supplies; a file value is used as written, as in `up` and `setup`.
   const configured = mergeEnvMaps(config.env, service.env);
   // A required key is the deployment's to supply; its config value is not used or resolved.
   const required = new Set(config.production ? requiredEnvKeys(config, service) : []);

@@ -51,7 +51,8 @@ interface RecordedLaunch {
 }
 
 // Undefined if they were started differently, an entry lacks its volume set, PORTLER_VOLUME_SET would
-// move a plain command off the base volumes, or they ran in k8s (no `--image` pin is recorded there).
+// move a plain command off the base volumes, or they ran in k8s (no `--image` pin is recorded there,
+// so the command could deploy another image).
 function recordedLaunch(
   serviceNames: readonly string[],
   launches: ReadonlyArray<PidServiceInfo | undefined>,

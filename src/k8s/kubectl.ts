@@ -260,7 +260,8 @@ export type NamespaceOwnership =
   /** Does not exist — Portler will create it. */
   | 'absent';
 
-/** An unlabelled namespace is 'foreign' even if the name matches: it may be shared (or `default`), with everyone's workloads. */
+/** A namespace not labelled as this project's is 'foreign' even if the name matches: it may be shared
+ * (or `default`), and deleting it would delete everyone's workloads. */
 export function namespaceOwnership(labels: Record<string, string> | null, config: PortlerConfig): NamespaceOwnership {
   if (labels === null) return 'absent';
 

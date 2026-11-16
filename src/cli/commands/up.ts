@@ -481,8 +481,8 @@ export async function startPhase(
     }
 
     // A member can die after its readiness wait, while a later level or the proxy starts: check after
-    // each step. Retained dependencies go by serviceLiveness, not pid: a container can outlive its
-    // `docker run` shell, and an unreaped zombie under a PID 1 passes kill(pid, 0).
+    // each step. Retained dependencies go by serviceLiveness, not pid (a container can outlive its shell,
+    // an unreaped zombie passes kill(pid, 0)); an uninspectable one is not reported dead.
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = async (): Promise<void> => {
       const retainedInfo = retained.map((name) => pidsBefore?.services[name]);
