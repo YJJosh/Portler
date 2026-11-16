@@ -61,7 +61,6 @@ it('up refuses to overwrite an orphan group retained by down', { timeout: 20_000
     assert.equal(await fs.readFile(pidsPath, 'utf8'), retained);
     assert.ok(isPidAlive(member), 'no unverified member was signalled');
 
-    // The same group must remain tracked even if it once supervised a container.
     const liveness = await serviceLiveness(dir, { ...info, dockerContainer: 'old-container' }, async () => {
       throw new Error('a live group already establishes conservative liveness');
     });

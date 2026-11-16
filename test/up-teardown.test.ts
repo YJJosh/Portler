@@ -76,10 +76,8 @@ async function startForeground() {
   return stack;
 }
 
-/**
- * A fake `docker` on PATH for the teardown's container check and stopServices' removal:
- * `inspect` answers the scripted state under this project's label, `rm` succeeds, every argv is logged.
- */
+// A fake `docker` on PATH: `inspect` answers `state` under this project's label, `rm`
+// succeeds, and every argv is logged.
 async function installFakeDocker(state: 'running' | 'exited' | 'unreachable'): Promise<{ calls: () => Promise<string[]> }> {
   const bin = path.join(projectDir, 'fake-bin');
   const log = path.join(projectDir, 'docker-calls.log');
@@ -98,10 +96,8 @@ async function installFakeDocker(state: 'running' | 'exited' | 'unreachable'): P
   return { calls: async () => (await fs.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean) };
 }
 
-/**
- * A zombie, as a replacement that exited under a PID 1 that does not reap orphans:
- * the child of a stopped parent. `release` resumes the parent, which reaps it and exits.
- */
+// A zombie, as under a PID 1 that does not reap: the child of a stopped parent.
+// `release` resumes the parent, which reaps it and exits.
 async function makeZombie(): Promise<{ pid: number; release: () => Promise<void> }> {
   const script = [
     "const { spawn } = require('node:child_process');",
@@ -125,7 +121,7 @@ async function makeZombie(): Promise<{ pid: number; release: () => Promise<void>
   };
 }
 
-/** What a restart leaves for api: another identity, a Docker service, its supervising shell pid gone. */
+// What a restart leaves for api: another identity, a Docker service, its supervising shell pid gone.
 async function replaceApiWithDockerService(): Promise<void> {
   await withLifecycleLock(projectDir, () => updatePids(projectDir, (pids) => {
     pids.services.api!.pid = 4_194_303;
@@ -225,8 +221,7 @@ describe('foreground teardown ownership', () => {
       assert.ok(notices.some((text) => text.includes(`"${name}"`) && text.includes('depends on it')), `notice for ${name}`);
     }
 
-    // The Ctrl-C that follows the supervisor's notice stops them anyway, and
-    // still leaves the replacement alone: it is not this run's.
+    // The Ctrl-C that follows the supervisor's notice stops them anyway.
     const stillKept = await withLifecycleLockForTeardown(projectDir, () => stack.teardown({ keepAdopted: false }));
     assert.deepEqual(stillKept, []);
     const afterStop = (await readPids(projectDir))!;
@@ -240,7 +235,7 @@ describe('foreground teardown ownership', () => {
 
   it('prunes an adopted dependency that died before the teardown ran', { timeout: 15_000 }, async () => {
     // `restart api` keeps db for the replacement, then db crashes before the teardown
-    // takes the lifecycle lock. Its entry still matches this run, but a dead db is nothing to keep.
+    // takes the lifecycle lock.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
       '  db:',
@@ -280,8 +275,6 @@ describe('foreground teardown ownership', () => {
   });
 
   it('still stops what no other run depends on after a named restart', { timeout: 15_000 }, async () => {
-    // db is this run's and nothing the replacement api needs, so it is stopped and
-    // released. The proxy serves the replacement and stays.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
       '  db:',
@@ -346,8 +339,7 @@ describe('foreground teardown ownership', () => {
   }
 
   it('keeps a dependency the restart gained from an edited portler.yml', { timeout: 15_000 }, async (t) => {
-    // This run started db and api independent; after an edit, the replacement depends
-    // on db. What the replacement recorded decides, not this run's config.
+    // This run started db and api independent; after an edit, the replacement depends on db.
     const stack = await startForegroundWith(independentConfig);
     const original = (await readPids(projectDir))!;
     assert.deepEqual(original.services.api!.dependsOn, [], 'this run recorded api without dependencies');
@@ -381,8 +373,6 @@ describe('foreground teardown ownership', () => {
   });
 
   it('stops a dependency the restart dropped through an edited portler.yml', { timeout: 15_000 }, async () => {
-    // The mirror image: the replacement api recorded no dependencies, so nothing
-    // live needs db and this run stops and releases it.
     const stack = await startForegroundWith(dependentConfig);
     const original = (await readPids(projectDir))!;
     assert.deepEqual(original.services.api!.dependsOn, ['db']);
@@ -405,8 +395,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('falls back to the config on disk for an entry that recorded no dependencies', { timeout: 15_000 }, async () => {
-    // An older Portler's entry has no dependsOn; portler.yml on disk, the likeliest
-    // source of that run, stands in for it, not this run's copy.
+    // An older Portler's entry has no dependsOn.
     const stack = await startForegroundWith(independentConfig);
     const original = (await readPids(projectDir))!;
 
@@ -429,8 +418,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('preserves a replacement entry whose pid and start token name a live process', { timeout: 10_000 }, async () => {
-    // A restart replaced api while the teardown waited: the entry names another
-    // live process, recorded with that process's own start token.
+    // A restart replaced api while the teardown waited, with the new process's own start token.
     const stack = await startForeground();
     const original = (await readPids(projectDir))!;
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
@@ -451,8 +439,6 @@ describe('foreground teardown ownership', () => {
     assert.deepEqual((await readRegistry()).ports[String(replacement.port)], reservation);
     assert.ok(isPidRunning(original.services.api!.pid), 'the changed entry must not authorize signalling');
     assert.ok(isPidRunning(child.pid!), 'the replacement must survive');
-    // The proxy is still ours, but the foreign api is served through it: it stays,
-    // as something a service another run started depends on, reservation included.
     const after = (await readPids(projectDir))!;
     assert.deepEqual(after.services[PROXY_SERVICE_NAME], original.services[PROXY_SERVICE_NAME], 'the proxy stays for the foreign api');
     assert.ok(isPidRunning(after.services[PROXY_SERVICE_NAME]!.pid));
@@ -460,8 +446,7 @@ describe('foreground teardown ownership', () => {
 
   for (const holder of ['an unrelated process', "this run's own process"] as const) {
     it(`prunes, without signalling, an entry whose pid now holds ${holder}`, { timeout: 10_000 }, async () => {
-      // The replacement exited and the OS recycled its pid: live, but with another start
-      // token. The entry is pruned, and whatever holds the pid now is never signalled.
+      // The replacement exited and the OS recycled its pid: live, but with another start token.
       const stack = await startForeground();
       const original = (await readPids(projectDir))!;
       let holderPid = original.services.api!.pid;
@@ -488,9 +473,7 @@ describe('foreground teardown ownership', () => {
   }
 
   it('prunes a replacement entry whose process already exited and releases its reservation', { timeout: 10_000 }, async () => {
-    // A restart replaced api while the teardown waited, and the replacement exited
-    // (no readiness check, crashed at once). Not this run's to signal, but a dead
-    // entry has no owner: it is pruned and its port released.
+    // A restart replaced api while the teardown waited, and the replacement crashed at once.
     const stack = await startForeground();
     const original = (await readPids(projectDir))!;
     assert.ok(original.services.api!.startToken);
@@ -512,7 +495,7 @@ describe('foreground teardown ownership', () => {
 
   it('releases the reservation of a dead replacement that gained a port this run never reserved', { timeout: 10_000 }, async () => {
     // worker starts portless; after an edit gives it a port, a restart reserves one for
-    // its replacement, which exits before the teardown. That reservation goes too.
+    // its replacement, which exits before the teardown.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
       '  api:',
@@ -593,8 +576,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('leaves a Docker replacement alone when the daemon cannot be asked', { timeout: 10_000 }, async () => {
-    // Unknown is not dead: guessing would remove a container another run may be
-    // serving through. The entry, its reservation and the proxy stay, with a notice.
+    // Unknown is not dead: guessing could remove a container another run serves through.
     const stack = await startForeground();
     const original = (await readPids(projectDir))!;
     const docker = await installFakeDocker('unreachable');
@@ -612,7 +594,7 @@ describe('foreground teardown ownership', () => {
 
   it('does not keep the proxy for a replacement that is a zombie', { timeout: 15_000, skip: process.platform === 'win32' }, async () => {
     // Under a PID 1 that does not reap orphans, kill(pid, 0) still finds the exited
-    // replacement and its start token is unchanged; it is still no reason to keep the proxy.
+    // replacement, with its start token unchanged.
     const stack = await startForeground();
     const proxyPid = (await readPids(projectDir))!.services[PROXY_SERVICE_NAME]!.pid;
     const zombie = await makeZombie();
@@ -623,8 +605,6 @@ describe('foreground teardown ownership', () => {
         pids.services.api!.startToken = token ?? 'unreadable-start-token';
       }));
 
-      // stopServices counts a group holding only a zombie as gone, so the entry is
-      // pruned, not reported as a teardown failure.
       await withLifecycleLockForTeardown(projectDir, () => stack.teardown());
       assert.equal((await readPids(projectDir))?.services.api, undefined, "the zombie's entry is pruned");
       assert.equal((await readPids(projectDir))?.services[PROXY_SERVICE_NAME], undefined, 'the proxy is not kept');
@@ -640,7 +620,7 @@ describe('foreground teardown ownership', () => {
 
   it('stops what a failed startup started, even when a live service depends on it', { timeout: 15_000 }, async () => {
     // api, from an earlier run, depends on db, which is not running. This up starts db
-    // for web and web fails; keeping db for api would leave a child nobody supervises.
+    // for web, and web fails.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
       '  db:',
@@ -682,9 +662,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('reports the kept services\' reason gone as soon as one of several other-run roots dies', { timeout: 15_000 }, async () => {
-    // Replacement api keeps db, replacement worker keeps cache. api exiting
-    // alone must make dependentsAlive say no, and the pass that follows frees
-    // db while worker still keeps cache.
+    // Replacement api keeps db and replacement worker keeps cache; then api exits alone.
     const server = `exec "${process.execPath}" server.cjs`;
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
@@ -738,8 +716,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('reports the kept services\' reason gone when a root\'s entry is replaced, even while the old process lives', { timeout: 15_000 }, async () => {
-    // A Docker root restarted again reuses its container name, so an old snapshot would
-    // read alive. Any rewritten entry may have dropped the dependency this run kept.
+    // A Docker root restarted again reuses its container name, so an old snapshot would read alive.
     const server = `exec "${process.execPath}" server.cjs`;
     await fs.writeFile(path.join(projectDir, 'portler.yml'), [
       'services:',
@@ -773,8 +750,7 @@ describe('foreground teardown ownership', () => {
     assert.deepEqual(kept, ['db'], 'the replacement api keeps db');
     assert.equal(await stack.dependentsAlive(), true, 'the root is alive and still named in pids.json');
 
-    // A newer restart replaces api again and no longer depends on db; the
-    // first replacement is still running.
+    // A newer restart replaces api again without db; the first replacement still runs.
     const second = await replace([]);
     assert.equal(isPidRunning(first), true, 'the first replacement still runs');
     assert.equal(await stack.dependentsAlive(), false, 'the root was replaced, so the reason for keeping db is gone');
@@ -791,8 +767,7 @@ describe('foreground teardown ownership', () => {
   });
 
   it('prunes a stale entry for a service that never started and releases its reservation', { timeout: 10_000 }, async () => {
-    // Startup fails before api is spawned (a dangling env reference). The earlier run's
-    // dead api entry has no owner, so the teardown prunes it.
+    // Startup fails before api is spawned (a dangling env reference).
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),
       ['services:', '  api:', '    command: node -e ""', '    port: 3000', '    env:', '      URL: missing.url', ''].join('\n'),
@@ -811,8 +786,6 @@ describe('foreground teardown ownership', () => {
   });
 
   it('prunes a stale entry for a portless service that never started', { timeout: 10_000 }, async () => {
-    // A portless worker is in neither reserveNames nor startedEntries when startup
-    // fails before it is spawned; its dead entry is still this run's to prune.
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),
       ['services:', '  worker:', '    command: node -e ""', '    env:', '      URL: missing.url', ''].join('\n'),

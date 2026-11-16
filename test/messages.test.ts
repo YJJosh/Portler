@@ -76,14 +76,12 @@ describe('up for a service that is partly running', () => {
       () => ensureNoOverlap(new Set(['redis']), ['redis', 'worker'], 'portler restart worker'),
       /^Error: already running: redis\. To \(re\)start services next to what is running, use "portler restart worker"; to start over, use "portler down redis" first\.$/,
     );
-    // Without an alternative (Kubernetes mode, which restart does not cover) only down is offered.
+    // No alternative: Kubernetes mode, which restart does not cover.
     assert.throws(() => ensureNoOverlap(new Set(['redis']), ['redis'], undefined), /^Error: already running: redis\. Use "portler down redis" first\.$/);
   });
 
   it('builds the suggested restart from the refused invocation', () => {
     assert.equal(restartSuggestion({}, 'local', ['worker']), 'portler restart worker');
-    // A service with no PID entry has nothing for restart to replay, so the pin, the mode,
-    // the config file and the volume set must travel in the command itself.
     assert.equal(
       restartSuggestion(
         { file: 'deploy/portler.yml', prod: true, setup: false, images: { worker: 'registry/worker@sha256:abc' }, volumeSet: 'feat x' },
@@ -117,7 +115,6 @@ describe('up for a service that is partly running', () => {
     );
     assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
 
-    // restart docker would refuse to mix modes, and a plain restart would start api locally.
     const refused = portler(projectDir, 'up', 'docker', '-d', 'api');
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
@@ -163,12 +160,10 @@ describe('up for a service that is partly running', () => {
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
-    // Not offered because restart refuses the pin: it would leave db on its old image.
     const restart = portlerWith(projectDir, env, 'restart', 'docker', 'api', '--image', 'db=postgres:17-alpine');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.match(restart.stderr, /db/);
 
-    // Without the pin, restart would do what was asked, and is offered.
     const plain = portlerWith(projectDir, env, 'up', 'docker', '-d', 'api');
     assert.equal(plain.status, 1, plain.stdout + plain.stderr);
     assert.match(plain.stderr, /use "portler restart docker api"; to start over, use "portler down db" first\./);
@@ -211,7 +206,6 @@ describe('up for a service that is partly running', () => {
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
-    // Not offered because restart goes by api's entry, not by this command.
     const restart = portler(projectDir, 'restart', 'api');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s.*running/m);
@@ -241,7 +235,6 @@ describe('up for a service that is partly running', () => {
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
 
-    // restart is refused too, and nothing is started.
     const restart = portler(projectDir, 'restart', 'api', '--prod');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s/m);
@@ -266,7 +259,6 @@ describe('up for a service that is partly running', () => {
     );
     assert.equal(portler(projectDir, 'up', '-d', 'db').status, 0);
 
-    // Foreground: refused before anything starts, and told restart runs in the background.
     const refused = portler(projectDir, 'up', '--file', 'portler.yml', '--no-setup', 'api');
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(
@@ -274,12 +266,10 @@ describe('up for a service that is partly running', () => {
       /use "portler restart api --file portler\.yml --no-setup" \(restart starts them in the background\); to start over, use "portler down db" first\./,
     );
 
-    // Everything requested: the suggestion names api only, since restarting db would stop it.
     const all = portler(projectDir, 'up', '-d');
     assert.equal(all.status, 1, all.stdout + all.stderr);
     assert.match(all.stderr, /use "portler restart api"; to start over/);
 
-    // Run exactly what the refusal suggested.
     const restart = portler(projectDir, 'restart', 'api', '--file', 'portler.yml', '--no-setup');
     assert.equal(restart.status, 0, restart.stdout + restart.stderr);
     assert.match(portler(projectDir, 'ps').stdout, /^api\s.*running/m);
@@ -312,7 +302,6 @@ describe('down for one service', () => {
     assert.match(down.stdout, /stopped: db/);
     assert.match(down.stderr, /warning: still running and depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up -d db"\./);
 
-    // Stopping the dependent itself warns about nothing.
     const downApi = portler(projectDir, 'down', 'api');
     assert.equal(downApi.status, 0, downApi.stdout + downApi.stderr);
     assert.doesNotMatch(downApi.stderr, /warning/);
@@ -332,8 +321,6 @@ describe('the up a dependents warning suggests', () => {
     );
     // An older entry records no mode: the mode down ran in stands in for it.
     assert.equal(upSuggestion(['db'], [entry({})], 'docker', undefined), 'portler up docker -d db');
-    // Kubernetes entries record no --image pin (a portless service has no entry at all), so
-    // a bare up k8s could deploy another image than the one that ran: no command.
     assert.equal(upSuggestion(['db'], [undefined], 'k8s', undefined), undefined);
     assert.equal(upSuggestion(['db'], [entry({ runMode: 'k8s' })], 'local', undefined), undefined);
   });
@@ -347,14 +334,11 @@ describe('the up a dependents warning suggests', () => {
     const docker = entry({ runMode: 'docker', dockerContainer: 'c-db' });
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, ['branch'], undefined), 'portler up docker -d db --volume-set branch');
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [''], undefined), 'portler up docker -d db');
-    // No @ volume, no say.
     assert.equal(upSuggestion(['db', 'cache'], [docker, docker], 'local', undefined, ['branch', undefined], undefined), 'portler up docker -d db cache --volume-set branch');
-    // Different sets, or an entry that cannot say which: no single up brings them back.
     assert.equal(upSuggestion(['db', 'cache'], [docker, docker], 'local', undefined, ['branch', ''], undefined), undefined);
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [null], undefined), undefined);
-    // Base volumes cannot be asked for by flag, so PORTLER_VOLUME_SET would make a plain up pick another set.
+    // Base volumes have no flag, so PORTLER_VOLUME_SET would make a plain up pick another set.
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, [''], 'branch'), undefined);
-    // A set on the command line wins over the variable.
     assert.equal(upSuggestion(['db'], [docker], 'local', undefined, ['branch'], 'other'), 'portler up docker -d db --volume-set branch');
   });
 
@@ -366,13 +350,10 @@ describe('the up a dependents warning suggests', () => {
       "portler restart docker db --file deploy/portler.yml --prod --volume-set branch",
     );
     assert.equal(recoveryCommand(['db'], [entry({ runMode: 'local' })], 'local', undefined, [], [entry({ runMode: 'local' })], undefined), 'portler restart db');
-    // Nothing still running: up.
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [], undefined), 'portler up docker -d db --prod');
-    // restart would refuse a prerequisite started another way, or one whose mode is not recorded.
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ runMode: 'docker' })], undefined), undefined);
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ runMode: 'local', prod: true })], undefined), undefined);
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ prod: true })], undefined), undefined);
-    // Kubernetes has no restart.
     assert.equal(recoveryCommand(['db'], [undefined], 'k8s', undefined, [], [entry({ runMode: 'k8s' })], undefined), undefined);
   });
 
@@ -381,9 +362,7 @@ describe('the up a dependents warning suggests', () => {
       ({ dependsOn: [], env: {}, docker: { image: 'postgres:16-alpine', volumes } }) as unknown as ServiceConfig;
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: 'branch' })), 'branch');
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: '' })), '');
-    // An older entry with no recorded set, from a container that mounts an @ volume: unknown.
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), null);
-    // No @ volume in the mode it ran in, or no container at all: the set does not matter.
     assert.equal(recordedVolumeSet(service(['./data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), undefined);
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local' })), undefined);
     assert.equal(recordedVolumeSet(service(['@data:/data']), undefined), undefined);
@@ -453,7 +432,6 @@ describe('down warns from what is running, not from an edited portler.yml', () =
 
     const down = portlerWith(projectDir, { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` }, 'down', 'db');
     assert.equal(down.status, 1, 'the entry is kept, so down reports it did not finish');
-    // db's entry is kept, so it is not fully stopped yet: the warning names api but offers no command.
     assert.match(
       down.stderr,
       /depending on what was stopped: api \(on db\)\. Stop them too; once db is fully stopped \(see below\), start db again the way it was started\./,
@@ -488,7 +466,6 @@ describe('down warns from what is running, not from an edited portler.yml', () =
 
     const down = portler(projectDir, 'down', 'db');
     assert.equal(down.status, 0, down.stdout + down.stderr);
-    // `up -d db` would also start cache, which is still running, and be refused.
     assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler restart db"\./);
     assert.equal(portler(projectDir, 'up', '-d', 'db').status, 1, 'the up form is refused while cache runs');
 
@@ -524,7 +501,6 @@ describe('down warns from what is running, not from an edited portler.yml', () =
 
     const down = portler(projectDir, 'down', 'db');
     assert.equal(down.status, 0, down.stdout + down.stderr);
-    // cache alone would allow `restart db`, but restart plans with queue's entry too and refuses.
     assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or start db again the way it was started\./);
     assert.doesNotMatch(down.stderr, /portler restart|portler up/);
     assert.equal(portler(projectDir, 'restart', 'db').status, 1, 'restart refuses what the warning does not offer');
@@ -549,7 +525,6 @@ describe('down warns from what is running, not from an edited portler.yml', () =
     assert.match(down.stderr, /depending on what was stopped: api \(on db\)\. Stop them too, or bring it back with "portler up -d db"\./);
     assert.doesNotMatch(down.stderr, /other/);
 
-    // Run exactly what the warning suggested.
     const back = portler(projectDir, 'up', '-d', 'db');
     assert.equal(back.status, 0, back.stdout + back.stderr);
   });

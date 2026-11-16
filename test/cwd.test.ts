@@ -105,8 +105,7 @@ describe('a service whose cwd is missing', () => {
   });
 
   it('is checked for every selected service before the project setup or any other step runs', async () => {
-    // web has no setup steps of its own, and the project's and api's steps come first:
-    // the missing folder must still be reported before any of them runs.
+    // web has no setup steps of its own, and the project's and api's steps come first.
     const projectDir = await project(
       [
         'setup: node -e "require(\'fs\').writeFileSync(\'project-setup-ran\', \'x\')"',

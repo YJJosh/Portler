@@ -102,7 +102,6 @@ describe('portler run', () => {
     const [cwd, url] = result.stdout.trim().split('\n');
     assert.equal(cwd, path.join(projectDir, 'api'));
     assert.match(url!, /^postgres:\/\/postgres:postgres@localhost:\d+\/app$/);
-    // Even the Docker view of the service reaches the database from here through its port.
     const docker = run('docker', 'api', '--', 'sh', '-c', 'echo "$DATABASE_URL"');
     assert.equal(docker.status, 0, docker.stderr);
     assert.match(docker.stdout, /@localhost:\d+\/app$/m);

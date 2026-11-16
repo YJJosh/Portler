@@ -89,10 +89,8 @@ function bindUdp(port: number, host: string): Promise<dgram.Socket | null> {
   });
 }
 
-/**
- * Busy on UDP, free on TCP. Picks below the ephemeral ranges of Linux (32768+) and
- * macOS (49152+), where parallel test files hold TCP sockets, and checks TCP too.
- */
+// Busy on UDP, free on TCP. Picks below the Linux (32768+) and macOS (49152+) ephemeral
+// ranges, where parallel test files hold TCP sockets, and checks TCP too.
 async function occupyUdpPort(host = '127.0.0.1'): Promise<{ port: number; close: () => Promise<void> }> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const port = 20000 + Math.floor(Math.random() * 10000);
@@ -204,8 +202,6 @@ describe('isPortFree with transports', () => {
   });
 });
 
-// Pruning by transport keeps a running UDP service's reservation from being handed
-// out again once it is five minutes old.
 describe('pruneRegistry with transports', () => {
   it('keeps an old entry whose port is busy on its recorded transport', async () => {
     const { port, close } = await occupyUdpPort();

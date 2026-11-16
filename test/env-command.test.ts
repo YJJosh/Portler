@@ -200,8 +200,7 @@ describe('env for a running service', () => {
   });
 
   it('shows each view\'s own image for a container service with a docker.image override', async () => {
-    // Both views name the same container, so the cached state passes the container-name
-    // check; the image cached by `env docker` must not leak into the plain view.
+    // Both views name the same container, so the cached state passes the container-name check.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
     image: example/api-base
     port: 5000
@@ -294,7 +293,6 @@ describe('env for a running service', () => {
     assert.equal(k8s.status, 1);
     assert.match(k8s.stderr, /service "cache" has no container config for Kubernetes/);
     assert.equal(k8s.stdout, '');
-    // Without a typed mode, the development view of backend is still available.
     assert.equal(run('backend').status, 0);
   });
 
@@ -311,7 +309,6 @@ describe('env for a running service', () => {
     assert.equal(k8s.status, 1);
     assert.match(k8s.stderr, /service "api" has no container config for Kubernetes/);
     assert.equal(k8s.stdout, '');
-    // The development view of the whole project is still available.
     assert.equal(run().status, 0);
   });
 

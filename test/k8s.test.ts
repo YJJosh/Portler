@@ -33,7 +33,7 @@ import type { PortlerConfig, ServiceConfig } from '../src/types/index.ts';
 const PROJECT_DIR = '/home/dev/myapp';
 const CLUSTER: ClusterInfo = { type: 'kind', context: 'kind-dev', name: 'dev' };
 
-/** Scripted kubectl: records argv, answers from a queue of command outcomes. */
+// Scripted kubectl: records argv, answers from a queue of command outcomes.
 function fakeKubectl(outcomes: CommandResult[]): { run: CommandRunner; calls: string[][]; stdin: (string | undefined)[] } {
   const calls: string[][] = [];
   const stdin: (string | undefined)[] = [];
@@ -114,8 +114,7 @@ describe('containerEnvEntries', () => {
       'PORTLER_API_URL',
       'PORTLER_DECLARED_FLAG',
       'PORTLER_SERVICE_NAME',
-      // Internal host defaults stay excluded even when buildServiceEnv records
-      // that it injected them into the composed environment.
+      // Excluded even when buildServiceEnv records injecting it into the composed env.
       'pnpm_config_verify_deps_before_run',
     ]);
 
@@ -143,7 +142,6 @@ describe('classifyContext', () => {
     assert.equal(classifyContext('prod-eks'), null);
     assert.equal(classifyContext('arn:aws:eks:us-east-1:1234:cluster/prod'), null);
     assert.equal(classifyContext('gke_acme-prod_us-central1_main'), null);
-    // Substring lookalikes must not slip through.
     assert.equal(classifyContext('not-kind-really'), null);
     assert.equal(classifyContext('minikube-prod'), null);
   });
@@ -168,8 +166,6 @@ describe('resolveCluster', () => {
   });
 
   it('does not let an override for one context unlock a different one', () => {
-    // The override names one context, so a stale export cannot authorize whatever
-    // context is active later.
     assert.throws(() => resolveCluster('prod-eks', 'my-lab-cluster'), /refusing to use kubectl context/);
     assert.throws(() => resolveCluster('prod-eks', 'true'), /refusing to use kubectl context/);
     assert.throws(() => resolveCluster('prod-eks', ''), /refusing to use kubectl context/);
@@ -192,8 +188,7 @@ describe('namespaceOwnership', () => {
   });
 
   it('refuses to claim a pre-existing, unlabelled namespace', () => {
-    // e.g. the user pointed k8s_namespace: at "default" or a shared team
-    // namespace. Deleting it would take everyone else's workloads with it.
+    // e.g. k8s_namespace: "default" or a shared team namespace.
     assert.equal(namespaceOwnership({}, config), 'foreign');
   });
 
@@ -211,8 +206,7 @@ describe('reading a namespace (kubectl output, not a guess)', () => {
   const config = makeConfig();
 
   it('asks for -o json, because jsonpath does NOT print JSON', () => {
-    // `-o jsonpath={.metadata.labels}` prints a Go map (`map[a:b]`), not JSON, so the
-    // labels that prove ownership would never be read.
+    // `-o jsonpath={.metadata.labels}` prints a Go map (`map[a:b]`), not JSON.
     const kubectl = fakeKubectl([namespaceJson(projectLabels(config))]);
 
     return readNamespace(CLUSTER, 'portler-myapp-abc', kubectl.run).then((read) => {
@@ -267,8 +261,6 @@ describe('ensureNamespaceClaimable', () => {
   });
 
   it('FAILS when ownership cannot be read, instead of assuming absent', async () => {
-    // An auth error or a dead API server must never be read as "the namespace
-    // does not exist, go ahead and own it".
     const kubectl = fakeKubectl([FORBIDDEN]);
     await assert.rejects(ensureNamespaceClaimable(CLUSTER, config, kubectl.run), /could not determine whether namespace/);
 
@@ -302,8 +294,7 @@ describe('ensureNamespace (create, never apply)', () => {
   });
 
   it('re-reads after AlreadyExists and ACCEPTS a namespace that turns out to be ours', async () => {
-    // Two `portler up k8s` runs racing in the same project: one create wins,
-    // the other gets AlreadyExists and must simply carry on.
+    // Two `portler up k8s` runs race in one project and this one loses the create.
     const kubectl = fakeKubectl([
       NS_NOT_FOUND,
       { code: 1, stdout: '', stderr: 'Error from server (AlreadyExists): namespaces "portler-myapp-abc" already exists' },
@@ -317,8 +308,7 @@ describe('ensureNamespace (create, never apply)', () => {
   });
 
   it('re-reads after AlreadyExists and REFUSES a namespace raced in by someone else', async () => {
-    // Our check says absent, a foreign namespace appears, our create loses. `apply`
-    // would adopt it and let a later `down --volumes` delete it.
+    // Our check says absent, a foreign namespace appears, our create loses.
     const kubectl = fakeKubectl([
       NS_NOT_FOUND,
       { code: 1, stdout: '', stderr: 'Error from server (AlreadyExists): namespaces "portler-myapp-abc" already exists' },
@@ -386,7 +376,6 @@ describe('deleteK8sResources', () => {
   });
 
   it('THROWS when the delete itself fails, instead of warning and returning', async () => {
-    // Otherwise `down` exits 0 and releases the ports while the Deployments still run.
     const kubectl = fakeKubectl([
       namespaceJson(projectLabels(config)),
       { code: 1, stdout: '', stderr: 'error: failed to delete: connection refused' },
@@ -419,8 +408,6 @@ describe('classifyApiEndpoint', () => {
   });
 
   it('classifies a real cluster endpoint as remote', () => {
-    // A context can be NAMED "minikube" and point at production. The endpoint is
-    // the second, independent gate.
     assert.equal(classifyApiEndpoint('https://ABC123.gr7.us-east-1.eks.amazonaws.com'), 'remote');
     assert.equal(classifyApiEndpoint('https://k8s.internal.corp.example.com:6443'), 'remote');
     assert.equal(classifyApiEndpoint('https://34.120.0.1:443'), 'remote');
@@ -440,7 +427,6 @@ describe('classifyApiEndpoint', () => {
 
 describe('checkEndpointLocality', () => {
   it('accepts, without a prompt, only endpoints that are certainly on this machine', () => {
-    // Loopback, and the host aliases the local runtimes publish. Nothing else.
     assert.doesNotThrow(() => checkEndpointLocality('kind-dev', 'https://127.0.0.1:6443', undefined));
     assert.doesNotThrow(() => checkEndpointLocality('docker-desktop', 'https://kubernetes.docker.internal:6443', undefined));
     assert.doesNotThrow(() => checkEndpointLocality('orbstack', 'https://0.0.0.0:26443', undefined));
@@ -455,14 +441,12 @@ describe('checkEndpointLocality', () => {
   });
 
   it('refuses a PRIVATE/LAN endpoint too, unless the override names it exactly', () => {
-    // Private is not local: minikube's VM, an office LAN cluster and one over a VPN can
-    // all be 192.168.49.2, so the user has to name the one they mean.
+    // minikube's VM, an office LAN cluster and one over a VPN can all be 192.168.49.2.
     const minikube = 'https://192.168.49.2:8443';
     assert.throws(() => checkEndpointLocality('minikube', minikube, undefined), /private\/LAN address/);
     assert.throws(() => checkEndpointLocality('minikube', minikube, undefined), new RegExp(ENDPOINT_OVERRIDE_ENV));
     assert.throws(() => checkEndpointLocality('kind-dev', 'https://10.4.0.9:6443', undefined), /refusing to use kubectl context/);
 
-    // The exact URL, and nothing else, unlocks it.
     assert.doesNotThrow(() => checkEndpointLocality('minikube', minikube, minikube));
     assert.throws(() => checkEndpointLocality('minikube', minikube, 'https://192.168.49.3:8443'), /refusing to use/);
   });
@@ -474,7 +458,6 @@ describe('checkEndpointLocality', () => {
   });
 
   it('FAILS CLOSED when the endpoint is unreadable, unparseable or empty', () => {
-    // A context name alone does not identify a cluster, and Portler deletes namespaces.
     assert.throws(() => checkEndpointLocality('kind-dev', null, undefined), /cannot tell which cluster it points at/);
     assert.throws(() => checkEndpointLocality('kind-dev', '', undefined), /cannot tell which cluster it points at/);
     assert.throws(() => checkEndpointLocality('kind-dev', '   ', undefined), /cannot tell which cluster it points at/);
@@ -482,8 +465,6 @@ describe('checkEndpointLocality', () => {
   });
 
   it('has no override for an endpoint it cannot read', () => {
-    // The override names an exact URL; there is no URL here to name, so a stale
-    // export cannot rubber-stamp an unidentifiable cluster.
     assert.throws(() => checkEndpointLocality('kind-dev', null, 'https://127.0.0.1:6443'), /has no override/);
     assert.throws(() => checkEndpointLocality('kind-dev', 'not a url', 'not a url'), /has no override/);
   });
@@ -496,8 +477,6 @@ describe('isNamespaceNotFound', () => {
   });
 
   it('does NOT treat a missing binary or credential helper as an absent namespace', () => {
-    // "Absent" licenses creating the namespace and later deleting it, so a missing
-    // kubectl or auth plugin must stay an operational error.
     assert.equal(isNamespaceNotFound('bash: kubectl: command not found'), false);
     assert.equal(
       isNamespaceNotFound(
@@ -521,12 +500,10 @@ describe('isNamespaceNotFound', () => {
     const read = parseNamespaceRead(missingPlugin.code, missingPlugin.stdout, missingPlugin.stderr);
     assert.equal(read.status, 'error');
 
-    // ...and the ownership gate refuses rather than deciding the namespace is free.
     const config = makeConfig();
     const { run } = fakeKubectl([missingPlugin]);
     await assert.rejects(ensureNamespaceClaimable(CLUSTER, config, run), /could not determine whether namespace/);
 
-    // ...and a phase read throws instead of reporting "no namespace".
     const phase = fakeKubectl([missingPlugin]);
     await assert.rejects(getNamespacePhase(CLUSTER, config.k8sNamespace, phase.run), /could not read namespace/);
   });
@@ -542,8 +519,6 @@ describe('isNamespaceNotFound', () => {
 
 describe('project ownership label', () => {
   it('is a collision-resistant digest, not the 32-bit name hash', () => {
-    // The label authorizes `down k8s` to delete a namespace; a 32-bit hash collision
-    // between two project paths is brute-forceable in seconds.
     const value = projectLabels(makeConfig())[PROJECT_LABEL]!;
 
     assert.match(value, /^[0-9a-f]{32}$/, 'a 128-bit hex digest');
@@ -594,8 +569,6 @@ describe('deleteSelector', () => {
   });
 
   it('scopes a partial delete by project AND service name', () => {
-    // `app in (api)` alone would also match another project's "api" Deployment
-    // if the two ever shared a namespace.
     const selector = deleteSelector(config, ['api', 'web']);
     assert.ok(selector.includes(`${PROJECT_LABEL}=${projectHash}`), selector);
     assert.ok(selector.includes('app in (api,web)'), selector);
@@ -604,7 +577,6 @@ describe('deleteSelector', () => {
 
 describe('deleteResourceKinds', () => {
   it('preserves PersistentVolumeClaims by default', () => {
-    // An ordinary `portler down k8s` must not destroy a database's data.
     const kinds = deleteResourceKinds(false);
     assert.equal(kinds, 'deployment,service');
     assert.ok(!kinds.includes('persistentvolumeclaim'));
@@ -627,8 +599,6 @@ describe('port-forward supervisor spec', () => {
   };
 
   it('pins the kubectl context on the port-forward too', () => {
-    // Otherwise a context switch after `up k8s` would re-point the forward's
-    // kubectl at a different cluster when it respawns after a pod restart.
     const args = portForwardArgs(spec);
     assert.deepEqual(args.slice(0, 2), ['--context', 'kind-dev']);
     assert.ok(args.includes('port-forward'));

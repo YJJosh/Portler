@@ -32,7 +32,6 @@ describe('normalizeTopLevelDockerConfig', () => {
       () => normalizeTopLevelDockerConfig({ image: 'redis:7', type: 'vm' }, 'api', PROJECT_DIR),
       /type only supports "docker"/,
     );
-    // A lone unknown type has no Docker keys, so the service stays local.
     assert.equal(normalizeTopLevelDockerConfig({ type: 'vm' }, 'api', PROJECT_DIR), undefined);
   });
 
@@ -194,7 +193,6 @@ describe('dockerShellCommand', () => {
 
   it('refuses to use a network it does not own, before AND after a create race', () => {
     // An existing portler-net may be someone else's, and a later `down` would remove it.
-    // After a lost create race, the winner may not be us either.
     const service = makeService({
       port: 5432,
       docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },
@@ -238,8 +236,7 @@ describe('dockerShellCommand', () => {
   });
 
   it('removes the stale container BY ID, not by its (mutable) name', () => {
-    // The rm uses the .Id read with the label. By name, a container created under that
-    // name after the label check would be destroyed instead.
+    // By name, a container created under that name after the label check would be destroyed.
     const service = makeService({
       port: 5432,
       docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },
@@ -298,8 +295,7 @@ describe('dockerShellCommand', () => {
       'PORTLER_DECLARED_FLAG',
       'PORTLER_SERVICE_NAME',
       'ZED',
-      // buildServiceEnv adds this internal default to explicitKeys; the final
-      // container boundary must still filter it.
+      // buildServiceEnv adds this internal default to explicitKeys; the container boundary still filters it.
       'pnpm_config_verify_deps_before_run',
     ]);
     const command = dockerShellCommand(makeConfig({ api: service }), service, env, explicitKeys, assignment, assignments);
@@ -444,7 +440,6 @@ describe('applyImageOverrides', () => {
     assert.deepEqual(docker.volumes, ['@data:/data']);
     assert.deepEqual(docker.env, { A: '1' });
     assert.equal(docker.containerName, 'c');
-    // The input config is left alone.
     assert.equal(built.docker!.image, 'portler-x-api');
     assert.ok(built.docker!.build);
   });
@@ -466,9 +461,8 @@ describe('applyImageOverrides', () => {
       () => applyImageOverrides(config, { apo: 'img' }),
       (error: Error) => error.message.includes('--image: unknown service "apo"') && error.message.includes('"api"'),
     );
-    // Plain `up` leaves the docker: block inactive, so there is no image to replace...
+    // Plain `up` leaves the docker: block inactive; `up docker` activates it.
     assert.throws(() => applyImageOverrides(config, { api: 'img' }), /does not run in Docker in this mode/);
-    // ...while `up docker` activates it.
     assert.equal(applyImageOverrides(applyDockerMode(config), { api: 'img' }).services.api!.docker!.image, 'img');
   });
 

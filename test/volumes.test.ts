@@ -260,9 +260,8 @@ describe('managed volume destructive-operation ownership', () => {
 describe('concurrent forks into the same target', () => {
   let stateDir: string;
 
-  // A stateful fake: one JSON file of labels per volume. `volume create` keeps an
-  // existing volume and its labels and still succeeds, like Docker 29 (or fails
-  // with MOCK_CREATE_CONFLICT, like a Docker that refuses), and the absent-target
+  // A stateful fake, one labels file per volume. `volume create` keeps an existing volume
+  // and succeeds, like Docker 29, or fails with MOCK_CREATE_CONFLICT; the absent-target
   // check waits until two forks have both seen the target absent.
   beforeEach(async () => {
     stateDir = path.join(tempDir, 'state');

@@ -74,7 +74,6 @@ services:
     assert.equal(env.FROM_ROOT, 'root');
     assert.equal(env.FROM_FILE, 'file');
     assert.equal(env.PORT, '4000');
-    // As in up and setup, file values are used as written, and a config value they override is not resolved.
     const literal = await buildStartEnv(cfg, api, { SHARED: 'missing.url', LITERAL: '${db.port}' }, {});
     assert.equal(literal.SHARED, 'missing.url');
     assert.equal(literal.LITERAL, '${db.port}');
@@ -128,7 +127,6 @@ services:
     const env = await buildStartEnv(cfg, api, {}, {});
     assert.equal(env.toString, 'root-string');
     assert.equal(env.constructor, 'service-ctor');
-    // The usual order still holds for such a name: file over config, platform over file.
     assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, {})).constructor, 'file');
     assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, { constructor: 'platform' })).constructor, 'platform');
   });
@@ -148,8 +146,8 @@ services:
     const env = await buildStartEnv(cfg, api, {}, {
       PORT: '5123', API_PORT: '1', PORTLER_API_URL: 'stale', PORTLER_WEB_URL: 'stale', PORTLER_SERVICE_NAME: 'web', KEEP: 'platform',
     });
-    assert.equal(env.PORT, '5123'); // the platform's PORT selects the port...
-    assert.equal(env.API_PORT, '5123'); // ...and every port_env name follows that choice
+    assert.equal(env.PORT, '5123');
+    assert.equal(env.API_PORT, '5123');
     assert.match(env.PORTLER_API_URL!, /:5123$/);
     assert.match(env.PORTLER_WEB_URL!, /:3000$/);
     assert.equal(env.PORTLER_SERVICE_NAME, 'api');
@@ -214,12 +212,10 @@ services:
       else gone = true;
     }
     assert.ok(gone, 'the leftover was killed at the deadline');
-    // A group that empties on its own ends the wait early.
     startedAt = Date.now();
     assert.equal(await runShell('sleep 0.2 & exit 0', cfg.projectDir, {}, { drainMs: 5000 }), 0);
     const early = Date.now() - startedAt;
     assert.ok(early >= 150 && early < 3000, `returned after ${early} ms, when the group emptied`);
-    // Without drainMs the call returns with the shell, whatever it left running.
     startedAt = Date.now();
     assert.equal(await runShell('sleep 30 & echo $! > bg2.pid; exit 0', cfg.projectDir, {}), 0);
     assert.ok(Date.now() - startedAt < 1000);

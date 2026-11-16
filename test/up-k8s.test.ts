@@ -270,7 +270,6 @@ if (args.includes('config') && args.includes('current-context')) {
     assert.equal(deletes.length, 1, JSON.stringify(deletes));
     assert.match(deletes[0]![deletes[0]!.indexOf('--selector') + 1]!, /,app in \(api\)$/);
 
-    // The newer run still owns worker: its Deployment and its recorded forward.
     assert.deepEqual(JSON.parse(await fs.readFile(stateFile, 'utf8')), ['worker']);
     const pids = await readPids(projectDir);
     assert.deepEqual(Object.keys(pids?.services ?? {}), ['worker']);

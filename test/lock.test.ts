@@ -32,8 +32,7 @@ describe('isTakeoverAllowed', () => {
   });
 
   it('does NOT take over a stale-looking lock whose owner is still alive', () => {
-    // A slow holder is still a holder (allocateAssignments can probe a whole port
-    // range under the lock); age alone would let two writers in.
+    // A slow holder is still a holder; age alone would let two writers in.
     assert.equal(isTakeoverAllowed({ pid: process.pid, host, at: '' }, 60_000, 30_000, host), false);
   });
 
@@ -48,8 +47,8 @@ describe('isTakeoverAllowed', () => {
   });
 
   it('NEVER steals a lock held by another host, however stale it looks', () => {
-    // On a shared checkout (NFS, a devcontainer with its own hostname) that owner may
-    // be mid-write, and its pid cannot be probed from here; the wait times out instead.
+    // On a shared checkout (NFS, a devcontainer with its own hostname) that owner may be
+    // mid-write, and its pid cannot be probed from here.
     assert.equal(isTakeoverAllowed({ pid: 1, host: 'other-host', at: '' }, 60_000, 30_000, host), false);
     assert.equal(isTakeoverAllowed({ pid: 1, host: 'other-host', at: '' }, 999_999_999, 30_000, host), false);
   });
@@ -57,8 +56,7 @@ describe('isTakeoverAllowed', () => {
 
 describe('lock release', () => {
   it('does NOT delete a lock that was taken over while we held it', async () => {
-    // A stalled holder's late release must check the token: the lock may now belong to
-    // whoever took it over, and deleting it would let a third process in.
+    // Deleting a lock someone took over would let a third process in.
     const lockDir = path.join(dir, 'test.lock');
     let ownerDuringSection: string | undefined;
 
@@ -73,7 +71,6 @@ describe('lock release', () => {
     });
 
     assert.ok(ownerDuringSection?.includes('token'), 'the lock records a per-acquisition token');
-    // The new holder's lock survives our (late) release.
     const stillHeld = await fs.readFile(path.join(lockDir, 'owner'), 'utf8');
     assert.match(stillHeld, /someone-elses-token/, "the late releaser must not delete the new holder's lock");
   });
@@ -88,8 +85,8 @@ describe('lock release', () => {
 
 describe('the lifecycle lock and the project lock do not deadlock', () => {
   it('nests project-lock work inside the lifecycle lock', async () => {
-    // Lifecycle is the outer lock and project the inner one; nothing holding the project
-    // lock asks for the lifecycle lock. Otherwise (or if they were one lock) this hangs.
+    // Lock order: lifecycle outer, project inner, never the reverse. Otherwise (or as
+    // one lock) this hangs.
     await withLifecycleLock(dir, async () => {
       await updatePids(dir, (pids) => {
         pids.services.api = { pid: 1, command: 'x', cwd: dir, startedAt: new Date().toISOString() };
@@ -189,14 +186,12 @@ describe('withDirLock', () => {
       /boom/,
     );
 
-    // The lock directory must be gone, or every later run would block on it.
     assert.equal(await fs.access(lockDir).then(() => true, () => false), false);
     await withDirLock(lockDir, OPTIONS, async () => undefined);
   });
 
   it('waits out a lock whose owner on this host died, instead of giving up before it can be taken', async () => {
-    // A command killed in its critical section leaves the lock behind, to be taken
-    // over once it is staleMs old; giving up at waitMs first would fail needlessly.
+    // A command killed in its critical section leaves the lock, taken over once staleMs old.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const lockDir = path.join(dir, 'crashed.lock');
@@ -218,8 +213,7 @@ describe('withDirLock', () => {
   });
 
   it('keeps waiting when another waiter takes over the dead owner\'s lock first', async () => {
-    // One waiter takes the dead owner's lock over. The others then see a live owner and
-    // keep the deadline the dead lock justified, not an already expired waitMs.
+    // One waiter takes the dead owner's lock over; the others then see a live owner.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const lockDir = path.join(dir, 'contended.lock');
@@ -244,8 +238,6 @@ describe('withDirLock', () => {
   });
 
   it('gives the waiter that took over a dead owner\'s lock its own waitMs, not just the stale margin', async () => {
-    // The winner may need most of a waitMs (a full port scan, say); the others wait
-    // for it as for any live holder, not one margin after the dead lock went stale.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const lockDir = path.join(dir, 'replacement.lock');
@@ -270,9 +262,8 @@ describe('withDirLock', () => {
   });
 
   it('reads the lock\'s age and its owner from the same lock when a takeover lands between them', async () => {
-    // Another waiter takes the dead owner's lock over right after this waiter
-    // read the old directory's mtime. Pairing that old mtime with the new
-    // owner would give the replacement a wait window that ended long ago.
+    // Another waiter takes the dead owner's lock over right after this waiter read the
+    // old directory's mtime.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const lockDir = path.join(dir, 'midread.lock');
@@ -320,9 +311,7 @@ describe('withDirLock', () => {
   });
 
   it('does not let a dead owner\'s lock dated in the future stretch the wait', async () => {
-    // A lock directory on a filesystem whose clock runs ahead of ours: its
-    // mtime counts as now, so the wait ends about staleMs plus the margin
-    // later, not when the future timestamp finally goes stale.
+    // The lock directory sits on a filesystem whose clock runs ahead of ours.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const lockDir = path.join(dir, 'future.lock');
@@ -361,9 +350,8 @@ describe('withDirLock', () => {
   });
 
   it('times out instead of spinning when a stale lock cannot be moved out of the way', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
-    // A dead owner's stale lock in a directory we may not write to: the
-    // takeover's rename fails with EACCES every time. The wait must still end
-    // at its deadline, and say why the lock stayed.
+    // A dead owner's stale lock in a directory we may not write to: the takeover's
+    // rename fails with EACCES every time.
     const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => dead.once('exit', resolve));
     const parent = path.join(dir, 'read-only');
@@ -391,8 +379,7 @@ describe('withDirLock', () => {
 
 describe('updatePids under the project lock', () => {
   it('does not lose entries when services are recorded concurrently', async () => {
-    // `up a` and `up b` each read pids.json, add a service and write it back. Unlocked,
-    // the second write drops the first, and `down` never learns that pid.
+    // Each write reads pids.json, adds a service and writes it back; unlocked, one drops another.
     const names = Array.from({ length: 10 }, (_unused, index) => `svc-${index}`);
 
     await Promise.all(
@@ -424,8 +411,7 @@ describe('updatePids under the project lock', () => {
   });
 
   it('REFUSES to overwrite a corrupt PID file instead of treating it as empty', async () => {
-    // pids.json is the only record of those pids; overwriting it orphans the processes.
-    // Recovery is an explicit `clean --force`, not a side effect of `up`.
+    // pids.json is the only record of those pids; recovery is an explicit `clean --force`.
     await fs.mkdir(portlerDir(dir), { recursive: true });
     await fs.writeFile(path.join(portlerDir(dir), 'pids.json'), '{"version":1,"services":{ truncated', 'utf8');
 
@@ -450,10 +436,8 @@ describe('updatePids under the project lock', () => {
   });
 });
 
-/**
- * The foreground wait of `portler up` is unlocked (it lasts until Ctrl-C); its teardown
- * stops groups, prunes pids.json and releases ports, so it takes the lifecycle lock.
- */
+// The foreground wait of `portler up` is unlocked (it lasts until Ctrl-C); its teardown
+// takes the lifecycle lock.
 describe('withLifecycleLockForTeardown', () => {
   it('waits for a concurrent lifecycle command before tearing down', async () => {
     const order: string[] = [];
@@ -477,7 +461,6 @@ describe('withLifecycleLockForTeardown', () => {
   });
 
   it('is not held during the foreground wait itself', async () => {
-    // `down` must be able to take the lock while an `up` sits in its foreground wait.
     let taken = false;
     await withLifecycleLock(dir, async () => {
       taken = true;
@@ -486,8 +469,7 @@ describe('withLifecycleLockForTeardown', () => {
   });
 
   it('fails closed when the lifecycle lock cannot be acquired', async () => {
-    // Unserialized, an old teardown can stop a newer `up` it read from pids.json. The
-    // old run stays recorded for an explicit `down` instead.
+    // Unserialized, an old teardown can stop a newer `up` it read from pids.json.
     const lifecycleLock = path.join(portlerDir(dir), 'lifecycle.lock');
     let torn = false;
 
@@ -506,8 +488,8 @@ describe('withLifecycleLockForTeardown', () => {
   });
 
   it('does NOT re-run a teardown that timed out on one of its OWN locks', async () => {
-    // The teardown's own project and registry locks throw LockTimeoutError too. A retry
-    // would repeat signals and Docker removals already done, so no failure retries.
+    // The teardown's own locks throw LockTimeoutError too; a retry would repeat signals
+    // and Docker removals already done.
     const registryLock = path.join(dir, 'registry.lock');
     let runs = 0;
 
@@ -538,7 +520,6 @@ describe('withLifecycleLockForTeardown', () => {
 });
 
 describe('waitForForegroundServices', () => {
-  /** A child that has already exited: exactly what triggers the teardown path. */
   async function exitedChild(): Promise<ChildProcess> {
     const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
     await new Promise((resolve) => child.once('exit', resolve));
@@ -546,7 +527,6 @@ describe('waitForForegroundServices', () => {
   }
 
   it('resolves (non-zero) instead of hanging when teardown fails', async () => {
-    // An unhandled rejection would leave `portler up` wedged after Ctrl-C, with no output.
     const children = new Map([['api', await exitedChild()]]);
 
     const code = await waitForForegroundServices(children, async () => {
@@ -568,7 +548,6 @@ describe('waitForForegroundServices', () => {
     assert.equal(runs, 1);
   });
 
-  /** A child that keeps running until it is killed: a service the teardown left up. */
   function runningChild(): ChildProcess {
     return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   }
@@ -637,8 +616,7 @@ describe('waitForForegroundServices', () => {
   });
 
   it('prunes each kept service as it exits and stays attached to the rest', async (t) => {
-    // The teardown kept db and the proxy. db dies while the proxy runs on: its
-    // entry and port must not wait for the proxy, which may never exit.
+    // The teardown kept db and the proxy; db dies while the proxy runs on.
     const db = runningChild();
     const proxy = runningChild();
     t.after(() => { db.kill('SIGKILL'); proxy.kill('SIGKILL'); });
@@ -696,8 +674,7 @@ describe('waitForForegroundServices', () => {
   });
 
   it('runs the teardown again once the services it kept something for are gone', async (t) => {
-    // The restarted api that db was kept for is another run's: not a child, so
-    // no exit event. When it dies, db is nothing anybody depends on any more.
+    // The restarted api that db was kept for is another run's: not a child, so no exit event.
     const db = runningChild();
     t.after(() => { db.kill('SIGKILL'); });
     const children = new Map([['api', await exitedChild()], ['db', db]]);

@@ -33,9 +33,8 @@ describe('isPidAlive', () => {
       assert.equal(isPidRunning(zombie), true, 'kill(pid, 0) still sees the zombie');
       assert.equal(isPidAlive(zombie), false, 'the state probe does not');
     } finally {
-      // Resume the helper and let it reap its child and exit on its own. A
-      // kill right after the SIGCONT could land before it reaps, and the
-      // zombie would go to PID 1, which may never reap it.
+      // Let the helper reap its child and exit: a kill right after SIGCONT could land before
+      // it reaps, leaving the zombie to a PID 1 that may never reap it.
       if (helper.exitCode === null && helper.signalCode === null) {
         helper.kill('SIGCONT');
         const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
@@ -89,18 +88,15 @@ describe('processGroupAlive', () => {
     run = scripted(zombies(5), { members: ['5', '6'], live: true, settled: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
 
-    // 6 had already become a zombie by the second scan: the members changed, so a
-    // third scan decides; the same set again is stable.
+    // 6 is already a zombie by the second scan: the members changed, so a third scan decides.
     run = scripted(zombies(5), zombies(5, 6), zombies(5, 6));
     assert.equal(groupHoldsOnlyZombies(run.scan), true);
     assert.equal(run.calls(), 3);
 
-    // Members that keep changing never settle within the attempts.
     run = scripted(zombies(5), zombies(5, 6), zombies(5, 6, 7), zombies(5, 6, 7, 8), zombies(5, 6, 7, 8, 9));
     assert.equal(groupHoldsOnlyZombies(run.scan, 4), false);
     assert.equal(run.calls(), 4);
 
-    // A live member or an unreadable one in the first scan ends it at once.
     run = scripted({ members: ['5'], live: true, settled: true });
     assert.equal(groupHoldsOnlyZombies(run.scan), false);
     assert.equal(run.calls(), 1);
@@ -113,7 +109,7 @@ describe('processGroupAlive', () => {
     assert.equal(groupHoldsOnlyZombies(scripted(zombies(), zombies()).scan), true);
 
     // A scan in which something exited mid-read never matches, even with the same ids:
-    // the id may now belong to a new process or thread. Two settled scans after it do.
+    // the id may now belong to a new process or thread.
     const unsettled = (...members: number[]): GroupScan => ({ members: members.map(String), live: false, settled: false });
     run = scripted(unsettled(5), unsettled(5), unsettled(5), unsettled(5));
     assert.equal(groupHoldsOnlyZombies(run.scan, 4), false);
@@ -123,9 +119,8 @@ describe('processGroupAlive', () => {
   });
 
   it('reads a member whose main thread exited as live while another of its threads runs', () => {
-    // /proc/<pid>/stat carries the main thread's state. A process that ended its main
-    // thread (pthread_exit) reads `Z` there while a worker thread keeps running, and
-    // only /proc/<pid>/task shows that.
+    // /proc/<pid>/stat has the main thread's state: after pthread_exit it reads `Z` while
+    // a worker thread runs on, which only /proc/<pid>/task shows.
     const root = mkdtempSync(path.join(tmpdir(), 'portler-proc-'));
     const stat = (pid: number, state: string, pgrp: number) => `${pid} (svc (x)) ${state} 1 ${pgrp} ${pgrp} 0 -1 0\n`;
     const proc = (pid: number, state: string, pgrp: number, threads: Record<number, string>) => {
@@ -142,16 +137,13 @@ describe('processGroupAlive', () => {
       proc(100, 'Z', 100, { 100: 'Z', 101: 'S' });
       assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: true, settled: true });
 
-      // Once the worker has exited too, the member is a zombie through and through.
       writeFileSync(path.join(root, '100', 'task', '101', 'stat'), stat(101, 'Z', 100));
       assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100', '100/101'], live: false, settled: true });
-      // A thread that went away between listing and reading cannot run, but it may
-      // have started one the listing missed, so the scan is unsettled.
+      // A thread gone between listing and reading may have started one the listing missed.
       rmSync(path.join(root, '100', 'task', '101'), { recursive: true });
       mkdirSync(path.join(root, '100', 'task', '101'));
       assert.deepEqual(scanProcGroup(100, root), { members: ['100', '100/100'], live: false, settled: false });
 
-      // A task list that cannot be read leaves the answer unknown, never "gone".
       rmSync(path.join(root, '100', 'task'), { recursive: true });
       writeFileSync(path.join(root, '100', 'task'), '');
       assert.equal(scanProcGroup(100, root), 'unknown');
@@ -203,9 +195,8 @@ describe('processGroupAlive', () => {
   });
 
   it('after SIGKILL answers from one scan, so unrelated exits during it cannot keep the group alive', () => {
-    // Before SIGKILL a mid-read exit anywhere on the host leaves a scan unsettled,
-    // and on a busy host every scan can be. After the group's SIGKILL no member
-    // can start another process, so such a scan is enough.
+    // Before SIGKILL any mid-read exit on the host leaves a scan unsettled; after the
+    // group's SIGKILL no member can start another process.
     const unsettledZombies: GroupScan = { members: ['100', '100/100'], live: false, settled: false };
     assert.equal(groupHoldsOnlyZombies(() => unsettledZombies), false, 'before SIGKILL it never matches');
     assert.equal(groupDeadAfterKill(unsettledZombies), true, 'after SIGKILL it is enough');
@@ -226,8 +217,7 @@ describe('processGroupAlive', () => {
   });
 
   it('keeps a group alive while a member still runs after its leader became a zombie', { skip: process.platform !== 'linux' }, async () => {
-    // A `sh -c` wrapper that exits while what it backgrounded keeps running:
-    // the leader is a zombie, the group is very much alive.
+    // A `sh -c` wrapper exits while what it backgrounded keeps running.
     const group = await startZombieGroup('sh', ['-c', 'sleep 30 & exit 0']);
     try {
       assert.equal(await waitFor(() => isPidAlive(group.pgid), false), false, 'the shell exited and became a zombie');

@@ -216,8 +216,7 @@ describe('waitForServiceReady', () => {
   });
 
   it('counts a Docker port as ready when the peer answers and hangs up', async () => {
-    // Docker's proxy never sends application data, so bytes from the peer (an SMTP
-    // greeting, say) prove a real listener before the hold ends.
+    // Docker's proxy never sends application data, so bytes from the peer prove a real listener.
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
       socket.end('220 ready\r\n');
@@ -271,8 +270,7 @@ describe('waitForServiceReady', () => {
   });
 
   it("puts Portler's own refusal from a detached log into the error", async () => {
-    // The launch shell refuses a container name another project owns before Docker
-    // starts anything; in a detached run that line is only in the log.
+    // The launch shell refuses before Docker starts anything; detached, that line is only in the log.
     const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-log-'));
     try {
       const logFile = path.join(dir, 'db.log');
@@ -294,7 +292,6 @@ describe('waitForServiceReady', () => {
         },
       );
 
-      // A log without a refusal of Portler's keeps the plain hint.
       writeFileSync(logFile, 'panic: listen tcp: address already in use\n');
       await assert.rejects(
         waitForServiceReady(makeConfig(), service, {}, {}, makeAssignment(port), () => true, 0, logFile),
@@ -306,24 +303,18 @@ describe('waitForServiceReady', () => {
   });
 
   it("reads a detached log's refusals from its last MiB, in chunks", () => {
-    // The launch shell builds first and checks names afterwards, so a refusal
-    // follows any build output. Only the last MiB is read, 64 KiB at a time; a
-    // line or a character split across two reads still counts.
+    // The launch shell builds first and checks names afterwards, so a refusal follows any build output.
     const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-scan-'));
     try {
       const logFile = path.join(dir, 'api.log');
       const chunk = 64 * 1024;
 
-      // A refusal that straddles the first chunk boundary with a two-byte
-      // character split across it, and a CRLF ending. The filler ends at byte
-      // chunk - 20, the 17-byte prefix and "ab" fill the rest, and "é" takes
-      // the last byte of the first read and the first of the second.
+      // A CRLF-ended refusal across the first chunk boundary: filler to chunk - 20, the
+      // 17-byte prefix and "ab", then "é" split across the two reads.
       const filler = `${'a'.repeat(chunk - 21)}\n`;
       writeFileSync(logFile, `${filler}[portler] error: abé network "portler-shop" is someone else's\r\nbuild output\n`);
       assert.deepEqual(portlerErrorsInLog(logFile), [`abé network "portler-shop" is someone else's`]);
 
-      // Several megabytes of build output, then four refusals: the last three
-      // are reported, in order.
       const noise = `${'step 1/9 : RUN pnpm install --frozen-lockfile '.repeat(20)}\n`.repeat(4_000);
       writeFileSync(
         logFile,
@@ -331,13 +322,11 @@ describe('waitForServiceReady', () => {
       );
       assert.deepEqual(portlerErrorsInLog(logFile), ['two', 'three', 'four']);
 
-      // A refusal before the last MiB is not read.
       writeFileSync(logFile, `[portler] error: early\n${noise}`);
       assert.deepEqual(portlerErrorsInLog(logFile), []);
 
-      // The last MiB below starts at the "[" of a line that began earlier, so
-      // the rest of that line is not taken for a refusal; when the byte before
-      // the window is a newline, the line is whole and counts.
+      // The last MiB below starts at the "[" of a line that began earlier; when the byte
+      // before it is a newline, the line is whole and counts.
       const tail = 1024 * 1024;
       const window = `[portler] error: fake\n${'b'.repeat(tail - 45)}\n[portler] error: real\n`;
       assert.equal(Buffer.byteLength(window), tail);
@@ -346,13 +335,11 @@ describe('waitForServiceReady', () => {
       writeFileSync(logFile, `zzz\n${window}`);
       assert.deepEqual(portlerErrorsInLog(logFile), ['fake', 'real']);
 
-      // A refusal that runs on for hundreds of kilobytes is cut, and says so.
       writeFileSync(logFile, `[portler] error: ${'x'.repeat(300 * 1024)}\n[portler] error: next\n`);
       const [long, next] = portlerErrorsInLog(logFile);
       assert.equal(long, `${'x'.repeat(500)}…`);
       assert.equal(next, 'next');
 
-      // A last line without a newline counts; a missing log has none.
       writeFileSync(logFile, 'boot\n[portler] error: volume is foreign');
       assert.deepEqual(portlerErrorsInLog(logFile), ['volume is foreign']);
       assert.deepEqual(portlerErrorsInLog(path.join(dir, 'missing.log')), []);
@@ -362,9 +349,8 @@ describe('waitForServiceReady', () => {
   });
 
   it('reads no more of a detached log than it held when the scan started', { skip: process.platform === 'win32' }, () => {
-    // A process the launch shell left behind can keep appending to the log
-    // while it is scanned. /dev/zero stands in for a file that never ends:
-    // its size reads as 0 and a read never reaches end-of-file.
+    // /dev/zero stands in for a log that is still being appended to: its size reads
+    // as 0 and a read never reaches end-of-file.
     assert.deepEqual(portlerErrorsInLog('/dev/zero'), []);
   });
 
@@ -388,8 +374,6 @@ describe('waitForServiceReady', () => {
   });
 
   it('lets a peer that answers inside a short attempt count as ready', async () => {
-    // The data listener is attached before the short-window decision, so a timeout
-    // under the hold is hopeless only for a silent listener.
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
       socket.write('ready\n');
@@ -449,8 +433,6 @@ describe('waitForServiceReady', () => {
   });
 
   it('passes an http check for 2xx and 3xx by default, and for listed statuses with accept', async () => {
-    // A 404 says the server is up but the route is missing, which is what a
-    // misconfigured path looks like, so it is not ready unless the config says so.
     let status = 302;
     const server = http.createServer((_request, response) => {
       response.statusCode = status;

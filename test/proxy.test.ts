@@ -31,15 +31,13 @@ describe('isAllowedHost', () => {
   it('allows the project url_host and any configured extra hosts', () => {
     assert.equal(isAllowedHost('myapp.test', ['myapp.test']), true);
     assert.equal(isAllowedHost('MyApp.Test:52001', ['myapp.test']), true);
-    // Authority validation still accepts an allowlisted internal name with an underscore.
     assert.equal(isAllowedHost('my_app:52001', ['my_app']), true);
     assert.equal(isAllowedHost('my_app, evil.test', ['my_app']), false);
     assert.equal(isAllowedHost('user@my_app', ['my_app']), false);
   });
 
   it('BLOCKS a DNS-rebinding request carrying an attacker hostname', () => {
-    // A rebound attacker.com resolves to 127.0.0.1, but the browser still sends
-    // `Host: attacker.com`. Refusing it stops a remote page reading every service.
+    // A rebound attacker.com resolves to 127.0.0.1, but the browser still sends `Host: attacker.com`.
     assert.equal(isAllowedHost('attacker.com', []), false);
     assert.equal(isAllowedHost('attacker.com:52001', ['myapp.test']), false);
     assert.equal(isAllowedHost('evil.localhost.attacker.com', []), false);
@@ -178,8 +176,7 @@ describe('proxy server host checking (end to end)', () => {
   });
 
   it('rejects a rebound WebSocket upgrade too', async () => {
-    // WebSockets are not covered by the same-origin policy, so an unchecked
-    // Host here would reopen the hole the request path closes.
+    // WebSockets are not covered by the same-origin policy.
     const port = await startStack();
 
     const raw = await new Promise<string>((resolve, reject) => {

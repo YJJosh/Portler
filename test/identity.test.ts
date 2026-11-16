@@ -21,13 +21,12 @@ describe('identityVerdict', () => {
 
   it('FAILS CLOSED on a legacy entry with no recorded token', () => {
     // A legacy pids.json entry has only a pid, which may belong to anything by now.
-    // "We cannot tell" is never permission to signal a process group.
     assert.equal(identityVerdict(undefined, '12345', true), 'unverifiable');
     assert.equal(maySignal('unverifiable'), false);
   });
 
   it('FAILS CLOSED when the token could not be captured at spawn', () => {
-    // pidInfoFor could not read the token, so the entry looks legacy; only --force signals it.
+    // pidInfoFor could not read the token, so the entry looks legacy.
     assert.equal(identityVerdict(undefined, 'anything', true), 'unverifiable');
   });
 
@@ -98,7 +97,6 @@ describe('macOS start token (parsed off-Mac, so the policy is covered everywhere
   });
 
   it('refuses ambiguous output rather than guessing', () => {
-    // A null token makes a live pid 'unverifiable', so it is not signalled.
     assert.equal(parseDarwinStartToken(0, 'Mon Jul 7 09:15:01 2025 1\nTue Jul 8 10:00:00 2025 2\n'), null);
     assert.equal(parseDarwinStartToken(0, '   \n'), null);
     assert.equal(identityVerdict('token', parseDarwinStartToken(0, ''), true), 'unverifiable');

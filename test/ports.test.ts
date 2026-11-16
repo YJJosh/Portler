@@ -225,7 +225,6 @@ describe('allocateAssignments', () => {
       const config = makeConfig('/project-a', [makeService('api'), makeService('web', { port: 3000 })]);
       const assignments = await allocateAssignments(config, null, ['web'], new Set(['api']));
 
-      // api is running on its registered (busy) port and must keep it.
       assert.equal(assignments.api!.port, busyPort);
       assert.notEqual(assignments.web!.port, busyPort);
     } finally {
@@ -241,11 +240,9 @@ describe('allocateAssignments', () => {
       const recorded = { api: { port: busyPort } };
       const assignments = await allocateAssignments(config, null, ['web'], running, { recorded });
 
-      // api listens on busyPort; probing would move it and env would advertise the wrong port.
       assert.equal(assignments.api!.port, busyPort);
       assert.notEqual(assignments.web!.port, busyPort);
 
-      // Only running services take the recorded port; a stopped one is probed.
       const stopped = await allocateAssignments(config, null, ['api'], NO_RUNNING, { recorded });
       assert.notEqual(stopped.api!.port, busyPort);
     } finally {
@@ -398,10 +395,8 @@ describe('own-port reclaim respects in-flight reservations', () => {
       assignments.web!.port,
       `both services were assigned port ${assignments.api!.port}`,
     );
-    // One of them still legitimately reclaims the free port.
     assert.ok([assignments.api!.port, assignments.web!.port].includes(port));
 
-    // The registry must not collapse the two reservations onto one key.
     const registry = await readRegistry();
     const owned = Object.values(registry.ports).filter((entry) => entry.project === projectDir);
     assert.equal(owned.length, 2);
