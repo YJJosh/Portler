@@ -42,10 +42,8 @@ export interface RestartPlanInput {
   images: Readonly<Record<string, string>> | undefined;
   /** Whether --volume-set or PORTLER_VOLUME_SET chose the set (rawConfig.volumeSet); then nothing is replayed. */
   volumeSetGiven: boolean;
-  /**
-   * For recorded containers without a recorded set: the set read from their volumes ('' for
-   * the base volumes), or null when unreadable. An absent name mounts no managed volume.
-   */
+  /** For containers recorded without a set: the set their volumes show ('' for the base volumes),
+   * null when unreadable. An absent name mounts no managed volume. */
   mountedVolumeSets?: Readonly<Record<string, string | null>>;
 }
 
@@ -65,12 +63,8 @@ function withVolumeSet(config: PortlerConfig, launch: RestartLaunch): PortlerCon
   return launch.volumeSet === config.volumeSet ? config : { ...config, volumeSet: launch.volumeSet };
 }
 
-/**
- * How a restart launches what it starts again. Without flags it replays what pids.json
- * recorded (--prod, run mode, --image pins, --no-setup, volume set); flags override for the
- * restarted services. A dependency left running in the other mode or run mode is refused
- * before anything is stopped. Restarting everything may switch the whole stack.
- */
+/** Replays what pids.json recorded (--prod, run mode, --image pins, --no-setup, volume set); flags
+ * override it for the restarted services. Throws if a dependency left running is in another mode. */
 export function planRestart(input: RestartPlanInput): RestartLaunch {
   const { rawConfig, running, runningNow, involved, starting } = input;
   const entry = (name: string): PidServiceInfo => {
@@ -162,9 +156,8 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     );
   }
 
-  // A recorded pin is replayed for a service this restart starts again, unless
-  // the command pins it anew, and only where the service is a container in the
-  // chosen run mode; elsewhere it would be a flag that changes nothing.
+  // A recorded pin is replayed unless the command pins the service anew, and only where it is a
+  // container in the chosen run mode; elsewhere the flag would change nothing.
   const modeConfig = configForRunMode(rawConfig, mode);
   const images: Record<string, string> = {};
   const droppedPins: string[] = [];
@@ -199,10 +192,8 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     }
   }
 
-  // The volume set is one choice too, and is replayed: a database put back on the base
-  // volumes after `--volume-set branch` would come back with other data. Only recorded
-  // containers mounting a managed `@` volume in this mode have a say. Without a recorded set,
-  // the set its volumes show counts; an unreadable one is refused, not taken for the base.
+  // Replayed, or a database started on `--volume-set branch` comes back on other data. Recorded
+  // containers mounting an `@` volume here vote, by recorded set, else mounted set (unreadable: refused).
   let volumeSet = rawConfig.volumeSet;
   if (!input.volumeSetGiven) {
     const mounted = input.mountedVolumeSets ?? {};
@@ -254,12 +245,8 @@ function managedMounts(volumes: readonly string[] | undefined): ManagedMount[] {
   });
 }
 
-/**
- * The `@` mounts a container recorded without a volume set may carry, one list per run mode
- * it may have run in. Plain `up` runs `docker`, `up docker` the `docker:` override, which
- * can mount other volumes at the same path, so they are not merged. An entry without
- * runMode gets every possible mode. Lists without an `@` mount are left out.
- */
+/** One `@` mount list per run mode the container may have run in (every mode without runMode); not
+ * merged, since the `docker:` override can mount other volumes at the same path. */
 export function legacyMountCandidates(service: ServiceConfig | undefined, info: PidServiceInfo): ManagedMount[][] {
   if (service === undefined) return [];
   const local = managedMounts(service.docker?.volumes);
@@ -279,11 +266,8 @@ export function legacyMountCandidates(service: ServiceConfig | undefined, info: 
   });
 }
 
-/**
- * One answer from the per-mode inspections of a container: its set, null when it
- * cannot be told (an inspection failed, or the modes point at different sets), or
- * undefined when no mode finds a managed volume and the entry has no say.
- */
+/** null when the set cannot be told (an inspection failed, or the modes disagree); undefined when
+ * no mode finds a managed volume. */
 export function combineMountedSets(found: readonly MountedVolumeSet[]): string | null | undefined {
   if (found.some((result) => result.status === 'unknown')) return null;
   const sets = new Set(found.flatMap((result) => (result.status === 'set' ? [result.set] : [])));
@@ -303,12 +287,8 @@ export interface RestartRequest {
   images: Record<string, string> | undefined;
 }
 
-/**
- * Checks made before the lifecycle lock: Kubernetes mode is refused, and under --prod a
- * service prod.services leaves out is the deployment's, as for `up --prod`, so naming one is
- * refused. Returns the config the command line selects; prepareRestart narrows the same way
- * for a replayed --prod.
- */
+// Before the lock. Under --prod a service prod.services leaves out is the deployment's, as for
+// `up --prod`, so naming one is refused; prepareRestart narrows the same way for a replayed --prod.
 function restartTarget(loadedConfig: PortlerConfig, request: RestartRequest): PortlerConfig {
   // Only `up` routes k8s mode to commandUpK8s: restart would run the k8s overlay as local
   // processes and apply nothing to the cluster.
@@ -320,10 +300,7 @@ function restartTarget(loadedConfig: PortlerConfig, request: RestartRequest): Po
   return explicitConfig;
 }
 
-/**
- * For containers recorded without a volume set, the set read from the volumes they mount,
- * so a restart does not take them for the base volumes. Only when no set is given.
- */
+// So a restart does not take containers recorded without a set for the base volumes.
 async function legacyVolumeSets(
   loadedConfig: PortlerConfig,
   running: Readonly<Record<string, PidServiceInfo>>,
@@ -348,12 +325,8 @@ async function legacyVolumeSets(
   return mountedVolumeSets;
 }
 
-/**
- * Everything a restart decides before it stops anything, from pids.json read under the lock
- * (`before`) and what runs then (`runningNow`): the config (narrowed to prod.services for a
- * given or replayed --prod), the launch, what starts again, and startPhase's checks
- * (`preflight`). `planFor` and `startingFor` plan again after the stop.
- */
+// Everything decided before the stop, from pids.json read under the lock. `planFor` and
+// `startingFor` plan again after the stop.
 async function prepareRestart(
   loadedConfig: PortlerConfig,
   request: RestartRequest,
@@ -403,9 +376,8 @@ async function prepareRestart(
     });
     return { requestedRootNames, starting, launch };
   };
-  // A replayed --prod narrows to prod.services like a typed one, and is decided on the
-  // narrowed stack: a running development copy of a left-out service has no say. The proxy is
-  // left out of this look only; a route to a left-out service is still refused below.
+  // A replayed --prod narrows to prod.services like a typed one, decided on the narrowed stack (a dev
+  // copy of a left-out service has no say). The proxy is skipped only here; its routes are still checked.
   let rawConfig = explicitConfig;
   const listed = loadedConfig.prod?.services;
   if (
@@ -420,9 +392,8 @@ async function prepareRestart(
   }
   let planProd = request.prod;
   let { requestedRootNames, starting, launch } = planFor(rawConfig, planProd);
-  // The look above skips a requested service prod.services has dropped, and a stack whose
-  // narrowed records are gone, yet the records can still replay --prod. Plan that launch on
-  // the narrowed stack, so a dropped name is refused before anything stops.
+  // The look above skips a name prod.services drops, or a stack whose narrowed records are gone, which
+  // can still replay --prod: plan on the narrowed stack, so a dropped name is refused before the stop.
   if (launch.prod && request.prod !== true && rawConfig === explicitConfig) {
     rawConfig = productionServices(loadedConfig, true, requested);
     const replayedProd = launch.replayed.includes('--prod');
@@ -431,9 +402,8 @@ async function prepareRestart(
     if (replayedProd) launch.replayed.unshift('--prod');
   }
 
-  // Check before the stop what startPhase checks before spawning, on the config it will run:
-  // a failure after the stop would leave the services down. That covers the replayed run
-  // mode, commands and container names, --image targets, and required env values.
+  // startPhase's checks, run before the stop on the config it will run: a failure after the stop would
+  // leave the services down (run mode, commands, container names, --image targets, required env).
   const finalConfig = rawConfig;
   const preflight = async (plan: RestartLaunch, names: string[], liveNow: ReadonlySet<string>): Promise<void> => {
     const { config: runConfig } = launchConfig(withVolumeSet(finalConfig, plan), plan.mode, { prod: plan.prod, images: plan.images });
@@ -446,10 +416,8 @@ async function prepareRestart(
   return { rawConfig, planProd, requestedRootNames, starting, launch, planFor, startingFor, preflight };
 }
 
-/**
- * Whether this restart would plan without refusing, replay nothing the request does not
- * say, and pass its pre-stop checks. `up` offers a restart instead of a refusal only then.
- */
+/** True when this restart would plan without refusing, replay nothing the request does not say,
+ * and pass its pre-stop checks; `up` offers a restart instead of a refusal only then. */
 export async function restartAccepts(
   loadedConfig: PortlerConfig,
   request: RestartRequest,
@@ -466,11 +434,8 @@ export async function restartAccepts(
   }
 }
 
-/**
- * Stops the requested services (all by default) and starts them again detached. Ports are
- * not released in between, so services keep them while they are still free. Stopped
- * dependencies start too; running ones are left alone. See planRestart for what is replayed.
- */
+/** Stops the requested services (all by default) and starts them again detached, without releasing
+ * their ports in between. Stopped dependencies start too; running ones are left alone. */
 export async function commandRestart(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   const loadedConfig = await loadConfig(process.cwd(), args.file, { volumeSet: args.volumeSet });
@@ -521,10 +486,9 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
       );
     }
 
-    // The lock keeps out Portler commands, not a dependency exiting on its own, which
-    // startPhase would start unchecked with this launch instead of its recorded one. So plan
-    // and check again from what runs now; startPhase refuses anything the plan does not
-    // cover (StartSetChangedError), and then this plans once more.
+    // The lock keeps out Portler commands, not a dependency exiting on its own, which startPhase would
+    // start unchecked with this launch instead of its recorded one. So re-plan from what runs now;
+    // startPhase refuses what the plan does not cover (StartSetChangedError), and this plans again.
     const stoppedText = result.stopped.length > 0 ? list(result.stopped) : 'the requested services';
     const stoppedVerb = result.stopped.length === 1 ? 'is' : 'are';
     for (let attempt = 1; ; attempt += 1) {

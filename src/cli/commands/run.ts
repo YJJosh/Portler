@@ -27,12 +27,8 @@ function listTasks(config: PortlerConfig): number {
   return 0;
 }
 
-/**
- * `portler run [docker|k8s] <task|service> [-- <command>...]`: runs on this machine
- * with a service's env (or the project's) in the mode it was last started in, seen
- * from here: `${db.address}` is the port here. A task runs its own command with the
- * words after `--` appended; a service runs the words after `--`.
- */
+/** Runs on this machine with a service's (or the project's) env, in the mode it last started
+ * in. A task gets the words after `--` appended; a service runs just those words. */
 export async function commandRun(args: ParsedArgs): Promise<number> {
   // The words after `--` are the command, not names.
   const named = args.passthrough ? args.positionals.slice(0, args.positionals.length - args.passthrough.length) : args.positionals;
@@ -83,8 +79,7 @@ export async function commandRun(args: ParsedArgs): Promise<number> {
     return { env: runEnv, cwd: service ? resolveServiceCwd(runConfig, service) : runConfig.projectDir, command: line };
   });
   // The lock covers only working out the env, so a psql session does not block `up` or `down`.
-  // With a TTY the command stays in Portler's process group to read the terminal (psql), so a
-  // signal to Portler alone reaches only its shell. Without one it gets its own group, so
-  // every signal reaches the whole tree.
+  // With a TTY the command stays in Portler's process group to read the terminal (a signal to
+  // Portler reaches only its shell); without one it gets its own group, so signals reach the tree.
   return process.stdin.isTTY ? runForeground(command, cwd, env) : runShell(command, cwd, env);
 }

@@ -69,9 +69,8 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  // The deployment wins: the platform env, then the use_env file, then config (plain or
-  // `default:`). Only config values are resolved; a file value is used as written, as in
-  // `up` and `setup`, and a key the file or platform supplies is not resolved at all.
+  // The deployment wins: platform env, then the use_env file, then config. Only config values
+  // are resolved; a file value is used as written, as in `up` and `setup`.
   const configured = mergeEnvMaps(config.env, service.env);
   // A required key is the deployment's to supply; its config value is not used or resolved.
   const required = new Set(config.production ? requiredEnvKeys(config, service) : []);
@@ -87,8 +86,7 @@ export async function buildStartEnv(
   };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
-    // Own-property checks: `toString` or `constructor` are valid variable names, and a
-    // plain `in` or index lookup would find the inherited Object.prototype member instead.
+    // Own-property checks: a plain `in` would find Object.prototype's `toString` or `constructor`.
     if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key) || required.has(key)) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
@@ -113,11 +111,8 @@ export async function buildStartEnv(
   return env;
 }
 
-/**
- * prod.require for `start`. start overwrites its port_env names with its port, which only the
- * platform's PORT chooses, so a required port_env name is met only when the platform sets PORT.
- * Every other key is met by what the deployment supplies.
- */
+/** prod.require for `start`. A required port_env name is met only when the platform sets PORT,
+ * since start fills port_env with its own port; other keys must come from the deployment. */
 export function assertStartRequirements(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -155,9 +150,8 @@ export async function commandStart(args: ParsedArgs): Promise<number> {
   const service = selectStartService(config, args.positionals);
   assertServiceCwd(config, service);
   const baseEnv = await loadBaseEnv(config, { allowMissing: true });
-  // Check before buildStartEnv picks a port: `require: [PORT]` with `port_env: PORT` must fail
-  // when the platform sets no PORT, not pass on a free port the platform does not route to.
-  // Deployment-first precedence applies also without --prod.
+  // Before buildStartEnv picks a port: `require: [PORT]` with `port_env: PORT` must fail when the
+  // platform sets no PORT, not pass on a port it does not route to. Deployment-first even without --prod.
   const missing = envRequirementProblems(config, [service.name], baseEnv, { project: false, deployment: false, deploymentPrecedence: true });
   if (args.prod) {
     try { assertStartRequirements(config, service, baseEnv); }

@@ -16,12 +16,8 @@ import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, servicesWithPorts, validateDockerMode } from '../services.ts';
 import { k8sForwardConfig, validateK8sForwards, validateK8sMode } from './up-k8s.ts';
 
-/**
- * A cached assignment as a fresh allocation would give it: the port from state.json, the
- * container fields from `config`. state.json keeps the last allocating run mode's container
- * and image, which the cache check misses when both modes share a container name. A caller
- * that shows a running container's `--image` pin applies it to `config`.
- */
+// The port from state.json, container fields from `config`: state.json keeps the last allocating
+// mode's container and image, which the cache check misses when both modes share a container name.
 function asAllocatedFor(config: PortlerConfig, name: string, assignment: ServiceAssignment): ServiceAssignment {
   const service = config.services[name];
   if (!service) return assignment;
@@ -32,10 +28,8 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
   return copy;
 }
 
-/**
- * The current port assignments and their generated env. Side effect: allocates and
- * writes state.json when it is missing, incomplete, or has stale Docker/transport data.
- */
+/** Side effect: allocates and writes state.json when it is missing, incomplete, or has stale
+ * Docker/transport data. */
 export async function ensureAssignments(config: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
   const state = await readState(config.projectDir);
   const configuredWithPorts = servicesWithPorts(config, Object.keys(config.services));
@@ -52,9 +46,8 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
     service.port === undefined || (state?.services[service.name]?.transport ?? 'tcp') === serviceTransport(service),
   );
   if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata) {
-    // state.json can hold more than this config runs (services prod.services leaves out, or
-    // removed ones). Return one assignment per configured service, so `env --prod` shows no
-    // external service and `setup --prod` cannot resolve `${db.url}` where `up --prod` rejects it.
+    // state.json can also hold removed services or ones prod.services leaves out: `env --prod` must
+    // not show them, nor `setup --prod` resolve a `${db.url}` that `up --prod` rejects.
     const configured = new Set(configuredWithPorts);
     const cached = Object.entries(state.services).filter(([name]) => configured.has(name));
     const assignments: Assignments = Object.assign(
@@ -75,13 +68,8 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
   return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
 }
 
-/**
- * The `--image` pins of the containers still running in `mode` (a Docker entry or a k8s
- * port-forward). When state.json is rebuilt from the config, these keep
- * `PORTLER_<SERVICE>_IMAGE` and `${service.image}` naming the image that runs. Pins from
- * another run mode or of a service that is no container here are left out; a stopped
- * entry's pin is kept only for `lastLaunch`, the launch this view shows.
- */
+// Keeps `PORTLER_<SERVICE>_IMAGE` and `${service.image}` naming the running image when state.json
+// is rebuilt. Only containers running in `mode`; a stopped entry's pin only for `lastLaunch`.
 async function runningImagePins(
   loadedConfig: PortlerConfig,
   modeConfig: PortlerConfig,
@@ -104,12 +92,8 @@ function upCommand(mode: RunMode, prod: boolean): string {
   return `portler up${mode === 'local' ? '' : ` ${mode}`}${prod ? ' --prod' : ''}`;
 }
 
-/**
- * Whether the cluster `up k8s` deployed to (not the current context) runs a service that
- * pids.json does not show running: `up k8s` records only port-forwards, so a service without
- * a port has no entry. kubectl is asked only when manifests were rendered (every render
- * writes the namespace file). Undefined when the cluster could not be asked.
- */
+// Asks the cluster `up k8s` deployed to, not the current context: `up k8s` records only port-forwards,
+// so a port-less service has no entry. Only after a render; undefined when kubectl could not be asked.
 async function deployedInCluster(config: PortlerConfig, serviceName: string): Promise<boolean | undefined> {
   if (!existsSync(path.join(k8sManifestDir(config.projectDir), NAMESPACE_MANIFEST_FILE))) return false;
   try {
@@ -208,9 +192,8 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     }
     const secrets = new Map<string, boolean>();
     if (!prod) {
-      // The development view prints config values, so only what the config marks secret
-      // (`secret: true`, or a value read from one through an export) is hidden, and a
-      // secret-looking value it shows from the shell or a use_env file.
+      // The development view prints config values, so it hides only what the config marks secret
+      // (also through an export) and secret-looking values from the shell or a use_env file.
       const printable = buildPrintableEnv(config, service, generatedEnv, assignments, baseEnv, secrets);
       const marked = new Map([...secrets].filter(([, secret]) => secret));
       process.stdout.write(formatDotEnv(args.reveal ? printable : maskConfigSecrets(printable, marked)));

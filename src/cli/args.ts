@@ -42,18 +42,15 @@ const KNOWN_FLAGS = [
   '--image',
 ];
 
-/** The longest delay a Node timer accepts; any larger --drain-ms is refused. */
+// The longest delay a Node timer accepts.
 const MAX_DRAIN_MS = 2_147_483_647;
 
-/** `-f` is `--follow` for `logs`, as in `docker logs -f` and `kubectl logs -f`, and `--file` elsewhere. */
+// As in `docker logs -f` and `kubectl logs -f`; `-f` is `--file` elsewhere.
 function shortFMeansFollow(command: string): boolean {
   return command === 'logs';
 }
 
-/**
- * `--image api=ghcr.io/org/api@sha256:...`. Splits at the first "=": neither a
- * service name nor an image reference (registry/name:tag@digest) contains one.
- */
+// Split at the first "=": neither a service name nor an image reference contains one.
 function addImageOverride(parsed: ParsedArgs, spec: string): void {
   const separator = spec.indexOf('=');
   const service = separator > 0 ? spec.slice(0, separator) : '';

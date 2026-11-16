@@ -17,12 +17,8 @@ export function parseRunMode(positionals: string[]): { mode: RunMode; requested:
   return { mode: 'local', requested: positionals };
 }
 
-/**
- * The run mode a pids.json entry was started in. Without runMode: the port-forward means
- * k8s, no container means local. A container means docker when the service has no Docker
- * config in `localConfig` (the plain `up` view), else local, the conservative reading;
- * undefined when the service is no longer configured.
- */
+/** Without runMode: the port-forward means k8s, no container local, a container docker only if
+ * `localConfig` (the plain `up` view) has no Docker config for it; undefined if unconfigured. */
 export function recordedRunMode(localConfig: PortlerConfig, name: string, info: PidServiceInfo): RunMode | undefined {
   if (info.runMode !== undefined) return info.runMode;
   if (info.command.startsWith(`${K8S_FORWARD_COMMAND} `)) return 'k8s';
@@ -42,11 +38,8 @@ export function validateDockerMode(config: PortlerConfig, selectedNames: string[
   }
 }
 
-/**
- * Refuse to start a service that is already running. `alternative`, when given, is a
- * command that does what the user most likely wanted instead (restart for local and
- * Docker stacks), offered before the `down` that clears the way for a fresh `up`.
- */
+/** Throws if a selected service runs. `alternative` is the command the user most likely
+ * wanted (restart for local and Docker stacks), offered before `down`. */
 export function ensureNoOverlap(
   runningNames: ReadonlySet<string>,
   selectedNames: string[],
@@ -80,11 +73,7 @@ export function selectServiceNames(config: PortlerConfig, requested: string[]): 
   return requested;
 }
 
-/**
- * Like selectServiceNames, but also accepts "proxy" when the config has a
- * proxy block: the proxy is not a service, yet `down proxy` and `ps proxy`
- * should reach it.
- */
+/** Like selectServiceNames, plus "proxy" when the config has a proxy block (`down proxy`, `ps proxy`). */
 export function selectServiceTargets(config: PortlerConfig, requested: string[]): string[] {
   const services = requested.filter((name) => !(name === PROXY_SERVICE_NAME && config.proxy));
   if (services.length > 0) selectServiceNames(config, services);
@@ -118,11 +107,8 @@ export function expandAndOrderServices(config: PortlerConfig, requested: string[
   return order;
 }
 
-/**
- * Group the (topologically ordered) services into dependency levels: level 0
- * has no selected dependencies, level N+1 depends only on levels <= N.
- * Services within a level are independent and can start concurrently.
- */
+/** Level 0 has no selected dependencies, level N+1 depends only on levels <= N; services in
+ * one level can start concurrently. `orderedNames` must be dependencies first. */
 export function dependencyLevels(config: PortlerConfig, orderedNames: string[]): string[][] {
   const levelByName = new Map<string, number>();
   const levels: string[][] = [];
@@ -145,10 +131,7 @@ export function servicesWithPorts(config: PortlerConfig, serviceNames: string[])
   return serviceNames.filter((serviceName) => config.services[serviceName]?.port !== undefined);
 }
 
-/**
- * Services that need a readiness wait: dependencies with the `ready` condition,
- * services with a healthcheck, and requested roots with a port.
- */
+/** Dependencies with the `ready` condition, services with a healthcheck, and roots with a port. */
 export function servicesNeedingReadiness(config: PortlerConfig, serviceNames: string[], rootNames: string[]): Set<string> {
   const names = new Set<string>();
   const roots = new Set(rootNames);
@@ -171,10 +154,7 @@ export function reportImageOverrides(modeConfig: PortlerConfig, images: Readonly
   }
 }
 
-/**
- * Every `--image` target must be a service this command starts. On a running dependency
- * or an unselected service the flag would change nothing, and the old image keeps running.
- */
+/** Every `--image` target must be a service this command starts; elsewhere it would change nothing. */
 export function validateImageOverrideTargets(
   images: Readonly<Record<string, string>>,
   selectedNames: readonly string[],

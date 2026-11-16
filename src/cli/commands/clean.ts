@@ -9,11 +9,8 @@ import { pathExists } from '../../util/fs.ts';
 import type { ParsedArgs } from '../args.ts';
 import type { PidsFile } from '../../types/index.ts';
 
-/**
- * Without --force a corrupt pids.json throws CorruptStateFileError, which points
- * to `clean --force`. With --force it counts as empty, since that command must
- * recover a broken `.portler/`, and the user is warned that processes may be left.
- */
+// With --force a corrupt pids.json counts as empty, since `clean --force` must recover a
+// broken `.portler/`; without it, CorruptStateFileError points the user to `clean --force`.
 async function readPidsForClean(projectDir: string, force: boolean): Promise<PidsFile | null> {
   if (!force) return readPids(projectDir);
 
@@ -31,11 +28,8 @@ async function readPidsForClean(projectDir: string, force: boolean): Promise<Pid
   return pids;
 }
 
-/**
- * Default: remove `.portler/` and release this project's ports. --ports: only
- * release the ports. --global: prune stale registry entries, not this project.
- * Refuses while services run, unless --force, which stops them first.
- */
+/** Removes `.portler/` and releases the project's ports (--ports: only releases; --global: prunes
+ * stale registry entries). Refuses while services run unless --force, which stops them first. */
 export async function commandClean(args: ParsedArgs): Promise<number> {
   if (args.positionals.length > 0) throw new Error('clean does not accept service names');
   if (args.global && !args.ports && args.file !== undefined) {

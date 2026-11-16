@@ -18,11 +18,8 @@ import { commandUp } from './commands/up.ts';
 import { commandVolumes } from './commands/volumes.ts';
 import { printHelp } from './help.ts';
 
-/**
- * `down` signals the POSIX process group `-pid` to reach a shell's grandchildren
- * (they hold the ports), and stale-pid detection reads the OS process start time.
- * Windows has neither, so `down` would leak processes. See "Supported platforms" in README.
- */
+// `down` needs POSIX process groups and OS process start times; Windows has neither,
+// so `down` would leak processes. See "Supported platforms" in README.
 function ensureSupportedPlatform(): void {
   if (process.platform === 'linux' || process.platform === 'darwin') return;
 

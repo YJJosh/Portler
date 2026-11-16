@@ -87,7 +87,7 @@ function validateDockerContainerNames(config: PortlerConfig): void {
   }
 }
 
-/** A typo like `backend.urll` fails before any service starts, not mid-poll. */
+// A typo like `backend.urll` fails before any service starts, not mid-poll.
 function validateHealthcheckReferences(service: ServiceConfig, assignments: Assignments, options: ResolveOptions): void {
   const healthcheck = service.healthcheck;
   if (!healthcheck) return;
@@ -100,21 +100,16 @@ function validateHealthcheckReferences(service: ServiceConfig, assignments: Assi
   }
 }
 
-/**
- * Written after every spawn, so a crash mid-startup leaves a pids.json `down` can clean up.
- * The merge runs under the project lock, so entries another invocation writes survive.
- */
+// Written after every spawn, so a crash mid-startup leaves a pids.json `down` can clean up. The merge
+// runs under the project lock, so entries another invocation writes survive.
 async function recordPidEntry(config: PortlerConfig, serviceName: string, info: PidServiceInfo): Promise<void> {
   await updatePids(config.projectDir, (pids) => {
     pids.services[serviceName] = info;
   });
 }
 
-/**
- * Says what a teardown could not stop (an unverified pid, a container the Docker daemon
- * would not remove), since silence reads as "everything is down". Returns whether it was
- * incomplete, so the caller can exit non-zero as `down` does.
- */
+/** Says what a teardown could not stop, since silence reads as "everything is down". Returns whether
+ * it was incomplete, so the caller can exit non-zero as `down` does. */
 export function reportIncompleteTeardown(result: StopResult): boolean {
   if (result.unverified.length > 0) {
     process.stderr.write(
@@ -159,23 +154,16 @@ export interface StartOptions {
   skipRunning?: boolean;
   /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
   images?: Readonly<Record<string, string>>;
-  /**
-   * restart: the services its plan covers. If what is not running differs when startPhase
-   * reads pids.json, it throws StartSetChangedError before starting anything.
-   */
+  /** restart: the services its plan covers. If what is not running differs, startPhase throws
+   * StartSetChangedError before starting anything. */
   expectStart?: readonly string[];
-  /**
-   * up: the `restart` a refusal over running services suggests, with this invocation's
-   * options; undefined when that restart would not do what was asked.
-   */
+  /** up: the `restart` a refusal over running services suggests; undefined when that restart would not
+   * do what was asked. */
   restartHint?: (serviceNames: string[], pidsBefore: PidsFile | null, runningNames: ReadonlySet<string>) => Promise<string | undefined>;
 }
 
-/**
- * The `restart` that does what a refused `up` asked. It carries this invocation's mode, file
- * and launch options: a service with no PID entry has nothing to replay, so a pinned image
- * or another portler.yml would quietly be lost.
- */
+/** Carries this invocation's mode, file and launch options: a service with no PID entry has nothing
+ * to replay, so a pinned image or another portler.yml would be lost. */
 export function restartSuggestion(
   args: Pick<ParsedArgs, 'file' | 'prod' | 'setup' | 'images' | 'volumeSet'>,
   mode: RunMode,
@@ -196,29 +184,20 @@ export function restartSuggestion(
 /** A started stack, handed back so the caller can wait on it OUTSIDE the lifecycle lock. */
 export interface StartedStack {
   children: Map<string, ReturnType<typeof spawnService>>;
-  /**
-   * Stops this run's services and releases its ports. UNLOCKED: startPhase's failure path
-   * already holds the lock, which is not reentrant; the foreground caller takes it again.
-   * Returns this run's services it kept because another run's service depends on them;
-   * `keepAdopted: false` stops those too.
-   */
+  /** Stops this run's services and releases its ports. UNLOCKED: startPhase's failure path already
+   * holds the non-reentrant lock; the foreground caller takes it again. Returns the services kept
+   * because another run's service depends on them; `keepAdopted: false` stops those too. */
   teardown: (options?: ForegroundTeardownOptions) => Promise<string[]>;
-  /**
-   * Whether every other run's service the last teardown kept something for is still alive.
-   * Nothing reports their exit, so the attached supervisor asks; the first exit means
-   * another teardown pass.
-   */
+  /** Whether every other run's service the last teardown kept something for is alive. Nothing reports
+   * their exit, so the attached supervisor asks; the first exit means another teardown pass. */
   dependentsAlive: () => Promise<boolean>;
   detached: boolean;
 }
 
 type EntryLiveness = { status: 'alive' | 'unknown'; reason: string } | { status: 'dead' };
 
-/**
- * Whether a pids.json entry still names something alive, with the reason the teardown
- * reports. An uninspectable container is 'unknown' and treated as alive: handing it to
- * stopServices would remove a container another run may be serving through.
- */
+// An uninspectable container is 'unknown' and treated as alive: stopServices would remove a
+// container another run may be serving through.
 async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<EntryLiveness> {
   const liveness = await serviceLiveness(projectDir, info);
   if (liveness.status === 'running' && liveness.via === 'pid') return { status: 'alive', reason: 'its PID entry belongs to another run' };
@@ -232,11 +211,8 @@ async function entryLiveness(projectDir: string, info: PidServiceInfo): Promise<
   return { status: 'dead' };
 }
 
-/**
- * Every service the given entries depend on, transitively, as each entry recorded at start,
- * whichever portler.yml its run read. An entry without a record uses the config on disk
- * now; a file that no longer loads means none.
- */
+// As each entry recorded at start, whichever portler.yml its run read. An entry without a record
+// uses the config on disk now; a file that no longer loads means none.
 async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, roots: string[]): Promise<Set<string>> {
   let fallback: PortlerConfig | null | undefined;
   const dependenciesOf = async (serviceName: string): Promise<string[]> => {
@@ -263,11 +239,8 @@ async function recordedDependencyClosure(config: PortlerConfig, pids: PidsFile, 
   return closure;
 }
 
-/**
- * The configuration a start in `mode` runs with: prod.services, the run mode, pinned
- * images and the production overrides applied, in that order. `raw` is the stack narrowed
- * to prod.services and `modeConfig` the run mode's view of it, before images are pinned.
- */
+/** Applies prod.services, the run mode, pinned images and production overrides, in that order. `raw`
+ * is narrowed to prod.services, `modeConfig` is its run-mode view before images are pinned. */
 export function launchConfig(
   rawConfig: PortlerConfig,
   mode: RunMode,
@@ -279,11 +252,8 @@ export function launchConfig(
   return { raw, modeConfig, config };
 }
 
-/**
- * What startPhase checks about the services it is about to start, before it allocates a
- * port or spawns anything. restart makes the same checks before it stops anything, so a
- * launch that could not start is refused while the services are still up.
- */
+/** startPhase's checks before it allocates or spawns. restart runs them before it stops anything, so
+ * a launch that could not start is refused while the services are still up. */
 export function checkLaunch(config: PortlerConfig, mode: RunMode, selectedNames: string[]): void {
   if (mode === 'docker') validateDockerMode(config, selectedNames);
   validateCommands(config, selectedNames);
@@ -291,11 +261,8 @@ export function checkLaunch(config: PortlerConfig, mode: RunMode, selectedNames:
   validateDockerContainerNames(config);
 }
 
-/**
- * The start engine behind `up` and `restart`: expands the roots to their dependencies,
- * allocates ports and spawns in dependency order. The caller holds the lifecycle lock, so
- * `restart` can keep one lock across its stop and start.
- */
+/** Behind `up` and `restart`: allocates ports and spawns in dependency order. The caller holds the
+ * lifecycle lock, so `restart` can keep one lock across its stop and start. */
 export async function startPhase(
   rawConfig: PortlerConfig,
   mode: RunMode,
@@ -308,9 +275,8 @@ export async function startPhase(
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
   const images = options.images ?? {};
   const pidsBefore = await readPids(config.projectDir);
-  // Running by serviceLiveness, as `ps` reports it: a Docker service whose `docker run`
-  // shell is gone but whose container runs on is running, and starting it would remove
-  // that container. One that cannot be inspected is taken as running too.
+  // Running as `ps` reports it: starting a Docker service whose container outlived its `docker run`
+  // shell would remove that container. One that cannot be inspected counts as running too.
   const runningNames = new Set(
     await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
       process.stderr.write(`[portler] warning: ${serviceName}: ${message}; treating it as running\n`);
@@ -321,9 +287,8 @@ export async function startPhase(
   if (options.skipRunning) {
     selectedNames = orderedNames.filter((serviceName) => !runningNames.has(serviceName));
   } else {
-    // `up worker` with redis running usually means "bring worker back", which restart does, so
-    // the refusal suggests it for the requested services not running (all, if every one runs).
-    // When that restart would refuse or start them otherwise than asked, only `down` is offered.
+    // `up worker` with redis running usually means "bring worker back": suggest restarting the requested
+    // services not running (all, if every one runs), unless that restart would refuse or differ from this.
     const notRunning = requestedRootNames.filter((serviceName) => !runningNames.has(serviceName));
     const restartNames = notRunning.length > 0 ? notRunning : requestedRootNames;
     const overlap = orderedNames.some((serviceName) => runningNames.has(serviceName));
@@ -348,7 +313,6 @@ export async function startPhase(
   // only start (and later stop) it when it is not up yet.
   const proxy = config.proxy;
   const startProxy = proxy !== undefined && !runningNames.has(PROXY_SERVICE_NAME);
-
 
   const state = await readState(config.projectDir);
   const reserveNames = servicesWithPorts(config, selectedNames);
@@ -382,19 +346,17 @@ export async function startPhase(
   // The live services of other runs the last teardown pass found, as their
   // entries read then: what it kept, it kept for them.
   let foreignRoots: Array<{ name: string; info: PidServiceInfo }> = [];
-  // An incomplete teardown is an error, as in `down`: a foreground `up` exiting 0 while a
-  // service it started still holds its port misleads scripts. Safe reservations are
-  // still released first.
+  // An incomplete teardown is an error, as in `down`: a foreground `up` exiting 0 while its service
+  // still holds a port misleads scripts. Safe reservations are still released first.
   const teardown = async ({ keepAdopted = true }: ForegroundTeardownOptions = {}): Promise<string[]> => {
     // The lifecycle lock is held here, but restart may have replaced an entry
     // while this foreground run was waiting. Names alone do not prove ownership.
     const current = await readPids(config.projectDir);
     const stopNames: string[] = [];
     const replaced = new Set<string>();
-    // Every selected service is examined, port or not: a stale entry of a portless service is
-    // this run's to prune too. A Docker entry is alive while its labelled container runs, even
-    // with the `docker run` shell's pid gone, since stopServices removes a selected service's
-    // container by label whatever its pid does. Each entry is inspected at most once.
+    // Every selected service is examined, port or not: a stale portless entry is this run's to prune too.
+    // A Docker entry is alive while its labelled container runs, even with the shell's pid gone, since
+    // stopServices removes a selected service's container by label. Each entry is inspected once.
     const liveness = new Map<string, Promise<EntryLiveness>>();
     const livenessOf = (serviceName: string, info: PidServiceInfo): Promise<EntryLiveness> => {
       let pending = liveness.get(serviceName);
@@ -414,20 +376,17 @@ export async function startPhase(
       }
       const alive = await livenessOf(serviceName, info);
       if (alive.status === 'dead') {
-        // A dead entry is nobody's: a stale one of a service this run never spawned, or a
-        // restart's replacement that already exited. stopServices prunes it and its
-        // reservation is released below. A live entry with another identity, or with an
-        // uninspectable container, is left alone.
+        // A dead entry is nobody's (a stale one this run never spawned, or a restart's exited replacement):
+        // prune it. A live entry with another identity, or an uninspectable container, is left alone.
         stopNames.push(serviceName);
       } else {
         replaced.add(serviceName);
         process.stderr.write(`[portler] leaving service "${serviceName}" alone: ${alive.reason}.\n`);
       }
     }
-    // What a later run adopted stays up: `restart api` keeps this run's db and proxy as the
-    // new api's dependencies. Walk the dependencies each entry recorded, not this run's config
-    // (the restart may have read a newer portler.yml). What a live foreign service depends on,
-    // and the proxy while one remains, is left alone, reservation included.
+    // What a later run adopted stays up: `restart api` keeps this run's db and proxy for the new api.
+    // Walk the dependencies each entry recorded, not this config (the restart may have read a newer
+    // portler.yml). What a live foreign service depends on, and the proxy while one remains, stays.
     const foreignLive: string[] = [];
     for (const [serviceName, info] of Object.entries(current?.services ?? {})) {
       if (serviceName === PROXY_SERVICE_NAME || stopNames.includes(serviceName)) continue;
@@ -464,9 +423,8 @@ export async function startPhase(
     return kept;
   };
 
-  // False once any root is gone: with api keeping db and worker keeping cache, api's exit
-  // alone must free db. A replaced entry counts as gone, checked first: a restarted Docker
-  // root reuses its container name, so the container check would call the old root alive.
+  // False once any root is gone, so api's exit frees db while worker still keeps cache. A replaced
+  // entry counts as gone, checked first: a restarted Docker root reuses its container name.
   const dependentsAlive = async (): Promise<boolean> => {
     if (foreignRoots.length === 0) return true;
     const now = await readPids(config.projectDir);
@@ -484,9 +442,8 @@ export async function startPhase(
     // or anything is spawned, naming every missing key instead of failing inside the app.
     assertEnvRequirements(config, selectedNames, baseEnv, { projectSetup: options.setup !== false });
 
-    // Resolve every env and healthcheck reference up front, so a typo fails before anything
-    // spawns. A container service also gets its env as seen from this machine, for its setup
-    // steps and healthcheck command: `${db.address}` differs between the two.
+    // Resolve every reference before anything spawns. A container service also gets its host-side env
+    // for setup steps and healthcheck commands: `${db.address}` differs between the two.
     const serviceEnvs = new Map<string, ServiceEnv>();
     const hostEnvs = new Map<string, EnvMap>();
     for (const serviceName of selectedNames) {
@@ -512,9 +469,8 @@ export async function startPhase(
     // Receipts are reconciled even with --no-setup: a step removed while setup was skipped
     // must not keep a receipt that a later normal up would trust.
     await pruneSetupReceipts(config, setupMode);
-    // A managed volume about to be created is empty, so a migration's receipt no longer
-    // holds for it, in either run mode that mounts the same volumes. Also done with
-    // --no-setup, which still creates the volume.
+    // A managed volume about to be created is empty, so migration receipts no longer hold for it in
+    // either run mode that mounts it. Also with --no-setup, which still creates the volume.
     if (newVolumes?.length) {
       if (await forgetVolumeSetupReceipts(config)) {
         process.stdout.write(`[portler] new volume ${newVolumes.join(', ')}: setup steps run again\n`);
@@ -524,11 +480,9 @@ export async function startPhase(
       await runSetupStep(config, null, projectEnv, setupMode, options.setup, options.signal);
     }
 
-    // A member can die while a later level or the proxy starts, after its own readiness wait,
-    // so this checks after each step (the proxy's exit its own wait reports). Dependencies
-    // left running (skipRunning) are checked by serviceLiveness, not pid: a container can
-    // outlive its `docker run` shell, and a zombie under a PID 1 that does not reap keeps a
-    // pid kill(pid, 0) calls alive. An uninspectable one is not reported dead.
+    // A member can die after its readiness wait, while a later level or the proxy starts: check after
+    // each step. Retained dependencies go by serviceLiveness, not pid: a container can outlive its
+    // `docker run` shell, and an unreaped zombie under a PID 1 passes kill(pid, 0).
     const retained = orderedNames.filter((name) => runningNames.has(name) && !selectedNames.includes(name));
     const assertMembersAlive = async (): Promise<void> => {
       const retainedInfo = retained.map((name) => pidsBefore?.services[name]);
@@ -537,9 +491,8 @@ export async function startPhase(
         return info === undefined ? Promise.resolve(undefined) : serviceLiveness(config.projectDir, info);
       };
       const retainedLiveness = await Promise.all(retained.map((_, index) => probe(index)));
-      // A pid-only verdict goes stale if that process exits during another inspect. Recheck
-      // those pids with no wait before the children are read; a gone pid is probed once more
-      // (its container may run on), repeating until a pass finds nothing stale.
+      // A pid-only verdict goes stale if that process exits during another inspect: recheck those pids
+      // before reading the children, probing a gone one again (its container may run on) until none is.
       const reprobed = new Set<number>();
       for (;;) {
         const stale = retained
@@ -669,9 +622,8 @@ export async function startPhase(
         ? '[portler] startup failed — stopping already-started services and releasing allocated ports\n'
         : '[portler] startup failed before any service started — releasing allocated ports\n',
     );
-    // The rollback reports its own problems and must not replace the startup error. It keeps
-    // nothing for another run: what this run started was not running before, and keeping it
-    // would leave this failed `up` attached to a child nobody supervises.
+    // The rollback reports its own problems and must not replace the startup error. It keeps nothing
+    // for another run: this run's services were not running before, and a kept child is unsupervised.
     try {
       await teardown({ keepAdopted: false });
     } catch (teardownError) {
@@ -701,10 +653,7 @@ export interface StartupCancellation {
   unlisten: () => void;
 }
 
-/**
- * Detached startup installs no handlers. Foreground handlers exist before startup can
- * spawn anything, not only once it is ready.
- */
+/** Detached startup installs no handlers; foreground ones exist before startup can spawn anything. */
 export function listenForStartupCancellation(detach: boolean): StartupCancellation {
   if (detach) return { signal: undefined, exitCode: () => undefined, unlisten: () => {} };
   const cancellation = new AbortController();
@@ -731,12 +680,9 @@ export function listenForStartupCancellation(detach: boolean): StartupCancellati
   return { signal: cancellation.signal, exitCode: () => signalCode, unlisten };
 }
 
-/**
- * startPhase with the lifecycle lock around each decision. The foreground wait runs outside
- * it: it lasts until Ctrl-C and would block every other command, including the `down` meant
- * to stop it. The teardown that ends the wait takes the lock again; startPhase's failure
- * path already holds it and uses the raw teardown, so nothing nests.
- */
+/** startPhase under the lifecycle lock. The foreground wait runs outside it, or it would block every
+ * command until Ctrl-C, including the `down` meant to stop it. The teardown that ends the wait retakes
+ * the lock; startPhase's failure path already holds it and uses the raw teardown, so nothing nests. */
 export async function startServices(
   rawConfig: PortlerConfig,
   mode: RunMode,

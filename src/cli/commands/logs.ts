@@ -42,10 +42,7 @@ async function printLogFile(serviceName: string, filePath: string): Promise<void
   printer.flush();
 }
 
-/**
- * Tail a captured log file forever: print what exists, then poll for appended
- * bytes. A restart replaces the file; reset on a new generation, or a shrink.
- */
+// Polls forever. A restart replaces the file, so start over on a new generation or a shrink.
 async function followLogFile(serviceName: string, filePath: string): Promise<void> {
   const printer = createLinePrinter(serviceName, process.stdout);
   let position = 0;
@@ -83,7 +80,7 @@ async function followLogFile(serviceName: string, filePath: string): Promise<voi
   }
 }
 
-/** A live Docker container wins over the `.portler/logs/` file that `up --detach` writes. */
+// A live Docker container wins over the `.portler/logs/` file that `up --detach` writes.
 async function resolveLogSources(projectDir: string, serviceNames: string[], explicit: boolean): Promise<LogSource[]> {
   const pids = await readPids(projectDir);
   const sources: LogSource[] = [];
@@ -104,7 +101,6 @@ async function resolveLogSources(projectDir: string, serviceNames: string[], exp
   return sources;
 }
 
-/** Exit quietly when the downstream pipe closes, e.g. `portler logs | head`. */
 function exitOnClosedStdout(): void {
   process.stdout.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EPIPE') process.exit(0);

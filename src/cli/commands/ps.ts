@@ -53,20 +53,14 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
-/**
- * `k8s` for an `up k8s` port-forward (by runMode, or by the forward's command in
- * entries without a runMode), otherwise `docker` with a container, `local` without.
- */
+// Entries without a runMode are k8s if their command is the port-forward supervisor.
 function modeLabel(info: PidServiceInfo): string {
   const k8s = info.runMode === 'k8s' || info.command.startsWith(`${K8S_FORWARD_COMMAND} `);
   const mode = k8s ? 'k8s' : info.dockerContainer ? 'docker' : 'local';
   return `${mode}${info.prod ? ' (prod)' : ''}`;
 }
 
-/**
- * A Docker service whose supervising shell is gone but whose container runs on
- * is still serving: "running (container)", not dead.
- */
+// A Docker service whose shell is gone but whose container runs on is still serving.
 function statusLabel(liveness: ServiceLiveness): string {
   if (liveness.status === 'running') return liveness.via === 'pid' ? 'running' : `running (${liveness.via})`;
   if (liveness.status === 'unknown') return 'unknown';

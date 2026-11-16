@@ -13,10 +13,8 @@ export function printTable(headers: string[], rows: string[][]): void {
   for (const row of rows) process.stdout.write(`${line(row)}\n`);
 }
 
-/**
- * A port as the tables show it: `19132/udp` or `7777/tcp+udp`, plain for TCP.
- * The URL column says http:// for UDP too, so the transport shows only here.
- */
+/** `19132/udp` or `7777/tcp+udp`, plain for TCP. The URL column says http:// for
+ * UDP too, so only this column shows the transport. */
 export function portLabel(port: number, transport: PortTransport | undefined): string {
   return transport === undefined || transport === 'tcp' ? String(port) : `${port}/${transport}`;
 }
