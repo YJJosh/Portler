@@ -11,15 +11,9 @@ export const MANAGED_BY_LABEL = 'app.kubernetes.io/managed-by';
 export const PROJECT_LABEL = 'portler.dev/project';
 
 /**
- * Labels stamped on every generated resource so `portler down k8s` (and curious
- * users) can find everything belonging to this project.
- *
- * These labels are not decoration: the project label is what makes a namespace
- * (and the Deployments in it) deletable by this project and untouchable by any
- * other, and it is the whole selector a delete runs on. It therefore uses the
- * collision-resistant projectHash, not the short cosmetic name hash — two
- * project paths that collided here would be able to delete each other's
- * workloads.
+ * Labels on every generated resource. The project label decides which namespace and
+ * resources this project may delete, so it uses the collision-resistant projectHash, not
+ * the short name hash: two colliding projects could delete each other's workloads.
  */
 export function projectLabels(config: PortlerConfig): Record<string, string> {
   return {
@@ -28,10 +22,7 @@ export function projectLabels(config: PortlerConfig): Record<string, string> {
   };
 }
 
-/**
- * Map each selected service to its sanitized Kubernetes resource name,
- * erroring when two services collapse onto the same name.
- */
+/** Throws when two services map to the same Kubernetes name. */
 export function k8sServiceNames(serviceNames: string[]): Map<string, string> {
   const names = new Map<string, string>();
   const seen = new Map<string, string>();
@@ -50,11 +41,8 @@ export function k8sServiceNames(serviceNames: string[]): Map<string, string> {
 }
 
 /**
- * Select which composed env vars go into the container spec. Mirrors Docker
- * mode: only keys Portler itself composed (env files, root/service/k8s env,
- * generated PORTLER_* values, port_env) are forwarded — never the whole
- * inherited host environment, and never Portler's host-process-internal
- * defaults (e.g. pnpm_config_verify_deps_before_run).
+ * As in Docker mode, only keys Portler composed are forwarded, never the inherited host env
+ * or PORTLER_INTERNAL_ENV_KEYS.
  */
 export function containerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<string>): Array<{ name: string; value: string }> {
   const entries: Array<{ name: string; value: string }> = [];
@@ -62,20 +50,14 @@ export function containerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<st
   for (const [key, value] of Object.entries(env)) {
     if (PORTLER_INTERNAL_ENV_KEYS.has(key)) continue;
 
-    // Generated PORTLER_* values and project-declared env are already explicit.
-    // Never infer intent from the prefix: inherited host controls, paths,
-    // safety overrides, and arbitrary PORTLER_* secrets must not be serialized
-    // into a Deployment manifest.
+    // Not by PORTLER_ prefix: inherited PORTLER_* controls and secrets must not reach a manifest.
     if (explicitEnvKeys.has(key)) entries.push({ name: key, value });
   }
 
   return entries.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-/**
- * Container mount path for the k8s volume: explicit `mount_path`, else the
- * container path of the service's first Docker volume, else /data.
- */
+/** `mount_path`, else the container path of the first Docker volume, else /data. */
 function volumeMountPath(service: ServiceConfig): string {
   const explicit = service.k8s?.volume?.mountPath;
   if (explicit) return explicit;
@@ -134,16 +116,14 @@ function deploymentManifest(
   const container: UnknownMap = {
     name,
     image: docker.image,
-    // Locally built images are loaded straight into the cluster (kind load /
-    // minikube image load / shared Docker Desktop daemon), so the kubelet
-    // must not try to pull them from a registry.
+    // Local images are loaded into the cluster, so the kubelet must not pull them from a registry.
     imagePullPolicy: 'IfNotPresent',
   };
 
   if (docker.command) container.command = ['sh', '-lc', docker.command];
   if (service.port !== undefined) {
     const protocols = transportProtocols(serviceTransport(service));
-    // TCP is Kubernetes' default, so a TCP-only service renders as it always did.
+    // TCP is Kubernetes' default, so a TCP-only port needs no name or protocol.
     container.ports = protocols.map((protocol) =>
       protocol === 'tcp' && protocols.length === 1
         ? { containerPort: service.port }
@@ -173,7 +153,7 @@ function deploymentManifest(
   };
 }
 
-/** Service ports: one per protocol; a port list with more than one entry must name each. */
+/** One port per protocol; Kubernetes requires a name on each when there are several. */
 function servicePorts(service: ServiceConfig): UnknownMap[] {
   const protocols = transportProtocols(serviceTransport(service));
   if (protocols.length === 1 && protocols[0] === 'tcp') return [{ port: service.port, targetPort: service.port }];
@@ -187,17 +167,13 @@ function serviceManifest(config: PortlerConfig, service: ServiceConfig, name: st
     metadata: namespacedMetadata(config, name, name),
     spec: {
       selector: { app: name },
-      // Expose the declared port so in-cluster DNS URLs like
-      // postgres://…@postgres:5432 work exactly like Docker network aliases.
+      // The declared port, so in-cluster DNS (postgres:5432) works like a Docker network alias.
       ports: servicePorts(service),
     },
   };
 }
 
-/**
- * All manifests for one service: PVC (when `k8s.volume` is set), Deployment,
- * and Service (when the service declares a port).
- */
+/** A PVC when `k8s.volume` is set, the Deployment, and a Service when it has a port. */
 export function serviceManifests(
   config: PortlerConfig,
   service: ServiceConfig,

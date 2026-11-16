@@ -55,9 +55,7 @@ export function normalizeHealthcheck(value: unknown, serviceName: string): Healt
     command: optionalString(value.command ?? value.test, `services.${serviceName}.healthcheck.command`),
     url: optionalString(value.url, `services.${serviceName}.healthcheck.url`),
     accept: normalizeAcceptStatuses(value.accept, `services.${serviceName}.healthcheck.accept`),
-    // Both must be > 0: a zero/negative timeout makes the service fail its
-    // readiness check the instant it starts, and a zero interval turns the
-    // readiness poll into a busy-loop that pins a CPU core.
+    // A zero timeout fails readiness at once; a zero interval busy-loops the poll.
     timeoutMs:
       optionalPositiveDuration(value.timeout_ms, `services.${serviceName}.healthcheck.timeout_ms`) ??
       optionalPositiveDuration(value.timeoutMs, `services.${serviceName}.healthcheck.timeoutMs`) ??

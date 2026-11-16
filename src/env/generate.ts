@@ -7,10 +7,7 @@ function upperSnake(input: string): string {
     .toUpperCase();
 }
 
-/**
- * Build the PORTLER_* environment variables that expose every assigned port,
- * URL, host, and Docker metadata to running services.
- */
+/** PORTLER_* variables exposing every assigned port, URL, host and Docker metadata to services. */
 export function buildGeneratedEnv(assignments: Assignments): EnvMap {
   const env: EnvMap = {};
   const serviceNames = Object.keys(assignments).sort();

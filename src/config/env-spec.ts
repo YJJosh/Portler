@@ -12,10 +12,8 @@ export interface EnvSpecFields {
 }
 
 /**
- * An env entry written as a mapping instead of a plain value, e.g.
- * `KEY: { default: dev, required: true, secret: true, description: "..." }`.
- * The loader turns every mapping in an env block into one, so code that reads
- * env maps tells them from plain values with `instanceof`.
+ * An env entry written as a mapping (`KEY: { default: dev, secret: true }`). The loader turns
+ * every mapping in an env block into one, so readers tell it from a plain value by `instanceof`.
  */
 export class EnvSpec {
   /** The config value. Like a plain value, it wins over the shell and use_env files in development. */
@@ -83,11 +81,7 @@ export function normalizeEnvSpecs(env: UnknownMap, name: string): UnknownMap {
   return output;
 }
 
-/**
- * The value an entry gives: a plain value or a spec's `value` (isDefault false),
- * or a spec's `default`. Undefined for a spec with neither, which only
- * describes the key.
- */
+/** A plain value or `value` (isDefault false), or `default`. Undefined for a spec with neither. */
 export function envEntryValue(entry: unknown): { value: unknown; isDefault: boolean } | undefined {
   if (!isEnvSpec(entry)) return { value: entry, isDefault: false };
   if (entry.value !== undefined) return { value: entry.value, isDefault: false };
@@ -96,15 +90,11 @@ export function envEntryValue(entry: unknown): { value: unknown; isDefault: bool
 }
 
 /**
- * One key of a higher env layer over a lower one (service over top-level,
- * docker.env over the service, prod.env over both). The higher layer's value
- * or default replaces the lower one's, while `required`, `secret` and
- * `description` stay unless the higher layer sets them too. So a plain
- * `docker.env` value does not drop `secret: true` from the service's entry.
+ * One key of a higher env layer over a lower one. The upper value or default replaces the
+ * lower one; `required`, `secret` and `description` stay unless the upper entry sets them.
+ * An upper entry with only metadata keeps the lower value, plain or not.
  */
 export function mergeEnvEntry(lower: unknown, upper: unknown): unknown {
-  // REVIEW: Metadata-only overrides must keep a lower scalar's value too, not
-  // just values already wrapped in EnvSpec (e.g. root FOO: bar + secret: true).
   if (!isEnvSpec(lower) && !isEnvSpec(upper)) return upper;
   const base = isEnvSpec(lower) ? lower : new EnvSpec({ value: lower ?? null });
   if (!isEnvSpec(upper)) {

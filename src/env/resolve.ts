@@ -4,9 +4,8 @@ import { didYouMean } from '../util/suggest.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig, UnknownMap } from '../types/index.ts';
 
 /**
- * Where the process that reads a value runs: a process on this machine (also
- * every setup step and healthcheck command), a Docker container on the
- * project network, or a pod in the cluster. `address` depends on it.
+ * Where the process reading a value runs (setup steps and healthcheck commands are 'host').
+ * `address` depends on it.
  */
 export type EnvViewer = 'host' | 'container' | 'cluster';
 
@@ -73,9 +72,8 @@ function isReferenceProperty(property: string): property is ReferenceProperty {
   return REFERENCE_PROPERTIES.has(property);
 }
 
-// A name that contains one of these words, or KEY/CERT as a whole word (SIGNING_KEY,
-// ENCRYPTION_KEY, SSH_KEY, KEY), is masked. Over-masking is the safe direction;
-// --reveal shows the value.
+// KEY and CERT only as whole words (SSH_KEY, not MONKEY). Over-masking is the safe
+// direction; --reveal shows the value.
 const SECRET_KEY = /(SECRET|TOKEN|PASS|PWD|PRIVATE|CREDENTIAL|APIKEY|SALT|(^|_)(KEYS?|CERT)(_|$))/i;
 
 /** Whether a key's value is hidden when printed: `secret:` on its entry decides, else its name. */
@@ -135,9 +133,8 @@ function missingAssignment(reference: string, serviceName: string, assignments: 
 }
 
 /**
- * Where `serviceName` is reached from the reader: on this machine at its assigned port,
- * from a container by its network alias and container port (a process on this machine
- * through Docker's host gateway name), and from the cluster by its Kubernetes Service.
+ * From this machine: the assigned port. From a container: the Docker network alias and
+ * container port, or `host.docker.internal` for a host process. From the cluster: its Service.
  */
 function addressOf(reference: string, serviceName: string, assignments: Assignments, options: ResolveOptions): { host: string; port: number } {
   const config = options.config;
@@ -245,10 +242,8 @@ export function resolveEnvValue(value: unknown, assignments: Assignments, option
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (typeof value !== 'string') return JSON.stringify(value);
 
-  // Bare dotted values (example.com, file.txt) stay literal. The value is
-  // treated as a service reference only when the property is known OR the
-  // service has an assignment, so a typo in either half (backend.prot,
-  // backnd.port) raises an error instead of leaking through as a literal.
+  // A bare `a.b` (example.com) stays literal unless the property is known or the service
+  // is assigned, so a typo in only one half (backnd.port) is an error, not a literal.
   const exactReference = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+$/.exec(value);
   if (exactReference) {
     const { serviceName, property } = parseReference(value);
@@ -261,11 +256,9 @@ export function resolveEnvValue(value: unknown, assignments: Assignments, option
 }
 
 /**
- * Resolve every value of an env map. Keys in `skip` are validated but neither
- * resolved nor returned: a caller passes the keys a higher layer supplies, whose
- * config value never applies and so must not fail on a dangling reference.
- * An entry that only describes its key (no value, no default) is left out.
- * `secrets` collects the keys whose value read a secret through an export.
+ * Keys in `skip` are validated but not resolved or returned, so a value that never applies
+ * cannot fail on a dangling reference. Entries without a value are left out. `secrets`
+ * collects keys whose value read a secret through an export.
  */
 export function resolveEnvMap(
   env: UnknownMap,

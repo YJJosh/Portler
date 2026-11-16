@@ -22,11 +22,7 @@ function normalizeK8sVolume(rawVolume: unknown, pathPrefix: string): K8sVolumeCo
   };
 }
 
-/**
- * Normalize the service's `k8s:` key, which configures how the service runs
- * under `portler up k8s` only. Returns undefined when the key is absent —
- * plain `up` and `up docker` never consult it.
- */
+/** The service's `k8s:` key, used only by `up k8s`; undefined when absent. */
 export function normalizeK8sConfig(rawService: UnknownMap, serviceName: string): K8sConfig | undefined {
   const rawK8s = rawService.k8s;
   if (rawK8s === undefined || rawK8s === null) return undefined;
@@ -40,9 +36,7 @@ export function normalizeK8sConfig(rawService: UnknownMap, serviceName: string):
   if (!isObject(rawK8s)) throw new Error(`${pathPrefix} must be true or an object`);
 
   const replicas = optionalNumber(rawK8s.replicas, `${pathPrefix}.replicas`) ?? 1;
-  // `up k8s` waits for at least one stable pod and establishes a port-forward.
-  // replicas: 0 can never satisfy that lifecycle and previously hung until the
-  // 120-second stability timeout.
+  // `up k8s` waits for a stable pod and port-forwards to it, which replicas: 0 never gives.
   if (replicas < 1) throw new Error(`${pathPrefix}.replicas must be at least 1`);
 
   const env = rawK8s.env ?? rawK8s.environment ?? {};
@@ -56,11 +50,8 @@ export function normalizeK8sConfig(rawService: UnknownMap, serviceName: string):
 }
 
 /**
- * Rewrite the config for `portler up k8s` / `portler k8s render`: every
- * service resolves its container config exactly like Docker mode (the
- * `docker:` override winning over the always-Docker config), then layers the
- * `k8s.env` overrides on top so in-cluster values (Kubernetes DNS service
- * names) win over Docker-network and host-facing ones.
+ * The config for `up k8s` and `k8s render`: container config as in Docker mode, with
+ * `k8s.env` on top so in-cluster values win.
  */
 export function applyK8sMode(config: PortlerConfig): PortlerConfig {
   const services: Record<string, ServiceConfig> = {};
@@ -74,9 +65,8 @@ export function applyK8sMode(config: PortlerConfig): PortlerConfig {
       docker,
       k8s,
       env: mergeEnvMaps(mergeEnvMaps(service.env, docker?.env), k8s.env),
-      // `command` healthchecks usually shell into Docker containers that do
-      // not exist in k8s mode; fall back to the default TCP check through the
-      // port-forward instead.
+      // A `command` healthcheck usually shells into a Docker container, which k8s mode does
+      // not have; the default TCP check goes through the port-forward.
       healthcheck: service.healthcheck?.type === 'command' ? undefined : service.healthcheck,
     };
   }

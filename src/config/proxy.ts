@@ -19,11 +19,7 @@ function normalizeRoutePrefix(rawPrefix: string): string {
   return rawPrefix;
 }
 
-/**
- * Normalize the top-level `proxy:` block into route entries sorted
- * longest-prefix-first, validating that every route targets a known service
- * that declares a port (otherwise there is nothing to forward to).
- */
+/** Routes sorted longest prefix first. Throws for a route to an unknown service or one without a port. */
 export function normalizeProxyConfig(root: UnknownMap, services: Record<string, ServiceConfig>): ProxyConfig | undefined {
   const rawProxy = root.proxy;
   if (rawProxy === undefined || rawProxy === null) return undefined;
@@ -81,10 +77,7 @@ export function normalizeProxyConfig(root: UnknownMap, services: Record<string, 
   };
 }
 
-/**
- * Synthetic ServiceConfig representing the proxy, so port allocation treats
- * it exactly like any other service that declares a port.
- */
+/** The proxy as a service, so port allocation treats it like any other. */
 export function proxyServiceConfig(config: PortlerConfig, proxy: ProxyConfig): ServiceConfig {
   return {
     name: PROXY_SERVICE_NAME,
@@ -97,8 +90,7 @@ export function proxyServiceConfig(config: PortlerConfig, proxy: ProxyConfig): S
     protocol: config.protocol,
     preferDeclaredPort: proxy.port !== undefined,
     dependsOn: [],
-    // Explicit, because the default healthcheck keys off the DECLARED port,
-    // which is undefined for `port: auto` — the proxy always listens.
+    // Explicit: the default healthcheck needs a declared port, which `port: auto` lacks.
     healthcheck: {
       type: 'tcp',
       timeoutMs: DEFAULT_HEALTHCHECK_TIMEOUT_MS,

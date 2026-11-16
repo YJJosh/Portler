@@ -35,9 +35,6 @@ function normalizePortRange(root: UnknownMap): PortRange {
     throw new Error('port_range must be an object with start and end');
   }
 
-  // Each bound is validated as a port in its own right, so `port_start: 0` is
-  // rejected by name whether it came from port_range or the top-level keys —
-  // the old code only range-checked when a `port_range:` object was present.
   const startFromRoot = optionalPort(root.port_start, 'port_start');
   const endFromRoot = optionalPort(root.port_end, 'port_end');
   const range = isObject(rawRange) ? rawRange : {};
@@ -64,9 +61,7 @@ function normalizeK8sNamespace(root: UnknownMap, projectDir: string): string {
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
 function generatedEnvPrefix(serviceName: string): string {
-  // Keep this exactly aligned with env/generate.ts's upperSnake(): trailing
-  // punctuation is stripped there, so `api` and `api-` collide just as surely
-  // as `api-main` and `api_main` do.
+  // Must match upperSnake() in env/generate.ts, so `api`/`api-` collide like `api-main`/`api_main`.
   return serviceName
     .replace(/[^A-Za-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
@@ -74,11 +69,8 @@ function generatedEnvPrefix(serviceName: string): string {
 }
 
 /**
- * Service names cross several boundaries: CLI arguments, service references,
- * Docker DNS aliases, generated env keys, and `.portler/logs/<name>.log`.
- * Keep them to one portable, path-safe grammar instead of letting a mapping key
- * such as `../../target` escape the log directory or `__proto__` mutate a plain
- * JavaScript record.
+ * Service names become CLI arguments, references, Docker DNS aliases, env keys and log file
+ * paths, so a name like `../../target` or `__proto__` must not get through.
  */
 function validateServiceName(serviceName: string): void {
   if (!SERVICE_NAME.test(serviceName)) {
@@ -188,10 +180,8 @@ export interface LoadConfigOptions {
 }
 
 /**
- * `name:` goes into Docker object names as-is under --prod, so it has to be a
- * name Docker accepts. It must not contain "--" or end in "-", so the "--"
- * that ends it in a container or volume name (PROJECT_NAME_BOUNDARY) is never
- * ambiguous.
+ * `name:` goes into Docker object names as-is under --prod. No "--" and no trailing "-",
+ * so PROJECT_NAME_BOUNDARY stays unambiguous.
  */
 function normalizeProjectName(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -237,8 +227,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
     volumeSet: normalizeVolumeSet(options.volumeSet ?? process.env.PORTLER_VOLUME_SET),
     volumes: [],
     k8sNamespace: normalizeK8sNamespace(root, projectDir),
-    // A null prototype is defense in depth for library callers that construct a
-    // PortlerConfig manually. Loaded service names are validated below too.
+    // Null prototype: defense in depth for library callers that build a PortlerConfig themselves.
     services: Object.create(null) as Record<string, ServiceConfig>,
   };
 
@@ -352,9 +341,8 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
 }
 
 /**
- * Production runs (`--prod`, `start`) usually deploy from a fresh checkout or
- * source archive that never contains the gitignored env files; the platform
- * injects that env instead, so missing files are skipped there.
+ * `allowMissing` skips missing use_env files, for production runs: a fresh checkout lacks
+ * the gitignored files and the platform injects the env instead.
  */
 export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing?: boolean; quiet?: boolean } = {}): Promise<EnvMap> {
   const env: EnvMap = {};

@@ -9,11 +9,7 @@ import { mergeEnvMaps, normalizeEnvSpecs } from './env-spec.ts';
 import { normalizeEnvObject } from './scalars.ts';
 import type { UnknownMap } from '../types/index.ts';
 
-/**
- * The built-in presets: `presets/*.yml` at the package root. The source tree
- * runs this file as src/config/presets.ts, the published package as
- * dist/src/config/presets.js, so the folder is two or three levels up.
- */
+/** `presets/` at the package root: two levels up from src/, three from dist/src/. */
 export function builtInPresetDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [path.resolve(here, '../../presets'), path.resolve(here, '../../../presets')];
@@ -51,7 +47,7 @@ function parseUse(value: string): { use: string; version?: string } {
 /** `${self.name}` and `${version}` are known before the service exists, e.g. for an image or a volume name. */
 function substitutePresetValues(value: unknown, values: Record<string, string>): unknown {
   if (typeof value === 'string') {
-    // REVIEW: replacer function, so a version containing "$&" is inserted literally instead of as a replacement pattern.
+    // A replacer function, so a "$&" in a value is not a replacement pattern.
     return Object.entries(values).reduce((text, [name, replacement]) => text.replaceAll(`\${${name}}`, () => replacement), value);
   }
   if (Array.isArray(value)) return value.map((item) => substitutePresetValues(item, values));
@@ -59,7 +55,6 @@ function substitutePresetValues(value: unknown, values: Record<string, string>):
   return value;
 }
 
-// REVIEW: recursive scan mirroring substitutePresetValues, for the no-versions error above.
 function usesVersionPlaceholder(value: unknown): boolean {
   if (typeof value === 'string') return value.includes('${version}');
   if (Array.isArray(value)) return value.some((item) => usesVersionPlaceholder(item));
@@ -68,17 +63,14 @@ function usesVersionPlaceholder(value: unknown): boolean {
 }
 
 /**
- * A preset with `versions:` never picks one by itself: a default that moves in
- * a later Portler could stop an existing volume from opening (Postgres), or
- * upgrade it with no way back (MySQL, Redis). The version's keys are a layer on top of the
- * preset's, see layerServiceKeys.
+ * A preset with `versions:` never picks one itself: a moving default could stop a volume
+ * from opening (Postgres) or upgrade it irreversibly (MySQL, Redis). See layerServiceKeys.
  */
 function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; override: UnknownMap; values: Record<string, string> } {
   const { versions, ...keys } = preset;
   if (versions === undefined) {
     if (version !== undefined) throw new Error(`${field}: preset "${use}" has no versions, so "@${version}" means nothing. Use "${use}".`);
-    // REVIEW: without versions there is nothing to substitute, and a literal ${version}
-    // would otherwise leak into the image/env and fail far from its cause.
+    // A literal ${version} would leak into the image or env and fail far from its cause.
     if (usesVersionPlaceholder(keys)) {
       throw new Error(`${field}: preset "${use}" uses \${version} but lists no versions. Add a "versions:" mapping to the preset, or remove the placeholder.`);
     }
@@ -93,9 +85,6 @@ function applyPresetVersion(preset: UnknownMap, use: string, version: string | u
     );
   }
   if (!Object.hasOwn(versions, version)) {
-    // REVIEW: A service that followed the old advice and kept "postgres@13" next
-    // to its own image and volumes got this same error again, so name the step
-    // that was missing: use: has to stay on a listed version.
     throw new Error(
       `${field}: preset "${use}" has no version "${version}". Versions: ${known.join(', ')}. ` +
         'For another version, keep a listed one here and set image: and volumes: on the service yourself.',
@@ -144,9 +133,8 @@ function readEnvLayer(keys: UnknownMap, label: string): UnknownMap {
 }
 
 /**
- * The upper keys replace the lower ones, except `env` and `exports`, which merge
- * key by key: a service that sets `POSTGRES_PASSWORD` keeps the preset's other
- * variables, and a plain value keeps the preset's `secret` and `description`.
+ * Upper keys replace lower ones, except `env` and `exports`, which merge key by key; a plain
+ * env value keeps the lower entry's `secret` and `description`.
  */
 function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerLabel: string, upperLabel: string): UnknownMap {
   const merged: UnknownMap = { ...lower, ...upper };
@@ -162,10 +150,7 @@ function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerLabel: stri
   return merged;
 }
 
-/**
- * A service with `use:` starts from the preset's keys, then the chosen version's,
- * then its own.
- */
+/** A service with `use:` layers the preset's keys, then the version's, then its own. */
 export async function applyServicePreset(rawService: UnknownMap, serviceName: string, projectDir: string): Promise<UnknownMap> {
   const use = rawService.use;
   if (use === undefined || use === null) return rawService;
@@ -174,10 +159,7 @@ export async function applyServicePreset(rawService: UnknownMap, serviceName: st
 
   const { use: target, version } = parseUse(use);
   const { keys, override } = await readPreset(target, version, serviceName, projectDir);
-  // REVIEW: a version block used to replace env and exports whole, so a preset
-  // adding one variable for one version silently lost all the others.
-  // REVIEW: labels end in their own separator, because "preset ./db.yml@2.env"
-  // reads as a file name in an error, unlike "preset ./db.yml@2 env" and "services.db.env".
+  // Labels carry their own separator: "preset ./db.yml@2.env" would read as a file name.
   const preset = layerServiceKeys(keys, override, `preset ${target} `, `preset ${use} `);
   return layerServiceKeys(preset, own, `preset ${use} `, `services.${serviceName}.`);
 }

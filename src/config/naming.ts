@@ -12,8 +12,7 @@ export function slug(input: string): string {
   return value || 'project';
 }
 
-// Images and containers deliberately share the same default name; the hash
-// keeps names from colliding across projects with the same directory name.
+// The hash keeps projects with the same directory name apart.
 function defaultDockerName(projectDir: string, name: string): string {
   return `portler-${slug(path.basename(projectDir))}-${fnv1aBase36(projectDir)}-${slug(name)}`;
 }
@@ -31,18 +30,14 @@ export function defaultDockerNetwork(projectDir: string): string {
 }
 
 /**
- * Ends the project name in a named container or volume. `name:` never contains
- * it and never ends in "-", so the first "--" after "portler-" is always this
- * boundary: project `foo` with service `bar-api` and project `foo-bar` with
- * service `api` get different names, and no name's volume prefix is a prefix
- * of another name's volumes.
+ * Ends the project name in a named container or volume. `name:` never contains it or ends
+ * in "-", so `foo` + `bar-api` and `foo-bar` + `api` differ, and no volume prefix overlaps another.
  */
 export const PROJECT_NAME_BOUNDARY = '--';
 
 /**
- * Under --prod with a top-level `name:`, containers and the network carry the
- * name instead of the directory hash, so they are the same in every folder a
- * release unpacks into. Images keep the hashed default.
+ * Under --prod with a top-level `name:`, so containers and the network keep their names in
+ * every folder a release unpacks into. Images keep the hashed default.
  */
 export function namedDockerContainer(name: string, serviceName: string): string {
   return `portler-${name}${PROJECT_NAME_BOUNDARY}${slug(serviceName)}`;
@@ -52,25 +47,18 @@ export function namedDockerNetwork(name: string): string {
   return `portler-${name}`;
 }
 
-/**
- * Separates the volume set suffix from the base volume name. Managed volume
- * and set names must not contain it so the full name parses unambiguously.
- */
+/** Before the volume set suffix. Volume and set names must not contain it, so names parse. */
 export const VOLUME_SET_SEPARATOR = '--';
 
 /**
- * Prefix shared by every Portler-managed volume of a project. Volumes hash
- * volumeRoot (not projectDir) so git worktrees of the same repository see the
- * same volumes; containers/images/networks stay per-directory.
+ * Hashes volumeRoot, not projectDir, so git worktrees of one repository share volumes;
+ * containers, images and networks stay per directory.
  */
 export function projectVolumePrefix(volumeRoot: string): string {
   return `portler-${slug(path.basename(volumeRoot))}-${fnv1aBase36(volumeRoot)}-`;
 }
 
-/**
- * Full Docker volume name for an `@name` volume:
- * `portler-<project>-<hash>-<name>` plus `--<set>` for a volume set variant.
- */
+/** `portler-<project>-<hash>-<name>`, plus `--<set>` for a volume set. */
 export function projectVolumeName(volumeRoot: string, volumeName: string, volumeSet?: string): string {
   return volumeFullName(projectVolumePrefix(volumeRoot), volumeName, volumeSet);
 }
@@ -82,21 +70,15 @@ export function volumeFullName(prefix: string, volumeName: string, volumeSet?: s
 }
 
 /**
- * Where a project's managed volumes live and the owner they are labelled with.
- * Development scopes them by the hash of volumeRoot, so every checkout has its
- * own data. Under --prod with a `name:` the name scopes them instead, so a
- * release that unpacks into a new folder keeps its volumes; the owner label is
- * then the name, which never looks like a path.
+ * The prefix of a project's managed volumes and their owner label. Under --prod with a
+ * `name:` the name scopes them, so a release in a new folder keeps its volumes.
  */
 export function volumeScope(config: Pick<PortlerConfig, 'volumeRoot' | 'name' | 'production'>): { prefix: string; owner: string } {
   if (config.production && config.name) return { prefix: `portler-${config.name}${PROJECT_NAME_BOUNDARY}`, owner: config.name };
   return { prefix: projectVolumePrefix(config.volumeRoot), owner: config.volumeRoot };
 }
 
-/**
- * Sanitize a name for Kubernetes (RFC 1123 label): lowercase alphanumerics
- * and dashes, starting and ending with an alphanumeric.
- */
+/** An RFC 1123 label, as Kubernetes requires. Throws when nothing is left. */
 export function k8sName(input: string): string {
   const value = input
     .toLowerCase()
@@ -109,7 +91,6 @@ export function k8sName(input: string): string {
   return value;
 }
 
-/** Project-scoped namespace so `portler down k8s` can clean everything up. */
 export function defaultK8sNamespace(projectDir: string): string {
   return k8sName(`portler-${slug(path.basename(projectDir))}-${fnv1aBase36(projectDir)}`);
 }

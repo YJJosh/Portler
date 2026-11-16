@@ -11,33 +11,29 @@ function processEnvAsMap(): EnvMap {
 }
 
 /**
- * Env keys Portler injects for its own process-management concerns (see
- * applyNonInteractivePackageManagerDefaults). They target commands Portler
- * spawns on the host and must not leak into generated container specs.
+ * Keys Portler injects for commands it spawns on the host
+ * (applyNonInteractivePackageManagerDefaults); never forwarded into containers.
  */
 export const PORTLER_INTERNAL_ENV_KEYS: ReadonlySet<string> = new Set(['pnpm_config_verify_deps_before_run']);
 
 export interface ServiceEnv {
   env: EnvMap;
   /**
-   * The keys Portler itself composed (env files, root/service env, generated
-   * values, port_env) as opposed to those inherited from the parent shell.
-   * Container modes use this as their forwarding allowlist, then remove
-   * PORTLER_INTERNAL_ENV_KEYS at the final container boundary.
+   * Keys Portler composed (env files, config env, generated values, port_env), not inherited
+   * from the shell. Containers forward only these, minus PORTLER_INTERNAL_ENV_KEYS.
    */
   explicitKeys: Set<string>;
   /**
-   * Whether a key's value is secret, where the config decides it: `secret:` on
-   * its entry, or a value that read a secret through an export. Keys missing
-   * here are judged by their name (maskSecrets).
+   * Secrecy the config decides: an entry's `secret:`, or a value read from an exported secret.
+   * Missing keys are judged by name (maskSecrets).
    */
   secrets: Map<string, boolean>;
 }
 
 export interface BuildEnvOptions {
   /**
-   * Where the env is read. Default: where the service runs. Setup steps and
-   * command healthchecks run on this machine even for a container service.
+   * Where the env is read. Default: where the service runs. Setup steps and command
+   * healthchecks run on this machine even for a container service.
    */
   viewer?: EnvViewer;
   /** start gives the deployment precedence even without applying production overrides. */
@@ -59,10 +55,9 @@ interface ConfigLayers {
 }
 
 /**
- * Resolve config env entries into the two layers buildServiceEnv stacks around the shell
- * and the use_env files. `supplied` are the keys those set: a default they set is never
- * used, so it is not resolved. In production a value they set is not used either, nor one
- * the deployment must supply (`required`).
+ * Resolve config entries into the two layers stacked around the shell and use_env files.
+ * A default for a `supplied` key is never used, so it is not resolved; with deployment
+ * precedence neither is a value for a `supplied` or `required` key.
  */
 function resolveConfigLayers(
   deploymentPrecedence: boolean,
@@ -91,8 +86,7 @@ function resolveConfigLayers(
   for (const [key, entry] of Object.entries(entries)) {
     if (isEnvSpec(entry) && entry.secret !== undefined) output.secrets.set(key, entry.secret);
   }
-  // REVIEW: secret:false disables the name guess, not secret provenance. An
-  // exported secret remains secret even under an innocently named override.
+  // `secret: false` only disables the name guess: a value read from an exported secret stays secret.
   for (const key of exportSecrets) output.secrets.set(key, true);
   return output;
 }
@@ -131,10 +125,7 @@ export function exportEnvReader(config: PortlerConfig, baseEnv: EnvMap, generate
   };
 }
 
-/**
- * Resolve options for a service's healthcheck and other values read on this machine
- * with the service as `self`.
- */
+/** For a service's healthcheck and other values read on this machine with the service as `self`. */
 export function hostResolveOptions(
   config: PortlerConfig,
   service: ServiceConfig | null,
@@ -152,19 +143,15 @@ export function hostResolveOptions(
 
 function applyNonInteractivePackageManagerDefaults(env: EnvMap): boolean {
   if (env.pnpm_config_verify_deps_before_run !== undefined) return false;
-  // Service stdin is intentionally not attached to the terminal. pnpm's
-  // recursive script runner may otherwise try to auto-run `pnpm install`, then
-  // abort when that install wants to prompt before recreating node_modules.
-  // Keep this pnpm-specific and overridable instead of setting CI=true, which
-  // changes behavior for many development servers.
+  // Service stdin is not a terminal, so pnpm's auto-run `pnpm install` aborts when it wants
+  // to prompt before recreating node_modules. Not CI=true: that changes many dev servers.
   env.pnpm_config_verify_deps_before_run = 'false';
   return true;
 }
 
 /**
- * Set the service's port_env keys. Docker services see their declared
- * internal container port because the -p mapping translates the assigned host
- * port to it; local services see the assigned host port directly.
+ * Docker services see their internal container port, since `docker run -p` maps the assigned
+ * host port to it; local services see the assigned host port.
  */
 function injectPortEnv(env: EnvMap, service: ServiceConfig, assignment: ServiceAssignment | undefined): void {
   if (!assignment) return;
@@ -175,22 +162,13 @@ function injectPortEnv(env: EnvMap, service: ServiceConfig, assignment: ServiceA
 }
 
 /**
- * Compose the full environment for a service, layering (lowest to highest
- * precedence): `default:` entries, the current process env, base `.env` files,
- * root config env, the service's own env overrides, and generated PORTLER_*
- * values.
+ * Compose a service's env, lowest to highest precedence: `default:` entries, process env,
+ * use_env files, root config env, service env, generated PORTLER_* values. With deployment
+ * precedence (production, or start) config comes first and the use_env files and process env
+ * win; generated values and `port_env` stay Portler's either way.
  *
- * In production (`config.production`, set by applyProduction) the deployment
- * wins over portler.yml instead: root config env, the service's own env, base
- * `.env` files, then the current process env. Generated PORTLER_* values and
- * `port_env` keys stay Portler's own in both orders, and containers receive the
- * same set of keys; only the values differ. A key the deployment supplies is not
- * resolved from config at all, so a reference that only works in development
- * cannot block the deployment's value.
- *
- * References resolve for where the env is read (`options.viewer`, by default
- * where the service runs), so `${db.address}` is the database's container alias
- * inside a container and its assigned port on this machine.
+ * References resolve for `options.viewer` (default: where the service runs), so
+ * `${db.address}` is a container alias inside a container and a host port on this machine.
  */
 export function buildServiceEnv(
   config: PortlerConfig,
@@ -201,19 +179,14 @@ export function buildServiceEnv(
   options: BuildEnvOptions = {},
 ): ServiceEnv {
   const processEnv = options.platformEnv ?? processEnvAsMap();
-  // REVIEW: start always uses deployment-first precedence, independently of
-  // --prod. Exports must read that same winning value, not up's dev value.
+  // start uses deployment precedence even without --prod, and its exports read the same value.
   const deploymentPrecedence = config.production === true || options.deploymentPrecedence === true;
-  // In production a key the deployment supplies (process env or use_env file) is left out
-  // of resolution: its config value never applies, and a reference that only resolves in
-  // development (a service with no assignment here) must not block the deployment's value.
-  // A required key is the deployment's to supply: its config value is not used (nor
-  // resolved), so the check names it instead of a dangling reference failing first.
+  // Supplied and required keys are not resolved from config, so a reference that only
+  // resolves in development cannot block the deployment's value or the required-key check.
   const required = config.production ? requiredEnvKeys(config, service) : [];
   const supplied = new Set([...Object.keys(baseEnv), ...Object.keys(processEnv)]);
-  // A root key the service's own env replaces (prod.env is folded in by then) is never used
-  // for this service, in either mode, so it is not resolved either: a reference only another
-  // service can resolve must not block the value this service actually gets.
+  // A root key the service's env replaces is not resolved, so a reference only another
+  // service can resolve cannot block this service.
   const entries = mergeEnvMaps(config.env, service.env);
   const resolveOptions = serviceResolveOptions(config, service, baseEnv, generatedEnv, assignments, options);
   const layers = resolveConfigLayers(deploymentPrecedence, entries, assignments, supplied, required, resolveOptions, options.only);
@@ -221,12 +194,8 @@ export function buildServiceEnv(
     ? { ...layers.defaults, ...layers.values, ...baseEnv, ...processEnv, ...generatedEnv, PORTLER_SERVICE_NAME: service.name }
     : { ...layers.defaults, ...processEnv, ...baseEnv, ...layers.values, ...generatedEnv, PORTLER_SERVICE_NAME: service.name };
 
-  // Raw config keys, so an overridden key still reaches containers with the deployment's value.
-  // In development the env files' keys are forwarded too. In production a container gets only
-  // what portler.yml names for it: root and service env (prod.env folded in), prod.require,
-  // generated values and port_env. A value that is only in the use_env file or the shell is
-  // not forwarded, so one env file can hold every secret of a deployment without each
-  // container seeing all of them.
+  // In production a container gets only the keys portler.yml names for it, so one use_env file
+  // can hold every secret of a deployment without each container seeing all of them.
   const explicitKeys = new Set<string>([
     ...(config.production ? required : Object.keys(baseEnv)),
     ...Object.keys(config.env),
@@ -249,11 +218,8 @@ export function buildServiceEnv(
 }
 
 /**
- * The env top-level setup steps get: like a service's, without a service of its own.
- * `default:` entries, the process env, base `.env` files, then root config env; in
- * production the deployment wins instead, and a key the deployment supplies is not
- * resolved from config at all (see buildServiceEnv). The whole process env is kept,
- * since setup steps run on this machine.
+ * The env top-level setup steps get, layered as in buildServiceEnv without a service.
+ * The whole process env is kept, since setup steps run on this machine.
  */
 export function composeProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments, generatedEnv: EnvMap = {}): ServiceEnv {
   const processEnv = processEnvAsMap();
@@ -269,14 +235,9 @@ export function composeProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assign
 }
 
 /**
- * Build the subset of env values worth printing for `portler env`: generated
- * values, root overrides, and (optionally) a single service's env. Config
- * values, not the shell or the use_env files, except for a key whose entry
- * yields to them (a `default:`, or an entry with no value): there the value the
- * service gets is shown. An export reads the env its service really gets.
- * `secrets` collects which keys are secret: the config's say (see
- * ServiceEnv.secrets), and for a value taken from the shell or a use_env file,
- * also its name.
+ * The env `portler env` prints: config values and generated values, not the shell or use_env
+ * files, except where an entry yields to them (a `default:` or no value). Fills `secrets`
+ * with the config's say, and by name for values taken from the shell or a use_env file.
  */
 export function buildPrintableEnv(
   config: PortlerConfig,
@@ -291,7 +252,7 @@ export function buildPrintableEnv(
     ? serviceResolveOptions(config, service, baseEnv, generatedEnv, assignments, {})
     : hostResolveOptions(config, null, baseEnv, generatedEnv, assignments);
   const supplied = { ...processEnvAsMap(), ...baseEnv };
-  // Same rule as buildServiceEnv: a root key the service's own env replaces is not resolved.
+  // As in buildServiceEnv, a root key the service's env replaces is not resolved.
   const layers = resolveConfigLayers(false, entries, assignments, new Set(Object.keys(supplied)), [], options);
   for (const [key, secret] of layers.secrets) secrets?.set(key, secret);
   const yielded: EnvMap = {};
@@ -316,10 +277,8 @@ function isBlankConfigValue(value: unknown): boolean {
   return entry === undefined || entry.value === '' || entry.value === null;
 }
 
-// A `prod.env` entry left blank (`KEY: ''`, a bare `KEY:`, or `{ value: '' }`) says the
-// deployment must supply the key. A mapping that only adds `secret`, `description` or
-// `required` keeps the lower value (mergeEnvEntry), so it is not blank; `required: prod`
-// is counted by specProductionKeys instead.
+// A blank `prod.env` entry (`KEY: ''`, bare `KEY:`, `{ value: '' }`) means the deployment
+// supplies the key. A metadata-only mapping keeps the lower value (mergeEnvEntry), so it is not blank.
 function isLeftBlankInProd(value: unknown): boolean {
   if (!isEnvSpec(value)) return value === '' || value === null;
   const entry = envEntryValue(value);
@@ -339,11 +298,9 @@ export function specProductionKeys(config: PortlerConfig, service?: ServiceConfi
 }
 
 /**
- * The keys the deployment must supply for a service (top-level plus its own), or
- * for the project: every `prod.require` entry, every blank `prod.env` entry,
- * which means the same, and every env entry marked `required: prod`. A blank
- * top-level entry is not required of a service whose own env gives the key a
- * value, since that value replaces the top-level one.
+ * Keys the deployment must supply for a service or the project: `prod.require`, blank
+ * `prod.env` entries and `required: prod`. A blank top-level entry is not required of a
+ * service whose own env gives the key a value.
  */
 export function requiredEnvKeys(config: PortlerConfig, service?: ServiceConfig): string[] {
   const keys = new Set([...(config.prod?.require ?? []), ...(service?.prod?.require ?? [])]);
@@ -411,12 +368,9 @@ function requiredEnvMessage(
 }
 
 /**
- * Under --prod every key in `required` must be present and non-empty in `env`.
- * A required key is the deployment's to supply: its config value, if any, is
- * not used, so a blank `prod.env` entry, a `require` entry and `required: prod`
- * mean the same. `blank` names the keys that are required because a `prod.env`
- * entry is left blank, and `details.fromSpec` those an entry marks
- * `required: prod`, so the error points at the line the user actually wrote.
+ * Throws unless every key in `required` is present and non-empty in `env`. `blank` and
+ * `details.fromSpec` say which keys come from a blank `prod.env` entry or `required: prod`,
+ * so the error names the line the user wrote.
  */
 export function assertRequiredEnv(
   owner: string,
@@ -430,17 +384,14 @@ export function assertRequiredEnv(
 }
 
 /**
- * What the deployment supplies: the use_env file, with the process (platform) env on top.
- * prod.require is checked against this, not against the final env: a value Portler adds
- * itself (generated PORTLER_* values, PORTLER_SERVICE_NAME, a port_env name such as PORT
- * filled with the port Portler chose) must not satisfy a requirement the deployment was
- * meant to meet.
+ * The use_env file with the platform env on top. prod.require is checked against this, not
+ * the final env, so a value Portler adds itself (PORTLER_*, a port_env such as PORT) cannot
+ * satisfy it.
  */
 export function deploymentEnv(baseEnv: EnvMap, platformEnv: EnvMap = processEnvAsMap()): EnvMap {
   return { ...baseEnv, ...platformEnv };
 }
 
-/** The production check of one owner, with every detail its message uses. */
 function productionMessage(config: PortlerConfig, owner: string, keys: string[], supplied: EnvMap, service?: ServiceConfig): string | undefined {
   return requiredEnvMessage(owner, keys, supplied, blankRequiredKeys(config, service), {
     fromSpec: new Set(specProductionKeys(config, service)),
@@ -449,23 +400,20 @@ function productionMessage(config: PortlerConfig, owner: string, keys: string[],
 }
 
 /**
- * Keys marked `required: true` that would be missing or empty for an owner. Checked
- * before anything resolves, the way the value would be chosen: the shell or a use_env
- * file, else a non-empty config value or default. In production a key the deployment
- * must supply only counts the deployment's value.
+ * Keys marked `required: true` that are missing or empty for an owner: in `effective` when
+ * given, else predicted from the layer that would win. A key the deployment must supply
+ * counts only the deployment's value.
  */
 function missingRequiredValues(config: PortlerConfig, supplied: EnvMap, service?: ServiceConfig, effective?: EnvMap, deploymentPrecedence = config.production): string[] {
   const deploymentOnly = new Set(config.production ? requiredEnvKeys(config, service) : []);
   const missing: string[] = [];
   for (const [key, entry] of Object.entries(ownerEntries(config, service))) {
     if (!isEnvSpec(entry) || entry.required !== true) continue;
-    // REVIEW: required:true checks the final value, unlike prod.require. A
-    // generated service name or injected port already guarantees a value.
+    // Unlike prod.require, required: true checks the final value, which Portler fills for these.
     if (!effective && !deploymentOnly.has(key) && service &&
       (key === 'PORTLER_SERVICE_NAME' || (service.portEnv.includes(key) && (service.port !== undefined || deploymentPrecedence)))) continue;
-    // REVIEW: A supplied key can be empty, and a dev value overrides even a
-    // non-empty shell key. Validate the winning layer, not any non-empty layer.
-    // Once composed, check the actual result too (references may resolve empty).
+    // Check the winning layer, not any non-empty one: a supplied key can be empty, and in
+    // dev a config value beats the shell. A composed env also catches references resolving empty.
     let value: unknown;
     if (effective) value = effective[key];
     else {
@@ -479,17 +427,10 @@ function missingRequiredValues(config: PortlerConfig, supplied: EnvMap, service?
 }
 
 /**
- * Check, before anything runs, every env value the project and the named services
- * need, and report all that are missing in one error: under --prod the keys the
- * deployment must supply (see requiredEnvKeys), and in every mode the keys an entry
- * marks `required: true`.
- *
- * The project's explicit `prod.require` holds always. A root `prod.env` entry left blank
- * (or marked `required: prod`) belongs to the env each service and the top-level setup
- * steps see, so it is required by each named service that does not set the key itself,
- * and by the project only when its top-level setup steps run: a service that overrides it
- * must not be blocked by a project check it would pass on its own. A key the project
- * reports is not repeated for each service.
+ * Throws one error listing every missing env value of the project and the named services:
+ * under --prod the requiredEnvKeys, in every mode `required: true` keys. A blank root
+ * `prod.env` entry is required of the project only when its setup steps run, so a service
+ * that sets the key itself is not blocked.
  */
 export function assertEnvRequirements(
   config: PortlerConfig,
@@ -501,11 +442,6 @@ export function assertEnvRequirements(
   if (messages.length > 0) throw new Error(messages.join('\n'));
 }
 
-/**
- * What assertEnvRequirements would report, one message per line; empty when nothing is
- * missing. `deployment: false` leaves out the production keys, for a caller that checks
- * those itself (start).
- */
 interface RequirementOptions {
   projectSetup?: boolean;
   deployment?: boolean;
@@ -517,13 +453,17 @@ interface RequirementOptions {
   deploymentPrecedence?: boolean;
 }
 
+/**
+ * What assertEnvRequirements would report, one message each; empty when nothing is missing.
+ * `deployment: false` leaves out the production keys, for a caller that checks them itself (start).
+ */
 export function envRequirementProblems(
   config: PortlerConfig,
   serviceNames: Iterable<string>,
   baseEnv: EnvMap,
   options: RequirementOptions = {},
 ): string[] {
-  // REVIEW: .env wins over the shell in dev, just as buildServiceEnv composes it.
+  // In dev a use_env file wins over the shell, as in buildServiceEnv.
   const supplied = config.production || options.deploymentPrecedence ? deploymentEnv(baseEnv) : { ...processEnvAsMap(), ...baseEnv };
   // `project: true` checks the project's top-level env as if its setup steps ran (`portler env`),
   // `project: false` leaves the project out: a view of one service names that service.
@@ -587,9 +527,8 @@ export function assertProductionRequirements(
 const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:)[^\s/@]+@/gi;
 
 /**
- * Hide secret values, and the password of URL credentials, for printing. A key is
- * secret when `secrets` says so (its entry's `secret:`, or a value read from a
- * secret through an export), otherwise when its name looks like one.
+ * Hide secret values and URL passwords for printing. A key is secret when `secrets` says so,
+ * otherwise when its name looks like one.
  */
 export function maskSecrets(env: EnvMap, reveal = false, secrets: ReadonlyMap<string, boolean> = new Map()): EnvMap {
   if (reveal) return env;
@@ -602,10 +541,8 @@ export function maskSecrets(env: EnvMap, reveal = false, secrets: ReadonlyMap<st
 }
 
 /**
- * What `up --prod` hands a service: the keys it forwards, with the deployment's
- * values. Without a service, the project view: root env and generated values
- * as top-level setup sees them. Portler's own internal keys are left out.
- * `secrets` collects the config's say on which keys are secret.
+ * What `up --prod` hands a service: its forwarded keys with the deployment's values, without
+ * Portler's internal keys. Without a service, the env top-level setup sees. Fills `secrets`.
  */
 export function buildEffectiveEnv(
   config: PortlerConfig,

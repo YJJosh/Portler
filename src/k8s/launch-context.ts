@@ -13,10 +13,8 @@ import { projectDeploymentNames } from './kubectl.ts';
 import type { PortlerConfig } from '../types/index.ts';
 
 /**
- * The kubectl context `up k8s` deployed this project to. Without it, a later `env` or
- * `down k8s` could only ask the context that is active by then: after a context switch,
- * `env` would not find a portless service where it runs, and `down k8s` would delete in
- * the other cluster. Read and written under the lifecycle lock.
+ * The kubectl context `up k8s` deployed to, so after a context switch `env` and `down k8s`
+ * still act on that cluster, not the active one. Read and written under the lifecycle lock.
  */
 interface LaunchContextFile {
   version: 1;
@@ -55,21 +53,19 @@ function readLaunchRecord(projectDir: string): Promise<LaunchContextFile | null>
   );
 }
 
-/** The recorded context, or null when no `up k8s` recorded one (or a full `down k8s` has since cleared it). */
+/** Null when no `up k8s` recorded one, or a full `down k8s` cleared it. */
 export async function readLaunchContext(projectDir: string): Promise<string | null> {
   return (await readLaunchRecord(projectDir))?.context ?? null;
 }
 
 /**
- * The kubeconfig kubectl reads here: KUBECONFIG with each path made absolute (kubectl
- * resolves them against the working directory), or its default, ~/.kube/config. Symlinks
- * are resolved, so two spellings of one file (/tmp and /private/tmp on macOS) match.
+ * The kubeconfig kubectl reads here: KUBECONFIG made absolute (kubectl resolves it against
+ * the working directory), or ~/.kube/config. Symlinks are resolved (/tmp vs /private/tmp on macOS).
  */
 function kubeconfigInUse(): string {
   const configured = process.env.KUBECONFIG ?? '';
   const paths = configured.split(path.delimiter).filter((entry) => entry !== '');
-  // Like kubectl, only an unset or empty variable loads the default file. KUBECONFIG=:
-  // loads no file at all, so it must not count as the default.
+  // As in kubectl, only an unset or empty KUBECONFIG loads the default; `KUBECONFIG=:` loads none.
   if (configured === '') paths.push(path.join(os.homedir(), '.kube', 'config'));
   return paths.map((entry) => realPath(path.resolve(entry))).join(path.delimiter);
 }
@@ -83,10 +79,8 @@ function realPath(file: string): string {
 }
 
 /**
- * The error for a command reading another kubeconfig than `up k8s` did, or undefined.
- * A context name is only unique within its kubeconfig: the same name in another one (every
- * Docker Desktop has "docker-desktop") may be another cluster, so deleting there, or
- * replacing the record, could leave the real stack running.
+ * An error when this command reads another kubeconfig than `up k8s` did. A context name is
+ * unique only within its kubeconfig (every Docker Desktop has "docker-desktop").
  */
 function differentKubeconfig(record: LaunchContextFile, refusal: string): Error | undefined {
   const here = kubeconfigInUse();
@@ -107,14 +101,14 @@ export async function forgetLaunchContext(projectDir: string): Promise<void> {
 export type LaunchCluster =
   /** The context `up k8s` recorded, checked like an active one. */
   | { source: 'recorded'; cluster: ClusterInfo }
-  /** Nothing recorded (no `up k8s` since the last full `down k8s`, or one from an older Portler): the active context. */
+  /** Nothing recorded (no `up k8s` since the last full `down k8s`, or an older Portler): the active context. */
   | { source: 'active'; cluster: ClusterInfo }
-  /** The recorded context is no longer in the kubeconfig `up k8s` read it from, so nothing can reach that cluster through it. */
+  /** The recorded context is no longer in the kubeconfig `up k8s` read it from. */
   | { source: 'gone'; context: string };
 
 /**
  * The cluster `env` and `down k8s` act on. A recorded context passes the same local-cluster
- * checks as the active one does, and a failure names it: it may not be the active one.
+ * checks as an active one, and a failure names it, since it may not be the active one.
  */
 export async function launchCluster(projectDir: string, run: CommandRunner = runCommand): Promise<LaunchCluster> {
   const record = await readLaunchRecord(projectDir);
@@ -133,16 +127,11 @@ export async function launchCluster(projectDir: string, run: CommandRunner = run
 }
 
 /**
- * Record `cluster` as where this project runs, before `up k8s` touches it. A project runs
- * in one cluster at a time: while it still has Deployments in another recorded context,
- * refuse, since `env` and `down k8s` could then only reach one of the two. A recorded
- * context with nothing deployed, or one the kubeconfig `up k8s` read no longer has, is
- * replaced.
+ * Record `cluster` before `up k8s` touches it. Throws while the project still has Deployments
+ * in another recorded context (or kubectl cannot say), since `env` and `down k8s` reach only one.
  *
- * Returns a function that takes the record back, for a start whose teardown removed
- * everything it started: a stale record would make a later `up k8s` in another context or
- * kubeconfig refuse. It keeps a record an earlier `up k8s` wrote for this context, whose
- * services may still run there, and one a later `up k8s` has rewritten since.
+ * Returns an undo for a start whose teardown removed everything it started. It keeps a record
+ * an earlier `up k8s` wrote for this context, and one a later `up k8s` has rewritten since.
  */
 export async function recordLaunchContext(
   config: PortlerConfig,

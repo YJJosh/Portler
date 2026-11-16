@@ -19,8 +19,7 @@ function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignme
   }
   if (build.target) args.push('--target', build.target);
 
-  // Build args resolve as the image will run: in the cluster.
-  // REVIEW: Use the same effective export env as runtime env resolution.
+  // Build args resolve as the image runs: in the cluster, with the same exports as its env.
   const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name,
     exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments) };
   for (const [key, value] of Object.entries(build.args)) {
@@ -32,12 +31,7 @@ function dockerBuildArgs(config: PortlerConfig, service: ServiceConfig, assignme
   return args;
 }
 
-/**
- * Build the Docker image for every selected service with a `build` config.
- * Returns the image names that were built locally — exactly the ones that
- * must be loaded into the cluster (registry images are pulled by the cluster
- * itself).
- */
+/** Returns the images built locally: the ones to load into the cluster. */
 export async function buildServiceImages(
   config: PortlerConfig,
   selectedNames: string[],

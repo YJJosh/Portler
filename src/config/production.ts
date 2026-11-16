@@ -6,12 +6,7 @@ import type { PortlerConfig, ProductionConfig, SetupStep } from '../types/index.
 const SETUP_STEP_KEYS = ['run', 'if_missing', 'always', 'watch'];
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/**
- * `setup` is a command, a step object, or a list of either: `{run, if_missing}`
- * runs only while the path is absent, `{run, always}` on every up and setup,
- * `{run, watch}` once per checkout and again when one of the listed files
- * changes. A bare command is a `{run}` step.
- */
+/** `setup` is a command, a `{run, if_missing | always | watch}` step, or a list of either. */
 export function normalizeSetup(value: unknown, name: string): SetupStep[] | undefined {
   if (value === undefined) return undefined;
   if (typeof value === 'string') return [normalizeSetupStep(value, name)];
@@ -45,7 +40,7 @@ function normalizeSetupStep(item: unknown, name: string): SetupStep {
   return step;
 }
 
-/** `watch` is a path or a list of paths (files or folders) whose content becomes part of the step's receipt. */
+/** Paths (files or folders) whose content becomes part of the step's receipt. */
 function normalizeWatch(value: unknown, name: string): string[] | undefined {
   if (value === undefined) return undefined;
   const list = typeof value === 'string' ? [value] : value;
@@ -55,7 +50,6 @@ function normalizeWatch(value: unknown, name: string): string[] | undefined {
   return list;
 }
 
-/** `require` lists environment variable names, deduplicated. */
 function normalizeRequire(value: unknown, name: string): string[] {
   if (value === undefined) return [];
   const list = typeof value === 'string' ? [value] : value;
@@ -88,21 +82,14 @@ export function normalizeProduction(value: unknown, name: string, service: boole
   return production;
 }
 
-/**
- * Rebuild a service map the way the loader makes it, without a prototype, so a
- * name such as "constructor" or "toString" is unknown rather than inherited.
- */
+/** No prototype, as in the loader, so "constructor" is an unknown service, not an inherited one. */
 function serviceMap<T>(entries: Array<[string, T]>): Record<string, T> {
   return Object.assign(Object.create(null) as Record<string, T>, Object.fromEntries(entries));
 }
 
 /**
- * Under --prod only the services in top-level prod.services run; the rest are
- * external to the deployment (a managed database, a hosted queue) and reached
- * through values the deployment supplies. Dependencies on left-out services
- * are dropped, a proxy route to one is an error, and naming one on the
- * command line is an error. Without prod.services every service runs. The
- * names themselves are validated when the config loads.
+ * Under --prod only prod.services run; the deployment provides the rest. Dependencies on
+ * left-out services are dropped; a proxy route to one, or naming one in `requested`, throws.
  */
 export function productionServices(config: PortlerConfig, prod = false, requested: string[] = []): PortlerConfig {
   const listed = config.prod?.services;
@@ -131,8 +118,7 @@ export function productionServices(config: PortlerConfig, prod = false, requeste
 export function applyProduction(config: PortlerConfig, prod = false): PortlerConfig {
   if (!prod) return config;
   const base = productionServices(config, true);
-  // A `name:` scopes the Docker network and the containers to the project instead of
-  // the directory hash (volumes follow through volumeScope); explicit names are kept.
+  // A `name:` replaces the directory hash in network and container names (volumes: volumeScope).
   const projectName = base.name;
   return {
     ...base,
@@ -148,9 +134,8 @@ export function applyProduction(config: PortlerConfig, prod = false): PortlerCon
       docker: service.docker ? {
         ...service.docker,
         ...(projectName !== undefined && !service.docker.containerNameExplicit ? { containerName: namedDockerContainer(projectName, name) } : {}),
-        // `prod.command` replaces `command`, so it only reaches containers that run
-        // `command` (flagged at normalization); a `docker:` block's own command,
-        // even one spelled like `command`, or the image CMD is kept.
+        // `prod.command` replaces only a command taken from the service's `command`; a
+        // `docker:` block's own command or the image CMD is kept.
         command: service.docker.commandFromService
           ? service.prod?.command ?? service.docker.command
           : service.docker.command,

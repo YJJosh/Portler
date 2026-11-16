@@ -3,10 +3,7 @@ import path from 'node:path';
 import { slug, VOLUME_SET_SEPARATOR } from './naming.ts';
 import type { DeclaredVolume, DockerConfig, ServiceConfig } from '../types/index.ts';
 
-/**
- * Extract the short name of a Portler-managed volume entry (`@name:/path`).
- * Returns undefined for bind mounts and plain Docker volume syntax.
- */
+/** `name` of an `@name:/path` entry; undefined for bind mounts and plain Docker volumes. */
 export function managedVolumeName(volumeEntry: string): string | undefined {
   if (!volumeEntry.startsWith('@')) return undefined;
   const parts = volumeEntry.split(':');
@@ -15,10 +12,8 @@ export function managedVolumeName(volumeEntry: string): string | undefined {
 }
 
 /**
- * The name and container path of a Portler-managed `@name:/path` entry as Docker
- * sees them: the name normalized like the one the volume and its `portler.volume`
- * label were created with (`@Data Store` is `data-store`), the path cleaned like
- * Docker cleans a mount destination.
+ * An `@name:/path` entry as Docker sees it: the name normalized as at volume creation
+ * (`@Data Store` is `data-store`), the path cleaned as Docker cleans a mount destination.
  */
 export function managedVolumeMount(volumeEntry: string): { name: string; destination: string } | undefined {
   const rawName = managedVolumeName(volumeEntry);
@@ -28,18 +23,12 @@ export function managedVolumeMount(volumeEntry: string): { name: string; destina
   return { name, destination };
 }
 
-/**
- * Validate and normalize a short volume name or volume set name. Both become
- * segments of a Docker volume name, so they are slugged like every other
- * Portler-derived name and must not contain the `--` set separator.
- */
+/** A volume or volume set name, slugged for a Docker volume name. Throws on "--" or no ASCII alphanumeric. */
 export function normalizeVolumeToken(raw: string, what: string): string {
   const trimmed = raw.trim();
   const value = slug(trimmed);
   if (!trimmed) throw new Error(`${what} must not be empty`);
-  // slug() has a generic "project" fallback for cosmetic project names. A
-  // managed data volume must not silently map an all-Unicode/unsupported token
-  // to that unrelated name.
+  // Otherwise slug() would fall back to "project" and map unrelated names to one volume.
   if (!/[A-Za-z0-9]/.test(trimmed)) {
     throw new Error(`${what} "${raw}" must contain at least one ASCII letter or digit`);
   }
@@ -55,10 +44,7 @@ export function normalizeVolumeSet(raw: string | undefined): string | undefined 
   return normalizeVolumeToken(raw, 'volume set');
 }
 
-/**
- * Collect every Portler-managed volume (`@name` source) declared across all
- * services, including their `docker:` mode overrides, and validate the names.
- */
+/** Every `@name` volume of all services, `docker:` overrides included. Throws on names that collide. */
 export function collectDeclaredVolumes(services: Record<string, ServiceConfig>): DeclaredVolume[] {
   const servicesByVolume = new Map<string, Set<string>>();
   const rawNameByVolume = new Map<string, string>();
@@ -92,10 +78,8 @@ export function collectDeclaredVolumes(services: Record<string, ServiceConfig>):
 }
 
 /**
- * Directory that scopes Portler-managed volume names. Linked git worktrees
- * (where `.git` is a `gitdir: .../.git/worktrees/<name>` file) resolve to the
- * main repository root, so every worktree of a project shares its volumes and
- * can fork them per branch; anything else resolves to projectDir itself.
+ * The directory that scopes volume names. A linked git worktree (`.git` is a `gitdir:
+ * .../.git/worktrees/<name>` file) resolves to the main repository, so worktrees share volumes.
  */
 export async function resolveVolumeRoot(projectDir: string): Promise<string> {
   try {

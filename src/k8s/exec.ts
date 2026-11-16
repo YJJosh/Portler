@@ -10,10 +10,9 @@ function commandLine(command: string, args: string[]): string {
 }
 
 /**
- * Run a command streaming its output with a `[prefix]` per line (like service
- * logs), rejecting when it exits non-zero. An aborted `signal` stops it, and the
- * promise rejects with the signal's reason once it and its process group have exited: a
- * cancelled apply must be over before a rollback deletes what it applied.
+ * Stream output with a `[prefix]` per line; rejects on a non-zero exit. An aborted `signal`
+ * stops the process group and rejects once it has exited, so a cancelled apply is over
+ * before a rollback deletes what it applied.
  */
 export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
@@ -37,7 +36,7 @@ export function runStreaming(command: string, args: string[], prefix: string, cw
   });
 }
 
-/** Run a command and capture its trimmed stdout, rejecting on non-zero exit. `signal` as for runStreaming. */
+/** Trimmed stdout; rejects on a non-zero exit. `signal` as for runStreaming. */
 export function captureOutput(command: string, args: string[], signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -65,8 +64,3 @@ export function captureOutput(command: string, args: string[], signal?: AbortSig
     });
   });
 }
-
-// runBestEffort() used to live here: it reported a failed kubectl delete as a
-// boolean the caller then turned into a warning. Deletes now go through
-// runCommand and propagate the real error, because "could not delete" must not
-// end with `down` exiting 0 and releasing the ports.

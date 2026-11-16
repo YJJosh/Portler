@@ -95,10 +95,8 @@ export function normalizeTopLevelDockerConfig(
 }
 
 /**
- * Normalize the service's `docker:` key, which configures how the service
- * runs under `portler up docker` only. Returns undefined when the key is
- * absent — plain `up` never consults it, and applyDockerMode falls back to
- * the always-Docker config from normalizeTopLevelDockerConfig.
+ * The service's `docker:` key, used only by `up docker`. Undefined when absent; applyDockerMode
+ * then uses the always-Docker config from normalizeTopLevelDockerConfig.
  */
 export function normalizeDockerModeConfig(
   rawService: UnknownMap,
@@ -133,10 +131,8 @@ export function normalizeDockerModeConfig(
 }
 
 /**
- * Rewrite the config for `portler up docker`: every service that has any
- * Docker configuration runs in Docker (its `docker:` override winning over
- * the always-Docker config), with the Docker env merged into the service env
- * so downstream layering treats those keys as service-explicit.
+ * The config for `portler up docker`: every service with any Docker config runs in Docker
+ * (`docker:` winning), with its Docker env merged into the service env.
  */
 export function applyDockerMode(config: PortlerConfig): PortlerConfig {
   const services: Record<string, ServiceConfig> = {};
@@ -163,12 +159,9 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
 }
 
 /**
- * `--image <service>=<ref>`: run a Docker service from a prebuilt image instead
- * of building it. The override replaces `image` and drops `build`, so the
- * command, env, ports and volumes still come from the config while the image
- * is whatever was pinned on the command line — typically the digest reference
- * CI pushed. Applied AFTER the run mode is resolved, so "runs in Docker" is
- * judged for the mode actually being started.
+ * `--image <service>=<ref>`: replaces `image` and drops `build`; everything else still comes
+ * from the config. Apply after the run mode, so "runs in Docker" is judged for that mode.
+ * Throws for an unknown service or one that does not run in Docker.
  */
 export function applyImageOverrides(config: PortlerConfig, images: Readonly<Record<string, string>>): PortlerConfig {
   const entries = Object.entries(images);
