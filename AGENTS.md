@@ -110,14 +110,16 @@ path in the PR description.
 - Never repeat the name, type or the next line.
 - Present tense only. No history ("used to", "previously", "now"). That goes in the commit.
 - No review or change notes: no `REVIEW:`, "moved", "reverted", "verified with".
-- 1–2 lines is normal. More than ~5 belongs in docs/, with a 1-line pointer.
-- JSDoc only for the contract: defaults, errors, units, side effects.
+- 1–2 lines; max 2, except a module header (max ~4). A longer explanation that
+  is the only record of a design goes in docs/, with a 1-line pointer.
+- JSDoc only for the contract: defaults, errors, units, side effects. No JSDoc
+  on internal helpers whose name and signature say enough.
 - Tests: the test name says what is checked. Comment only unusual setup or timing.
 - TODO only for a real, current limit, and say what blocks it.
 - When you change code, fix or delete comments that are now wrong.
 - Never touch directives, shebangs, `"use client"`, or text inside strings.
 - Comments at the paths in 'Rules that must hold' are part of those rules:
-  shorten them, don't drop them.
+  shorten them, don't drop them. They may run past 2 lines.
 
 ## Keep docs in sync
 
