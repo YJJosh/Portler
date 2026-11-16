@@ -163,7 +163,7 @@ describe('up for a service that is partly running', () => {
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
-    // The restart the message used to offer refuses the pin: it would leave db on its old image.
+    // Not offered because restart refuses the pin: it would leave db on its old image.
     const restart = portlerWith(projectDir, env, 'restart', 'docker', 'api', '--image', 'db=postgres:17-alpine');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.match(restart.stderr, /db/);
@@ -211,7 +211,7 @@ describe('up for a service that is partly running', () => {
     assert.equal(refused.status, 1, refused.stdout + refused.stderr);
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
-    // The restart the message used to offer goes by api's entry, not by this command.
+    // Not offered because restart goes by api's entry, not by this command.
     const restart = portler(projectDir, 'restart', 'api');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s.*running/m);
@@ -241,7 +241,7 @@ describe('up for a service that is partly running', () => {
     assert.match(refused.stderr, /already running: db\. Use "portler down db" first\./);
     assert.doesNotMatch(refused.stderr, /portler restart/);
 
-    // The restart the old message offered is refused too, and nothing was started.
+    // restart is refused too, and nothing is started.
     const restart = portler(projectDir, 'restart', 'api', '--prod');
     assert.notEqual(restart.status, 0, restart.stdout + restart.stderr);
     assert.doesNotMatch(portler(projectDir, 'ps').stdout, /^api\s/m);
@@ -366,7 +366,7 @@ describe('the up a dependents warning suggests', () => {
       "portler restart docker db --file deploy/portler.yml --prod --volume-set branch",
     );
     assert.equal(recoveryCommand(['db'], [entry({ runMode: 'local' })], 'local', undefined, [], [entry({ runMode: 'local' })], undefined), 'portler restart db');
-    // Nothing still running: up, as before.
+    // Nothing still running: up.
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [], undefined), 'portler up docker -d db --prod');
     // restart would refuse a prerequisite started another way, or one whose mode is not recorded.
     assert.equal(recoveryCommand(['db'], [docker], 'local', undefined, [''], [entry({ runMode: 'docker' })], undefined), undefined);
@@ -381,7 +381,7 @@ describe('the up a dependents warning suggests', () => {
       ({ dependsOn: [], env: {}, docker: { image: 'postgres:16-alpine', volumes } }) as unknown as ServiceConfig;
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: 'branch' })), 'branch');
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c', volumeSet: '' })), '');
-    // Written before entries recorded the set, by a container that mounts an @ volume: unknown.
+    // An older entry with no recorded set, from a container that mounts an @ volume: unknown.
     assert.equal(recordedVolumeSet(service(['@data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), null);
     // No @ volume in the mode it ran in, or no container at all: the set does not matter.
     assert.equal(recordedVolumeSet(service(['./data:/data']), entry({ runMode: 'local', dockerContainer: 'c' })), undefined);

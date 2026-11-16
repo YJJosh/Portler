@@ -10,8 +10,6 @@ describe('identityVerdict', () => {
   });
 
   it('refuses a pid that the OS recycled onto another process', () => {
-    // Same pid number, different process: the recorded token cannot match the
-    // start time of whatever holds the pid now.
     assert.equal(identityVerdict('12345', '99999', true), 'reused');
     assert.equal(maySignal('reused'), false);
   });
@@ -22,23 +20,19 @@ describe('identityVerdict', () => {
   });
 
   it('FAILS CLOSED on a legacy entry with no recorded token', () => {
-    // The regression this whole module exists for: a pids.json entry written by
-    // an older Portler records a pid and nothing else. Years (or a pid wrap)
-    // later that number belongs to something else entirely. "We cannot tell" is
-    // not permission to kill a process group.
+    // A legacy pids.json entry has only a pid, which may belong to anything by now.
+    // "We cannot tell" is never permission to signal a process group.
     assert.equal(identityVerdict(undefined, '12345', true), 'unverifiable');
     assert.equal(maySignal('unverifiable'), false);
   });
 
   it('FAILS CLOSED when the token could not be captured at spawn', () => {
-    // Same shape as a legacy entry: pidInfoFor could not read the token, so the
-    // entry has none. It is never signalled by an ordinary down.
+    // pidInfoFor could not read the token, so the entry looks legacy; only --force signals it.
     assert.equal(identityVerdict(undefined, 'anything', true), 'unverifiable');
   });
 
   it('FAILS CLOSED when the current token cannot be read for a live pid', () => {
-    // The pid exists but the platform will not say who it is (another user's
-    // process, an unsupported OS). Refuse rather than guess.
+    // For example another user's process, or an OS without a readable start time.
     assert.equal(identityVerdict('12345', null, true), 'unverifiable');
     assert.equal(maySignal('unverifiable'), false);
   });
@@ -63,9 +57,8 @@ describe('readProcessStartToken', () => {
   });
 
   it('gives different processes different tokens', async () => {
-    // Production services are detached process-group leaders. On macOS the
-    // token is lstart (one-second resolution) + pgid, so a non-detached test
-    // child spawned in the same second can legitimately share its parent's token.
+    // Detached, like a service: the macOS token is lstart (whole seconds) + pgid, so a
+    // non-detached child started in the same second can share its parent's token.
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10_000)'], { stdio: 'ignore', detached: true });
     try {
       await new Promise((resolve) => child.once('spawn', resolve));
@@ -91,10 +84,8 @@ describe('readProcessStartToken', () => {
 
 describe('macOS start token (parsed off-Mac, so the policy is covered everywhere)', () => {
   it('asks ps for the start time AND the process-group id', () => {
-    // lstart alone has one-second resolution. The pgid narrows it further: a
-    // Portler-spawned service is detached, so it leads its own process group,
-    // and a process that later inherits the pid has pgid <pid> only if it too
-    // is a process-group leader.
+    // lstart has one-second resolution. A service leads its own group, and a later
+    // process on the same pid has that pgid only if it is a group leader too.
     assert.deepEqual(darwinPsArgs(4321), ['-o', 'lstart=,pgid=', '-p', '4321']);
   });
 
@@ -107,8 +98,7 @@ describe('macOS start token (parsed off-Mac, so the policy is covered everywhere
   });
 
   it('refuses ambiguous output rather than guessing', () => {
-    // Two rows means we did not identify a single process. Under the fail-closed
-    // policy a null token makes a live pid 'unverifiable', so it is not signalled.
+    // A null token makes a live pid 'unverifiable', so it is not signalled.
     assert.equal(parseDarwinStartToken(0, 'Mon Jul 7 09:15:01 2025 1\nTue Jul 8 10:00:00 2025 2\n'), null);
     assert.equal(parseDarwinStartToken(0, '   \n'), null);
     assert.equal(identityVerdict('token', parseDarwinStartToken(0, ''), true), 'unverifiable');

@@ -90,10 +90,8 @@ function bindUdp(port: number, host: string): Promise<dgram.Socket | null> {
 }
 
 /**
- * Busy on UDP, free on TCP. REVIEW: the OS picks a port 0 bind from the ephemeral
- * range, where test files running in parallel hold TCP listeners and connections,
- * so "the TCP side is free" failed CI at random. This range is below the ephemeral
- * ones of Linux (32768+) and macOS (49152+), and the TCP side is checked too.
+ * Busy on UDP, free on TCP. Picks below the ephemeral ranges of Linux (32768+) and
+ * macOS (49152+), where parallel test files hold TCP sockets, and checks TCP too.
  */
 async function occupyUdpPort(host = '127.0.0.1'): Promise<{ port: number; close: () => Promise<void> }> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -154,8 +152,6 @@ describe('transport in portler.yml', () => {
 });
 
 describe('isPortFree with transports', () => {
-  // REVIEW: Exercise IPv6 DNS resolution as well as literal/wildcard addresses;
-  // the original tests used only IPv4 literals and missed the family mismatch.
   it('probes IPv6-only hostnames using an IPv6 socket', async (t) => {
     let bound;
     try {
@@ -208,8 +204,8 @@ describe('isPortFree with transports', () => {
   });
 });
 
-// REVIEW: nothing covered pruning by transport, which is what keeps a running
-// UDP service's reservation from being handed out again after five minutes.
+// Pruning by transport keeps a running UDP service's reservation from being handed
+// out again once it is five minutes old.
 describe('pruneRegistry with transports', () => {
   it('keeps an old entry whose port is busy on its recorded transport', async () => {
     const { port, close } = await occupyUdpPort();
@@ -248,8 +244,6 @@ describe('UDP readiness and display', () => {
 });
 
 describe('allocateAssignments with UDP', () => {
-  // REVIEW: An env allocation cached by an older/TCP config may now be busy on
-  // UDP. A transport edit must invalidate that cache for stopped services.
   it('refreshes env assignments when a cached TCP service changes transport', async () => {
     const yaml = 'services:\n  game:\n    command: run\n    port: 19132\n';
     const dir = await makeProject(yaml);
@@ -324,8 +318,6 @@ describe('allocateAssignments with UDP', () => {
   });
 });
 
-// REVIEW: Protect pruning's transport default for old entries, and retention of
-// active UDP reservations; allocation-only tests cannot catch premature pruning.
 describe('registry pruning with UDP', () => {
   it('keeps old active UDP reservations, while legacy entries still mean TCP', async () => {
     const { port, close } = await occupyUdpPort();
@@ -345,10 +337,8 @@ describe('registry pruning with UDP', () => {
   });
 });
 
-// REVIEW: Test the public env path, not just the validator in isolation; env
-// promises to check the same selection/dependency closure as up in a typed mode.
 describe('env k8s with UDP', () => {
-  it('refuses UDP-only dependencies before allocating any ports', async () => {
+  it('refuses UDP-only services and dependencies through the CLI, as up does, before allocating any ports', async () => {
     const dir = await makeProject(
       'services:\n  game:\n    image: alpine:3.22\n    port: 19132\n    transport: udp\n  web:\n    image: alpine:3.22\n    depends_on: [game]\n',
     );

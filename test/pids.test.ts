@@ -16,9 +16,8 @@ describe('isPidAlive', () => {
   });
 
   it('counts a zombie as dead where kill(pid, 0) still says alive', { skip: process.platform === 'win32' }, async () => {
-    // A child whose parent is stopped cannot be reaped: it exits and stays a
-    // zombie until the parent runs again. That is what a dependency's leader
-    // looks like under a PID 1 that does not reap orphans.
+    // The child of a stopped parent stays a zombie until the parent runs again, like
+    // a leader under a PID 1 that does not reap orphans.
     const script = [
       "const { spawn } = require('node:child_process');",
       "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 200)'], { stdio: 'ignore' });",
@@ -175,10 +174,8 @@ describe('processGroupAlive', () => {
       mkdirSync(path.join(root, '100'));
       writeFileSync(path.join(root, '100', 'stat'), stat(100, 'Z', 100));
       thread(100, 'Z');
-      // Codex's race, scan by scan. Worker 101 starts 102 after the first task listing
-      // and exits before its own read; 102 starts 103 after the second listing and
-      // exits before its read; 103 runs. Each scan sees only zombies and vanished
-      // threads, and by pid alone both look like [100].
+      // Worker 101 starts 102 after the first task listing and exits before its read;
+      // 102 does the same with 103, which runs. By pid alone both scans look like [100].
       const states = [
         () => listedNotRead(101),
         () => { rmSync(task(101), { recursive: true }); listedNotRead(102); },
@@ -189,9 +186,8 @@ describe('processGroupAlive', () => {
       assert.equal(groupHoldsOnlyZombies(scan), false, 'the thread that is still running keeps the group alive');
       assert.equal(calls, 3);
 
-      // Codex's reuse case: two different workers with the same id 101 each exit
-      // between a task listing and their read, so by ids alone both scans look the
-      // same. Each may have started a thread its listing missed, so neither counts.
+      // Two workers reusing id 101 each exit between a task listing and their read, so
+      // by ids both scans match; each may have started a thread its listing missed.
       rmSync(path.join(root, '100', 'task'), { recursive: true });
       thread(100, 'Z');
       listedNotRead(101);

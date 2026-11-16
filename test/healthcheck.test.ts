@@ -216,9 +216,8 @@ describe('waitForServiceReady', () => {
   });
 
   it('counts a Docker port as ready when the peer answers and hangs up', async () => {
-    // A banner-then-close protocol (an SMTP greeting, a server that redirects
-    // and closes) is a real listener. Docker's proxy never sends application
-    // data, so bytes from the peer settle the probe before the hold ends.
+    // Docker's proxy never sends application data, so bytes from the peer (an SMTP
+    // greeting, say) prove a real listener before the hold ends.
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
       socket.end('220 ready\r\n');
@@ -240,8 +239,7 @@ describe('waitForServiceReady', () => {
   });
 
   it('lets an exit during the probe win over a late "ready"', async () => {
-    // The hold keeps ticking against a port whose process died meanwhile
-    // (Docker's proxy keeps accepting). The exit has to win.
+    // Docker's proxy keeps accepting after the process behind the port dies.
     const server = net.createServer(() => {});
     const port = await listen(server);
     try {
@@ -273,9 +271,8 @@ describe('waitForServiceReady', () => {
   });
 
   it("puts Portler's own refusal from a detached log into the error", async () => {
-    // The launch shell refuses a container name another project owns and
-    // exits before Docker starts anything; in a detached run that line is
-    // only in the log, so the terminal used to say just "exited".
+    // The launch shell refuses a container name another project owns before Docker
+    // starts anything; in a detached run that line is only in the log.
     const dir = mkdtempSync(path.join(os.tmpdir(), 'portler-exited-log-'));
     try {
       const logFile = path.join(dir, 'db.log');
@@ -372,10 +369,8 @@ describe('waitForServiceReady', () => {
   });
 
   it('does not let the Docker hold run past the attempt deadline', async () => {
-    // A silent peer has to stay open for the whole hold. A connect that lands
-    // with less than the hold window left cannot prove that before the
-    // deadline, so it is not ready, and it says so at the deadline instead of
-    // after the hold would have ended.
+    // A silent peer must stay open for the whole 200 ms hold, which a 25 ms attempt
+    // cannot fit, so the answer comes at the deadline.
     const server = net.createServer((socket) => {
       // The probe may have destroyed its end already; a reset here is expected.
       socket.on('error', () => {});
@@ -393,10 +388,8 @@ describe('waitForServiceReady', () => {
   });
 
   it('lets a peer that answers inside a short attempt count as ready', async () => {
-    // The data listener goes on before the short-window decision: a container
-    // whose app answers at once is ready even when the attempt leaves less than
-    // the hold, so a healthcheck timeout under the hold is only hopeless for a
-    // listener that stays silent.
+    // The data listener is attached before the short-window decision, so a timeout
+    // under the hold is hopeless only for a silent listener.
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
       socket.write('ready\n');
@@ -438,10 +431,8 @@ describe('waitForServiceReady', () => {
   });
 
   it('rechecks the deadline when the hold timer fires', async () => {
-    // A blocked event loop can delay the hold timer past the attempt deadline.
-    // A silent peer whose hold ended late has proved nothing in time, so the
-    // answer is still "not ready". The block lands after the connect (loopback
-    // connects within a few ms) and before the 200 ms hold would have ended.
+    // A blocked event loop can fire the hold timer past the attempt deadline. The
+    // block starts after the connect (a few ms on loopback) and before the 200 ms hold ends.
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
     });

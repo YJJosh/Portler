@@ -151,7 +151,6 @@ describe('volume lookups', () => {
 });
 
 describe('managed volume destructive-operation ownership', () => {
-  // REVIEW: Daemon failures must not look like an unused source volume.
   it('refuses to fork when Docker cannot establish whether the source is in use', async () => {
     process.env.MOCK_DOCKER_MODE = 'ps-error';
     await assert.rejects(forkVolume(makeConfig(), 'data', 'branch'), /docker ps.*failed: Docker query failed/);

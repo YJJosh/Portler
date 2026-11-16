@@ -2,13 +2,9 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 
 /**
- * A process group that outlives its leader as a zombie, the way a service's
- * group does under a PID 1 that does not reap orphans.
- *
- * A helper starts `command` in a new group of its own (detached) and then stops
- * itself with SIGSTOP. A stopped parent cannot reap, so once the group's leader
- * exits it stays a zombie until `release` resumes the helper. `pgid` is the
- * leader's pid, which is also the group id.
+ * A process group whose leader stays a zombie, as under a PID 1 that does not
+ * reap orphans. The helper that spawned the leader (detached) stops itself with
+ * SIGSTOP and cannot reap it until `release`. `pgid` is the leader's pid.
  */
 export interface ZombieGroup {
   pgid: number;

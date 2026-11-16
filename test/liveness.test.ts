@@ -31,10 +31,8 @@ it('up refuses to overwrite an orphan group retained by down', { timeout: 20_000
     }
     assert.ok(member > 0, 'the service spawned a member before killing its leader');
     process.kill(info.pid, 'SIGKILL');
-    // The case under test needs the leader reaped, not just dead. A zombie
-    // leader still holds its PID and start token, so down can prove the group
-    // is ours and stop it. Under a PID 1 that does not reap orphans (a
-    // container without --init) the leader stays a zombie forever.
+    // The leader must be reaped: a zombie still holds its PID and start token, so
+    // down could prove the group ours. A PID 1 without --init never reaps it.
     if (await waitFor(() => isPidRunning(info.pid), false)) {
       t.skip('the killed leader was never reaped; run under a process that reaps orphans (docker run --init)');
       return;

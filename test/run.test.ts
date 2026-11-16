@@ -1,7 +1,4 @@
-/**
- * `portler run`: a command on this machine with a service's (or the project's)
- * env. These drive the real CLI against a temp project; nothing is started.
- */
+/** `portler run` through the real CLI against a temp project; nothing is started. */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';

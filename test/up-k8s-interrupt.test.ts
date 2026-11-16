@@ -338,8 +338,8 @@ fs.rename = async function(from, to) {
       run.child.kill('SIGKILL');
       await run.exited;
     }
-    // If a regression kills the CLI before the second pid entry is renamed,
-    // the marker holds that pending entry. Only signal a still-matching leader.
+    // If the CLI dies before the second pid entry is renamed, the marker holds
+    // that pending entry. Only signal a leader whose start token still matches.
     const pending = JSON.parse(await fs.readFile(marker, 'utf8').catch(() => '{"services":{}}')) as {
       services: Record<string, { pid: number; startToken?: string }>;
     };

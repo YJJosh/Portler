@@ -150,7 +150,6 @@ services:
     assert.deepEqual({ ...(mergeEnvEntry(new EnvSpec({ value: 'a', required: true }), new EnvSpec({ default: 'b' })) as EnvSpec) }, { default: 'b', required: true });
     assert.deepEqual({ ...(mergeEnvEntry(new EnvSpec({ value: 'a', secret: true }), new EnvSpec({ secret: false })) as EnvSpec) }, { value: 'a', secret: false });
     assert.equal(mergeEnvEntry('plain', new EnvSpec({ default: 'x' })) instanceof EnvSpec, true);
-    // docker.env, k8s.env and prod.env merge the same way.
     const cfg = await config(`services:
   api:
     command: x
@@ -220,7 +219,6 @@ services:
     assert.equal(env.env.SECRET, undefined, 'the development value is not used in production');
     assert.throws(() => assertEnvRequirements(cfg, ['api'], { STRIPE_KEY: 'sk' }), /service api requires SECRET in production \(required: prod\)/);
     assert.doesNotThrow(() => assertEnvRequirements(cfg, ['api'], { STRIPE_KEY: 'sk', SECRET: 's' }));
-    // Development uses the config value and does not ask for it.
     const dev = await config(STACK);
     assert.doesNotThrow(() => assertEnvRequirements(dev, ['api'], { STRIPE_KEY: 'sk' }));
   });
@@ -359,9 +357,7 @@ describe('mode-aware addresses and exports', () => {
   });
 });
 
-// REVIEW: Regression coverage for metadata-only scalar overrides and checking
-// the winning value, not merely the existence of some non-empty input layer.
-describe('env review regressions', () => {
+describe('metadata-only overrides and the winning env value', () => {
   it('preserves scalar values when an override only adds metadata', () => {
     assert.deepEqual({ ...(mergeEnvEntry('root', new EnvSpec({ secret: true })) as EnvSpec) }, { value: 'root', secret: true });
   });

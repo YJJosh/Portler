@@ -44,8 +44,7 @@ beforeEach(async () => {
   const binDir = path.join(tempDir, 'bin');
   await fs.mkdir(projectDir, { recursive: true });
   await fs.mkdir(binDir, { recursive: true });
-  // macOS exposes /var through /private/var; match process.cwd() and the
-  // project identity Portler records instead of comparing lexical aliases.
+  // macOS reaches /var through /private/var; use the real path, as process.cwd() and Portler do.
   projectDir = await fs.realpath(projectDir);
 
   await fs.writeFile(
@@ -65,9 +64,8 @@ beforeEach(async () => {
     'utf8',
   );
 
-  // This executable is the only kubectl visible to the test. It models a local
-  // Docker Desktop context, a missing namespace, stable pods, and a real local
-  // TCP listener for `kubectl port-forward`; no cluster or Docker daemon is used.
+  // The only kubectl on PATH: a Docker Desktop context, a missing namespace, ready pods,
+  // and a real TCP listener for `port-forward`. No cluster or Docker daemon is used.
   const kubectl = `#!/usr/bin/env node
 const net = require('node:net');
 const args = process.argv.slice(2);
@@ -280,8 +278,6 @@ if (args.includes('config') && args.includes('current-context')) {
 });
 
 describe('Kubernetes healthchecks see the env the pods got (fake kubectl)', () => {
-  // REVIEW: an exported health path read ${env.KEY} from config only, ignoring
-  // the use_env file, so a healthy deployment failed readiness and rolled back.
   it('resolves an export in the healthcheck URL with use_env values', async () => {
     await fs.writeFile(
       path.join(projectDir, 'portler.yml'),

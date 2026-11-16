@@ -1,8 +1,4 @@
-/**
- * Command-level tests. These run real CLI command functions against a temp
- * project directory; none of them start services, touch Docker, or touch a
- * cluster.
- */
+/** Real CLI command functions against a temp project; none start services or touch Docker or a cluster. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -119,9 +115,8 @@ describe('CLI command contracts', () => {
 
 describe('up startup liveness', () => {
   it('fails when a member of an earlier level dies while a later level is still starting', async () => {
-    // db passes its check, then dies while api (which depends on it) is still
-    // coming up. api's own wait knows nothing about db, so without the scan
-    // after each level `up -d` would report a started stack with a dead db.
+    // db passes its check, then dies while api is still coming up; api's own
+    // wait knows nothing about db.
     await fs.writeFile(
       path.join(projectDir, 'db.js'),
       "require('net').createServer().listen(process.env.PORT, '127.0.0.1'); setTimeout(() => process.exit(1), 1500);\n",
@@ -157,9 +152,8 @@ describe('up startup liveness', () => {
   });
 
   it('sees a dependency the restart leaves running die while the restarted service starts', async () => {
-    // `restart api` leaves a running db untouched (skipRunning), so db is not
-    // among the children this run spawned. If db dies while api is still coming
-    // up, the scan has to see it through db's recorded pid.
+    // `restart api` leaves a running db alone (skipRunning), so db is not a child of
+    // this run; the scan sees it only through its recorded pid.
     const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
       await fs.writeFile(
@@ -201,10 +195,8 @@ describe('up startup liveness', () => {
 
 describe('restart', () => {
   it('rejects Kubernetes mode instead of silently running services locally', async () => {
-    // The bug: `restart k8s` applied the k8s config overlay (in-cluster DNS
-    // hostnames, k8s.env) and then spawned the services as LOCAL processes,
-    // because only `up` routes k8s mode to commandUpK8s. Nothing ever reached
-    // the cluster, and the services came up with in-cluster env values.
+    // Only `up` routes k8s mode to commandUpK8s; restart would start local processes
+    // with the k8s overlay's in-cluster env.
     await assert.rejects(
       commandRestart(parseArgs(['k8s'], 'restart')),
       /restart does not support Kubernetes mode/,
@@ -630,8 +622,8 @@ describe('clean', () => {
   });
 
   it('recovers from a corrupt PID file with --force', async () => {
-    // Without this, `clean --force` — the documented way to fix broken state —
-    // died on the very file it exists to delete.
+    // `clean --force` is the documented fix for broken state, so it must not fail on
+    // the file it deletes.
     await writeCorruptPids();
 
     const exitCode = await commandClean(parseArgs(['--force'], 'clean'));

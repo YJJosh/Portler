@@ -18,12 +18,7 @@ import type { CommandResult, CommandRunner } from '../src/util/exec.ts';
 
 const PROJECT = '/home/dev/myapp';
 
-/**
- * A fake docker: records every argv it is asked to run and answers from a
- * scripted list of outcomes. Nothing here talks to a daemon, so the tests
- * exercise the control flow — which command runs, with which arguments, after
- * which answer — rather than Docker itself.
- */
+/** A fake docker that records every argv and answers from a scripted list; no daemon is used. */
 function fakeDocker(outcomes: CommandResult[]): { run: CommandRunner; calls: string[][] } {
   const calls: string[][] = [];
   let index = 0;
@@ -59,8 +54,7 @@ describe('ownershipVerdict', () => {
   });
 
   it('treats an unlabelled resource as foreign, never as ours', () => {
-    // This is the whole point: a container that merely happens to hold the name
-    // Portler derived must never be force-removed. We cannot prove we made it.
+    // A container that only holds the name Portler derives must never be force-removed.
     assert.equal(ownershipVerdict({}, PROJECT), 'foreign');
     assert.equal(ownershipVerdict({ 'com.example.app': 'other' }, PROJECT), 'foreign');
   });
@@ -100,8 +94,8 @@ describe('dockerLabelArgs', () => {
 
 describe('inspectArgs', () => {
   it('asks for the id and the labels in ONE inspect', () => {
-    // Two separate calls could disagree: a container can be replaced under the
-    // same name between them, and we would then remove an id we never checked.
+    // Between two calls the container can be replaced under the same name, and an
+    // id we never checked would be removed.
     const args = inspectArgs('container', 'portler-api');
     assert.deepEqual(args.slice(0, 4), ['inspect', '--type', 'container', '--format']);
     assert.match(args[4]!, /\{\{json \.Id\}\}/);
@@ -144,9 +138,8 @@ describe('parseInspection', () => {
 
 describe('removeOwnedContainer', () => {
   it('removes by IMMUTABLE ID, never by the (mutable) name', () => {
-    // The name can be re-pointed at a different container between the inspect
-    // and the rm — `docker rm -f <name>` would then destroy that new one, even
-    // though the label we checked belonged to the old one.
+    // The name can point at a new container between inspect and rm, and
+    // `docker rm -f <name>` would destroy that one instead.
     const docker = fakeDocker([inspected('sha256:deadbeef', { [PROJECT_LABEL]: PROJECT }), { code: 0, stdout: '', stderr: '' }]);
 
     return removeOwnedContainer('portler-api', PROJECT, docker.run).then((outcome) => {
@@ -178,9 +171,8 @@ describe('removeOwnedContainer', () => {
   });
 
   it('reports a dead daemon as an error, NOT as a successful cleanup', async () => {
-    // The bug this guards: `if (inspect failed) return 'absent'` told `down`
-    // there was nothing to remove, so it wiped the PID entries naming the
-    // container and left it running forever.
+    // Read as absent, a failed inspect would let `down` drop the PID entries and
+    // leave the container running.
     const docker = fakeDocker([DAEMON_DOWN]);
 
     const outcome = await removeOwnedContainer('portler-api', PROJECT, docker.run);
@@ -246,9 +238,8 @@ describe('parseInspectLabels', () => {
 });
 
 describe('volume removal ownership (portler volumes remove)', () => {
-  // removeVolume() shells out to docker, so the ownership DECISION is what we
-  // test here — deleting a volume is the one irreversible data-loss operation
-  // in Portler, and it must never fire on a volume it cannot prove it created.
+  // Removing a volume is Portler's one irreversible data loss. removeVolume() shells
+  // out to docker, so this tests the ownership decision it relies on.
   const volumeRoot = '/home/dev/myapp';
 
   it('claims a volume labelled by this project', () => {

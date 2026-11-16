@@ -78,8 +78,8 @@ services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
     assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
   });
 
-  // REVIEW: Top-level env is also each service's env; do not resolve a
-  // nonexistent top-level setup's self-less view before using the service view.
+  // Top-level env is also each service's env, where `self` resolves; only a project
+  // setup step reads it without a self.
   it('allows shared self references when no project setup reads them, or setup is skipped', async () => {
     const text = `env: { SERVICE_LABEL: '\${self.name}' }
 services:
@@ -120,8 +120,8 @@ services:
     assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
   });
 
-  // REVIEW: Both run modes and both production settings may share a volume;
-  // preserve other volume sets and the separate prod scope of a named project.
+  // Both run modes share a volume, and so do dev and prod unless the project is named
+  // (then prod has its own scope). Other volume sets keep their receipts.
   it('forgets every receipt using the recreated volume scope and set', async () => {
     const cfg = await config(`setup: echo migrate >> steps
 services: {db: {image: redis, volumes: ['@data:/data']}}`);
@@ -1072,11 +1072,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
   });
 
   it('startPhase notices a kept pid-backed dependency that exits while another is still being inspected', async () => {
-    // api writes a marker as it starts, before it listens, so the marker exists before
-    // its readiness check can connect; from then on the fake docker below kills cache
-    // partway through its inspect of db. The only inspect of db before api starts is the
-    // one that selects what to start, and that one sees no marker. (Writing the marker in
-    // the server's connection handler raced the readiness check on slow runners.)
+    // api writes a marker before it listens (in the connection handler it would race the
+    // readiness check on slow runners); from then on the fake docker below kills cache
+    // partway through its inspect of db. The selecting inspect of db sees no marker.
     const marker = path.join(dir, 'api-ready');
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';

@@ -4,12 +4,7 @@ import { parseDotEnv } from '../src/parse/dotenv.ts';
 import { parseYaml } from '../src/parse/yaml.ts';
 import { stripComment } from '../src/parse/scan.ts';
 
-/**
- * A quote only opens a quoted span at the start of a value. Treating a mid-word
- * apostrophe as an opening quote made the scanner believe the rest of the line
- * was quoted, which silently swallowed trailing `# comments` (and, for a value
- * with two apostrophes, re-opened a span that ate the following text).
- */
+/** A quote opens a quoted span only at the start of a value, so `it's` does not hide a `# comment`. */
 describe('stripComment with mid-word quotes', () => {
   it('strips a comment after a value containing an apostrophe', () => {
     assert.equal(stripComment("it's fine # trailing comment"), "it's fine");

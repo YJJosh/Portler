@@ -22,9 +22,6 @@ describe('parseArgs', () => {
   });
 
   it('treats "logs -f" as --follow, not --file', () => {
-    // The ambiguity: every other tool's `logs -f` means follow. Portler used to
-    // read it as `--file`, so `portler logs -f api` silently parsed "api" as a
-    // config path and then reported no logs for the (now empty) service list.
     const args = parseArgs(['-f', 'api'], 'logs');
 
     assert.equal(args.follow, true);
@@ -46,9 +43,6 @@ describe('parseArgs', () => {
   });
 
   it('rejects an unknown flag instead of passing it through as a service name', () => {
-    // Previously "--detatch" landed in positionals and surfaced as the baffling
-    // `unknown service "--detatch"`, and a misspelled flag with no service
-    // context was ignored outright.
     assert.throws(() => parseArgs(['--detatch'], 'up'), /unknown flag "--detatch"/);
     assert.throws(() => parseArgs(['--detatch'], 'up'), /did you mean "--detach"\?/);
     assert.throws(() => parseArgs(['-x'], 'up'), /unknown flag "-x"/);

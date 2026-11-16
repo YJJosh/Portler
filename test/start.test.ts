@@ -74,8 +74,7 @@ services:
     assert.equal(env.FROM_ROOT, 'root');
     assert.equal(env.FROM_FILE, 'file');
     assert.equal(env.PORT, '4000');
-    // File values are used as written, like in up and setup: a hostname that merely looks like a
-    // reference is not resolved, and a config reference the file overrides is not resolved either.
+    // As in up and setup, file values are used as written, and a config value they override is not resolved.
     const literal = await buildStartEnv(cfg, api, { SHARED: 'missing.url', LITERAL: '${db.port}' }, {});
     assert.equal(literal.SHARED, 'missing.url');
     assert.equal(literal.LITERAL, '${db.port}');
@@ -85,9 +84,7 @@ services:
     delete api.env.BROKEN;
   });
 
-  // REVIEW: start is deployment-first even without --prod; exports must not
-  // re-read the exporting service using up's development precedence.
-  it('resolves exports from the same deployment-first env that start hands the service', async () => {
+  it('resolves exports from the same deployment-first env that start hands the service, with or without --prod', async () => {
     const raw = await config(`services:
   api:
     command: echo
@@ -119,8 +116,7 @@ services:
   });
 
   it('treats toString and constructor as ordinary variable names', async () => {
-    // Object.prototype members are valid variable names. A plain `in` or index lookup on the
-    // platform or file map found the inherited member and silently dropped the config value.
+    // An `in` or index lookup on a plain object finds these on Object.prototype.
     const cfg = await config(`env: {toString: root-string}
 services:
   api:
@@ -301,8 +297,7 @@ services:
     assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
   });
 
-  // REVIEW: One diagnostic must include platform PORT and every other missing key.
-  it('aggregates start port requirements with production and required:true keys', async () => {
+  it('reports a missing platform PORT with every other missing production and required: true key in one error', async () => {
     const cfg = await config(`services:
   api:
     command: echo started > started

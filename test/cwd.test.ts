@@ -40,7 +40,6 @@ describe('a service whose cwd is missing', () => {
       () => assertServiceCwd(config, service),
       /service "api": cwd "does-not-exist" resolves to \/srv\/app\/does-not-exist, which does not exist\. cwd is relative to the project root \(\/srv\/app\)\.$/,
     );
-    // With --file pointing elsewhere, the error says which folder cwd is relative to.
     assert.throws(
       () => assertServiceCwd({ ...config, filePath: '/srv/portler.yml' }, service),
       /relative to the project root \(\/srv\/app\), the folder Portler runs in, not to the folder of \/srv\/portler\.yml\.$/,
@@ -99,7 +98,6 @@ describe('a service whose cwd is missing', () => {
     await assert.rejects(fs.access(path.join(projectDir, 'setup-ran')));
     assert.equal(portler(projectDir, 'ps').stdout.includes('svc'), false);
 
-    // A file where the folder should be is named as such.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), 'services:\n  svc:\n    cwd: file\n    command: node -e ""\n');
     const result = portler(projectDir, 'up', '-d');
     assert.equal(result.status, 1, result.stdout + result.stderr);

@@ -168,8 +168,8 @@ describe('resolveCluster', () => {
   });
 
   it('does not let an override for one context unlock a different one', () => {
-    // The override is a specific name, not a blanket "yes" — so a stale export
-    // cannot silently authorize whatever context happens to be active later.
+    // The override names one context, so a stale export cannot authorize whatever
+    // context is active later.
     assert.throws(() => resolveCluster('prod-eks', 'my-lab-cluster'), /refusing to use kubectl context/);
     assert.throws(() => resolveCluster('prod-eks', 'true'), /refusing to use kubectl context/);
     assert.throws(() => resolveCluster('prod-eks', ''), /refusing to use kubectl context/);
@@ -211,10 +211,8 @@ describe('reading a namespace (kubectl output, not a guess)', () => {
   const config = makeConfig();
 
   it('asks for -o json, because jsonpath does NOT print JSON', () => {
-    // The bug: `-o jsonpath={.metadata.labels}` renders a Go map — `map[a:b]`,
-    // or `map[]` when unlabelled. JSON.parse threw on that, the catch returned
-    // {}, and every namespace looked unlabelled: an owned namespace read as
-    // foreign, and (worse) the labels that prove ownership were never seen.
+    // `-o jsonpath={.metadata.labels}` prints a Go map (`map[a:b]`), not JSON, so the
+    // labels that prove ownership would never be read.
     const kubectl = fakeKubectl([namespaceJson(projectLabels(config))]);
 
     return readNamespace(CLUSTER, 'portler-myapp-abc', kubectl.run).then((read) => {
@@ -319,9 +317,8 @@ describe('ensureNamespace (create, never apply)', () => {
   });
 
   it('re-reads after AlreadyExists and REFUSES a namespace raced in by someone else', async () => {
-    // THE RACE: our check says absent, a foreign namespace appears, our create
-    // loses. `apply` would have adopted it — labelling a stranger's namespace as
-    // Portler's and authorizing a later `down --volumes` to delete it.
+    // Our check says absent, a foreign namespace appears, our create loses. `apply`
+    // would adopt it and let a later `down --volumes` delete it.
     const kubectl = fakeKubectl([
       NS_NOT_FOUND,
       { code: 1, stdout: '', stderr: 'Error from server (AlreadyExists): namespaces "portler-myapp-abc" already exists' },
@@ -370,7 +367,7 @@ describe('deleteK8sResources', () => {
     assert.deepEqual(result, { deleted: true, services: ['api'] });
     assert.deepEqual(deleted.calls[1]!.slice(-2), ['-o', 'name']);
 
-    // Real kubectl (checked against k3s v1.31) prints this on stdout when nothing matches.
+    // Real kubectl prints this on stdout when nothing matches.
     const nothing = fakeKubectl([namespaceJson(projectLabels(config)), { code: 0, stdout: 'No resources found\n', stderr: '' }]);
     assert.deepEqual(await deleteK8sResources(CLUSTER, config, { serviceNames: ['db'] }, nothing.run), { deleted: false, services: [] });
   });
@@ -389,8 +386,7 @@ describe('deleteK8sResources', () => {
   });
 
   it('THROWS when the delete itself fails, instead of warning and returning', async () => {
-    // The old code printed a warning and returned normally: `down` exited 0 and
-    // released the ports while the Deployments were still running.
+    // Otherwise `down` exits 0 and releases the ports while the Deployments still run.
     const kubectl = fakeKubectl([
       namespaceJson(projectLabels(config)),
       { code: 1, stdout: '', stderr: 'error: failed to delete: connection refused' },
@@ -459,10 +455,8 @@ describe('checkEndpointLocality', () => {
   });
 
   it('refuses a PRIVATE/LAN endpoint too, unless the override names it exactly', () => {
-    // "Private" means "not routable from the internet" — NOT "on this machine".
-    // minikube's VM lives on 192.168.49.2, and so does the cluster on the office
-    // LAN and the one at the far end of a VPN. Portler cannot tell them apart, so
-    // it makes the user say which one they mean.
+    // Private is not local: minikube's VM, an office LAN cluster and one over a VPN can
+    // all be 192.168.49.2, so the user has to name the one they mean.
     const minikube = 'https://192.168.49.2:8443';
     assert.throws(() => checkEndpointLocality('minikube', minikube, undefined), /private\/LAN address/);
     assert.throws(() => checkEndpointLocality('minikube', minikube, undefined), new RegExp(ENDPOINT_OVERRIDE_ENV));
@@ -480,9 +474,7 @@ describe('checkEndpointLocality', () => {
   });
 
   it('FAILS CLOSED when the endpoint is unreadable, unparseable or empty', () => {
-    // Previously a warning: the run continued against a cluster Portler could not
-    // identify at all, on the strength of a context NAME. A tool that deletes
-    // namespaces does not get to guess.
+    // A context name alone does not identify a cluster, and Portler deletes namespaces.
     assert.throws(() => checkEndpointLocality('kind-dev', null, undefined), /cannot tell which cluster it points at/);
     assert.throws(() => checkEndpointLocality('kind-dev', '', undefined), /cannot tell which cluster it points at/);
     assert.throws(() => checkEndpointLocality('kind-dev', '   ', undefined), /cannot tell which cluster it points at/);
@@ -504,11 +496,8 @@ describe('isNamespaceNotFound', () => {
   });
 
   it('does NOT treat a missing binary or credential helper as an absent namespace', () => {
-    // THE REGRESSION. The old matcher was /\bnotfound\b|not found/i, so every
-    // "not found" — a missing kubectl, a missing auth plugin — read as "the
-    // namespace does not exist". That is the exact licence to create the
-    // namespace and, later, to DELETE it: an operational failure would have been
-    // laundered into an ownership claim.
+    // "Absent" licenses creating the namespace and later deleting it, so a missing
+    // kubectl or auth plugin must stay an operational error.
     assert.equal(isNamespaceNotFound('bash: kubectl: command not found'), false);
     assert.equal(
       isNamespaceNotFound(
@@ -553,9 +542,8 @@ describe('isNamespaceNotFound', () => {
 
 describe('project ownership label', () => {
   it('is a collision-resistant digest, not the 32-bit name hash', () => {
-    // The label is what authorizes `down k8s` to delete a namespace. Under the
-    // old 32-bit FNV value, two project paths colliding could delete each other's
-    // workloads (and a collision is brute-forceable in seconds).
+    // The label authorizes `down k8s` to delete a namespace; a 32-bit hash collision
+    // between two project paths is brute-forceable in seconds.
     const value = projectLabels(makeConfig())[PROJECT_LABEL]!;
 
     assert.match(value, /^[0-9a-f]{32}$/, 'a 128-bit hex digest');

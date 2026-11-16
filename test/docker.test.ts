@@ -186,32 +186,26 @@ describe('dockerShellCommand', () => {
       'docker run --rm --name db-container ' +
         `--label portler.project=${PROJECT_DIR} --label portler.service=api ` +
         '--network portler-net --network-alias api ' +
-        // REVIEW: Linux needs the host-gateway mapping; Desktop supplies it itself.
+        // Docker Engine on Linux needs the host-gateway mapping; Docker Desktop adds it itself.
         (process.platform === 'linux' ? '--add-host host.docker.internal:host-gateway ' : '') +
         '-p 127.0.0.1:52001:5432 postgres:16',
     );
   });
 
   it('refuses to use a network it does not own, before AND after a create race', () => {
-    // The old snippet was `inspect || create || inspect`: a pre-existing network
-    // named portler-net that belonged to someone else was silently used — and a
-    // later `down` would then try to remove a stranger's network. The re-inspect
-    // after a lost create race has the same hole: whoever won the race might not
-    // be us.
+    // An existing portler-net may be someone else's, and a later `down` would remove it.
+    // After a lost create race, the winner may not be us either.
     const service = makeService({
       port: 5432,
       docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },
     });
     const network = dockerShellCommand(makeConfig({ api: service }), service, {}, new Set(), assignment, assignments).split(' && ')[0]!;
 
-    // Existing network: read its owner label...
     assert.ok(network.includes('docker network inspect --format'), network);
     assert.ok(network.includes('portler.project'), network);
-    // ...create only when it is missing...
     assert.ok(network.includes(`docker network create --label portler.project=${PROJECT_DIR} portler-net`), network);
-    // ...and re-read after the create (which may have lost a race).
+    // Re-read after the create, which may have lost a race.
     assert.ok(/net_owner=\$\(docker network inspect[^)]*\) \|\| exit 1/.test(network), network);
-    // Whatever path we took, the label must match this project or we abort.
     assert.ok(network.includes(`[ "$net_owner" != ${PROJECT_DIR} ]`), network);
     assert.ok(network.includes('refusing to use it'), network);
     assert.ok(network.includes('exit 1'), network);
@@ -236,8 +230,7 @@ describe('dockerShellCommand', () => {
     const command = dockerShellCommand(makeConfig({ api: service }), service, {}, new Set(), assignment, assignments);
     const preflight = command.split(' && ')[1]!;
 
-    // The old code ran a bare `docker rm -f db-container`, which would destroy
-    // an unrelated container that happened to hold the name.
+    // A bare `docker rm -f db-container` would destroy an unrelated container holding the name.
     assert.ok(!/^docker rm -f/.test(preflight), preflight);
     assert.ok(preflight.includes('portler.project'), preflight);
     assert.ok(preflight.includes('refusing to remove it'), preflight);
@@ -245,10 +238,8 @@ describe('dockerShellCommand', () => {
   });
 
   it('removes the stale container BY ID, not by its (mutable) name', () => {
-    // The inspect captures .Id together with the ownership label, and the rm
-    // uses that id. Removing by name would re-resolve the name afterwards: a
-    // container created under that name in between would be destroyed instead,
-    // even though the label we verified belonged to the old one.
+    // The rm uses the .Id read with the label. By name, a container created under that
+    // name after the label check would be destroyed instead.
     const service = makeService({
       port: 5432,
       docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },
@@ -268,9 +259,8 @@ describe('dockerShellCommand', () => {
   });
 
   it('takes the stale container\'s anonymous volumes with it', () => {
-    // An image VOLUME (postgres, redis) gives every container a fresh anonymous
-    // volume. `--rm` removes it on a clean exit, but a plain `docker rm -f`
-    // leaves it behind, so each forced removal leaked one.
+    // An image VOLUME (postgres, redis) gives every container an anonymous volume.
+    // `--rm` removes it on a clean exit; a plain `docker rm -f` leaves it behind.
     const service = makeService({
       port: 5432,
       docker: { image: 'postgres:16', containerName: 'db-container', volumes: [], env: {} },

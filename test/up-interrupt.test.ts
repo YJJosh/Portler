@@ -73,8 +73,7 @@ ${scenario === 'service-setup' ? step : ''}
         const exited = once(child, 'exit');
         const marker = setup || scenario === 'command' ? 'step.pid' : scenario === 'interval' ? 'listening' : 'probed';
         let reached = false;
-        // REVIEW: 5 seconds was too short on a busy machine: the marker had not
-        // appeared yet and the test failed before anything was interrupted.
+        // Up to 15 s: a busy machine can take more than 5 s to reach the marker.
         for (let i = 0; i < 600; i++) {
           reached = await fs.access(path.join(dir, marker)).then(() => true, () => false);
           if (reached) break;

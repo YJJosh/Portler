@@ -119,7 +119,6 @@ describe('buildGeneratedEnv', () => {
     assert.equal(env.PORTLER_API_URL_HOST, 'localhost');
     assert.equal(env.PORTLER_API_PROTOCOL, 'http');
     assert.equal(env.PORTLER_API_DESIRED_PORT, '4000');
-    // Dashed service names become upper snake case.
     assert.equal(env.PORTLER_DB_MAIN_PORT, '52002');
     assert.equal(env.PORTLER_DB_MAIN_CONTAINER, 'portler-proj-abc-db-main');
     assert.equal(env.PORTLER_DB_MAIN_IMAGE, 'postgres:16-alpine');
@@ -240,7 +239,6 @@ describe('buildServiceEnv', () => {
       assert.equal(prod.env.PORTLER_API_PORT, '52001', 'generated values stay Portler\'s');
       assert.equal(prod.env.PORT, '52001', 'port_env stays Portler\'s');
       assert.equal(prod.env.PORTLER_SERVICE_NAME, 'api');
-      // Containers get the named keys in both modes; the env files' keys only in development.
       assert.ok(dev.explicitKeys.has('FROM_FILE'), 'development forwards the env files');
       assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].filter((key) => key !== 'FROM_FILE').sort(), 'production forwards only named keys');
     } finally {
@@ -276,9 +274,8 @@ describe('buildServiceEnv', () => {
   });
 
   it('does not resolve a root value the service replaces, in either mode', () => {
-    // Root URL is a dangling reference; api's own env (what prod.env becomes after
-    // applyProduction) replaces URL, so the root value is never used for api and must not
-    // throw. A service that does not replace it still hits the config error.
+    // The root URL is a dangling reference that api's own env (prod.env after
+    // applyProduction) replaces; a service that does not replace it still throws.
     const service = makeService({ env: { URL: 'https://api.example' } });
     const config = makeConfig({ api: service }, { URL: 'missing.url', OTHER: 'api.url' });
     const assignments = makeAssignments();
@@ -308,8 +305,6 @@ describe('buildServiceEnv', () => {
   });
 
   it('takes a required key from the deployment only, and reports the missing ones', () => {
-    // A required key with a config value: the value is not used (nor resolved), the
-    // deployment supplies it, and the check names what is missing.
     const service = makeService({ env: { DB: 'missing.url' }, prod: { env: {}, require: ['DB', 'DEPLOY_SECRET'] } });
     const config = { ...makeConfig({ api: service }), production: true };
     const assignments = makeAssignments();
@@ -324,15 +319,13 @@ describe('buildServiceEnv', () => {
   });
 
   it('counts a blank prod.env entry as required, like prod.require', () => {
-    // `prod.env: {KEY: ''}` (or a bare `KEY:`) says the deployment supplies the key, so a
-    // deployment that omits it fails the check instead of starting with an empty value.
+    // `prod.env: {KEY: ''}` or a bare `KEY:` (null) means the deployment supplies the key.
     const service = makeService({ env: { DATABASE_URL: 'postgres://dev' }, prod: { env: { DATABASE_URL: '', TOKEN: null, NODE_ENV: 'production' }, require: [] } });
     const config = { ...makeConfig({ api: service }), production: true };
     assert.deepEqual(requiredEnvKeys(config, service).sort(), ['DATABASE_URL', 'TOKEN']);
     assert.throws(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { NODE_ENV: 'production' }), /service api requires DATABASE_URL, TOKEN in production/);
     assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { DATABASE_URL: 'postgres://prod', TOKEN: 't' }));
-    // A blank top-level entry is required of the project and of a service with no value of
-    // its own for the key, not of one whose own env replaces it.
+    // A blank top-level entry is not required of a service whose own env sets the key.
     const plain = makeService({ name: 'plain' });
     const own = makeService({ name: 'own', env: { PUBLIC_URL: 'https://own.example' } });
     const root = { ...makeConfig({ plain, own }), production: true, prod: { env: { PUBLIC_URL: '' }, require: [] } };
