@@ -2,13 +2,13 @@ import path from 'node:path';
 import { withDirLock } from '../util/lock.ts';
 import { portlerDir } from './index.ts';
 
-// These windows bound how long a crashed holder blocks the next run.
-// A live holder is never taken over, regardless of age (see util/lock.ts).
+// These bound how long a crashed holder blocks the next run; a live holder is never taken
+// over, whatever its age (see util/lock.ts).
 const LOCK_STALE_MS = 15_000;
 const LOCK_WAIT_MS = 10_000;
 
-// Held across a whole start/stop decision (a Docker build, a rollout wait), so
-// it waits far longer. Still only stolen from a provably dead owner.
+// Held across a whole start/stop decision (a Docker build, a rollout wait), so it waits far
+// longer. Still only stolen from a provably dead owner.
 const LIFECYCLE_STALE_MS = 30_000;
 const LIFECYCLE_WAIT_MS = 120_000;
 
@@ -21,9 +21,8 @@ function lifecycleLockDir(projectDir: string): string {
 }
 
 /**
- * Serializes read-modify-write of `.portler/` files: two concurrent `up` runs
- * would otherwise drop one's pids.json entry and orphan its process. The inner
- * lock: taken per file update, never around a lifecycle lock acquisition.
+ * Serializes read-modify-write of `.portler/` files, or two `up` runs drop one's pids.json entry
+ * and orphan its process. The inner lock: per file update, never around taking the lifecycle lock.
  */
 export async function withProjectLock<T>(projectDir: string, fn: () => Promise<T>): Promise<T> {
   return withDirLock(
@@ -34,12 +33,9 @@ export async function withProjectLock<T>(projectDir: string, fn: () => Promise<T
 }
 
 /**
- * Serializes lifecycle decisions (`up`, `down`, `restart`): with only per-write
- * locking, `up` and a concurrent `down` can act on the same read and leave a
- * service running without an entry. The outer lock: taken only at the top of a
- * command, with the project lock always inside it, never the reverse. The
- * foreground wait of `up` is unlocked; its teardown takes the lock again
- * (withLifecycleLockForTeardown).
+ * Serializes `up`/`down`/`restart`, or `up` and `down` act on one read and leave a service running
+ * without an entry. The outer lock: only at the top of a command, the project lock always inside.
+ * `up`'s foreground wait is unlocked; its teardown re-takes it (withLifecycleLockForTeardown).
  */
 export async function withLifecycleLock<T>(
   projectDir: string,
@@ -59,10 +55,8 @@ export async function withLifecycleLock<T>(
 }
 
 /**
- * The teardown ending a foreground run signals groups, prunes entries and frees
- * ports like `down`, so it takes the lifecycle lock. If that fails it fails
- * closed: unlocked, it could stop a newer `up`'s services. The old run stays
- * visible for a later `portler down`.
+ * A foreground run's teardown acts like `down`, so it takes the lifecycle lock and fails closed
+ * (unlocked, it could stop a newer `up`'s services); the old run stays for a later `portler down`.
  */
 export function withLifecycleLockForTeardown<T>(
   projectDir: string,

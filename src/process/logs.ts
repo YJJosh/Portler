@@ -12,9 +12,8 @@ export function serviceLogPath(projectDir: string, serviceName: string): string 
 }
 
 /**
- * Starts a new log generation: a new inode is renamed over the old one, so
- * followers detect even a quick restart and the path never goes missing. The
- * caller owns the returned descriptor.
+ * Renames a new inode over the old log, so followers detect even a quick restart and the path
+ * never goes missing. The caller owns the returned descriptor.
  */
 export function openServiceLog(filePath: string): number {
   mkdirSync(path.dirname(filePath), { recursive: true });

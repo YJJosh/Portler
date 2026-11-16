@@ -31,37 +31,24 @@ export interface PidServiceInfo {
   url?: string;
   dockerContainer?: string;
   dockerNetwork?: string;
-  /**
-   * Started with `--prod`. `restart` keeps the mode: a plain restart refuses a
-   * production service, `restart --prod` a development one. Absent counts as
-   * development.
-   */
+  /** Started with `--prod` (absent: development). `restart` keeps the mode and refuses the other. */
   prod?: boolean;
-  /**
-   * The run mode of the starting command, replayed by `restart` unless given
-   * one. When absent, `restart` infers it from the container.
-   */
+  /** Replayed by `restart` unless given one; when absent, inferred from the container. */
   runMode?: 'local' | 'docker' | 'k8s';
   /** The `--image` pin the service was started with; `restart` replays it unless given a new one. */
   image?: string;
   /** `false` when the service was started with `--no-setup`; `restart` replays that unless given `--setup`. */
   setup?: boolean;
   /**
-   * The volume set the container's `@` volumes were mounted from; `restart`
-   * replays it unless given one. Recorded only for a container mounting a managed
-   * volume; absent on such an entry with runMode, it means the base volumes.
+   * Set of the container's `@` volumes, replayed by `restart` unless given one. Only for a container
+   * mounting a managed volume; absent on such an entry with runMode means the base volumes.
    */
   volumeSet?: string;
-  /**
-   * Opaque OS start-time token for `pid`, captured at spawn and re-read before
-   * signalling to prove the pid was not recycled. Absent in files from
-   * Portler < 0.2.0.
-   */
+  /** Opaque OS start time of `pid`, re-read before signalling to prove it was not recycled. Absent before 0.2.0. */
   startToken?: string;
   /**
-   * The `depends_on` the starting run read. A foreground `up` tearing down after
-   * a `restart` uses the replacements' list, so an edited portler.yml cannot stop
-   * a dependency the newer run needs. Absent in files from Portler < 0.2.2.
+   * The `depends_on` the starting run read, so an edited portler.yml cannot stop a dependency a
+   * newer run needs. Absent before 0.2.2.
    */
   dependsOn?: string[];
   startedAt: string;

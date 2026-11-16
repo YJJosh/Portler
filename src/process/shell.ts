@@ -9,19 +9,15 @@ export interface ShellOptions {
   signal?: AbortSignal;
   /** Called with every signal that is forwarded to the command's process group. */
   onSignal?: (signal: NodeJS.Signals) => void;
-  /**
-   * After the shell exits, wait up to this many ms for the rest of its process
-   * group, then kill what is left. Unset: return as soon as the shell exits.
-   */
+  /** Ms to wait after the shell exits for the rest of its group, then kill it. Unset: no wait. */
   drainMs?: number;
 }
 
 /** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
 export async function runShell(command: string, cwd: string, env: EnvMap, options: ShellOptions = {}): Promise<number> {
   options.signal?.throwIfAborted();
-  // Handlers go in before spawn: a signal arriving before spawn returns would
-  // otherwise kill Portler and leave the command running. They only run after
-  // this synchronous part, so `child` is set by then.
+  // Handlers go in before spawn, or a signal during spawn kills Portler and leaves the command
+  // running. They only run after this synchronous part, so `child` is set by then.
   let child: ChildProcess | undefined;
   const forward = (signal: NodeJS.Signals): void => {
     options.onSignal?.(signal);
@@ -36,8 +32,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     killTimer = setTimeout(() => forward('SIGKILL'), 2000);
   };
   options.signal?.addEventListener('abort', abort, { once: true });
-  // A startup controller already handles process signals: never forward one
-  // twice (or SIGTERM as well as SIGINT on one Ctrl-C).
+  // A startup controller already handles process signals: never forward one twice.
   if (!options.signal) {
     process.on('SIGINT', interrupt);
     process.on('SIGTERM', terminate);
@@ -62,10 +57,8 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
 }
 
 /**
- * Only for a group this process spawned and still holds. ESRCH and EPERM are
- * ignored: macOS returns EPERM for an all-zombie group awaiting its reaper, and a
- * throw from a signal handler, abort listener or timer would end Portler before
- * its rollback.
+ * Only for a group this process spawned and still holds. Ignores ESRCH and EPERM (macOS: an
+ * all-zombie group awaiting its reaper): a throw from a handler or timer would skip the rollback.
  */
 export function signalOwnedProcessGroup(pgid: number, signal: NodeJS.Signals): void {
   try {
@@ -81,11 +74,8 @@ function groupAlive(pgid: number): boolean {
 }
 
 /**
- * The shell only leads the group: what it exec'd or backgrounded stays after it
- * exits. Waits for the group to empty, so a platform watching our pid does not
- * cut the app off when the shell dies, then SIGKILLs what is left. Also drains
- * cancelled startup commands (src/util/exec.ts). Only for a group this process
- * spawned.
+ * Only for a group this process spawned. What the shell backgrounded outlives it, so wait for the
+ * group (a platform watching our pid must not cut the app off), then SIGKILL what is left.
  */
 export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): Promise<void> {
   if (!groupAlive(pgid)) return;
@@ -95,9 +85,8 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
     if (Date.now() >= deadline) {
       process.stderr.write('[portler] process group still running at the deadline; killing it\n');
       signalOwnedProcessGroup(pgid, 'SIGKILL');
-      // SIGKILL is not instant, and under a PID 1 that does not reap orphans a
-      // member stays a zombie. Confirm, and warn if it stays; the exit code stays
-      // the shell's.
+      // SIGKILL is not instant, and a PID 1 that does not reap leaves zombies: confirm, warn if
+      // it stays. The exit code stays the shell's.
       const confirmUntil = Date.now() + 2000;
       while (processGroupAliveAfterKill(pgid) && Date.now() < confirmUntil) await new Promise((resolve) => setTimeout(resolve, 50));
       if (processGroupAliveAfterKill(pgid)) process.stderr.write(`[portler] process group ${pgid} is still present after SIGKILL (unreaped?); giving up on it\n`);
@@ -108,10 +97,8 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
 }
 
 /**
- * Runs in Portler's own process group, so an interactive tool (psql, a REPL) owns
- * the terminal and gets Ctrl-C directly. Portler ignores SIGINT meanwhile and
- * forwards SIGTERM and SIGHUP. Returns the exit status (128 + signal number when
- * a signal ended it).
+ * In Portler's own group, so an interactive tool (psql, a REPL) gets Ctrl-C directly; Portler
+ * ignores SIGINT and forwards SIGTERM/SIGHUP. Returns the exit status (128 + signal number).
  */
 export async function runForeground(command: string, cwd: string, env: EnvMap): Promise<number> {
   // Handlers go in before spawn, for the same reason as in runShell.

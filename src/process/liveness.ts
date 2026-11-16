@@ -17,17 +17,14 @@ export type ServiceLiveness =
   | { status: 'unknown'; message: string };
 
 /**
- * A live pid with a different start token was recycled, so the entry is dead. An
- * unidentifiable live pid counts as running, and so does a group that outlived
- * its leader, without being proven ours. A Docker container can run on after its
- * `docker run` shell is gone; a failed inspect is reported, never guessed.
+ * A recycled pid is dead; an unidentifiable live pid or a group that outlived its leader runs,
+ * unproven. A container can outlive its `docker run` shell; a failed inspect is never guessed.
  */
 export async function serviceLiveness(projectDir: string, info: PidServiceInfo, run: CommandRunner = runCommand): Promise<ServiceLiveness> {
   const exists = isPidAlive(info.pid);
   const verdict = identityVerdict(info.startToken, exists ? await readProcessStartToken(info.pid) : null, exists);
   if (verdict === 'match' || verdict === 'unverifiable') return { status: 'running', via: 'pid' };
-  // Track a surviving group without permission to signal it. A mismatched token
-  // identifies a replacement, whose group is not ours.
+  // Track a surviving group without permission to signal it; a 'reused' pid's group is not ours.
   if (verdict === 'gone' && processGroupAlive(info.pid)) {
     return { status: 'running', via: 'group', message: `leader PID ${info.pid} is gone but its process group still exists; ownership cannot be verified` };
   }
@@ -39,9 +36,8 @@ export async function serviceLiveness(projectDir: string, info: PidServiceInfo, 
 }
 
 /**
- * Services running by serviceLiveness. One whose container cannot be inspected
- * counts as running: starting it again would remove that container if it is up.
- * `onUncertain` hears about failed inspections and unverified groups.
+ * A service whose container cannot be inspected counts as running: starting it again would
+ * remove that container if it is up. `onUncertain` hears failed inspections and unverified groups.
  */
 export async function liveServiceNames(
   projectDir: string,

@@ -11,11 +11,8 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-/**
- * Only keys Portler composed (env files, root/service env, generated PORTLER_*,
- * port_env) get `-e` flags: the inherited host env (PATH, HOME, ...) would
- * break the container.
- */
+// Only keys Portler composed (env files, root/service env, generated PORTLER_*, port_env)
+// get `-e`: the inherited host env (PATH, HOME, ...) would break the container.
 function dockerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<string>): [string, string][] {
   const entries: [string, string][] = [];
 
@@ -24,9 +21,8 @@ function dockerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<string>): [s
     // its own package-manager policy.
     if (PORTLER_INTERNAL_ENV_KEYS.has(key)) continue;
 
-    // The PORTLER_ prefix alone never forwards a key: host controls
-    // (PORTLER_GLOBAL_DIR, PORTLER_HOME, Kubernetes safety overrides) and host
-    // secrets belong to the Portler process, not the container.
+    // The PORTLER_ prefix alone never forwards a key: host controls (PORTLER_HOME, Kubernetes
+    // safety overrides, ...) and host secrets belong to the Portler process, not the container.
     if (explicitEnvKeys.has(key)) entries.push([key, value]);
   }
 
@@ -49,10 +45,8 @@ function normalizeVolume(config: PortlerConfig, volume: string): string {
   return parts.join(':');
 }
 
-/**
- * Pre-creates the `@name` volumes with portler.* labels so `portler volumes` can
- * find them: `docker run -v` would create them without labels.
- */
+// Pre-creates `@name` volumes with portler.* labels so `portler volumes` finds them:
+// `docker run -v` would create them unlabelled.
 function ensureVolumeCommands(config: PortlerConfig, docker: DockerConfig): string[] {
   const commands: string[] = [];
   const template = shellQuote(`{{if .Labels}}{{index .Labels "${PROJECT_LABEL}"}}{{end}}`);
@@ -97,9 +91,8 @@ function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assig
   }
   if (build.target) args.push('--target', build.target);
 
-  // Build args resolve as the image will run: `${db.address}` is the alias on the
-  // project network. Exports read the exporter's effective env, not the config
-  // alone (which ignores shell, .env and mode overrides).
+  // Build args resolve as the image runs (`${db.address}` is the project-network alias). Exports
+  // read the exporter's effective env, not the config alone (no shell, .env or mode overrides).
   const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name,
     exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments) };
   for (const [key, value] of Object.entries(build.args)) {
@@ -132,8 +125,7 @@ function dockerRunCommand(
     config.dockerNetwork,
     '--network-alias',
     service.name,
-    // Docker on Linux has no host.docker.internal unless it is added (Docker
-    // Desktop defines it).
+    // Docker on Linux has no host.docker.internal unless added (Docker Desktop defines it).
     ...(process.platform === 'linux' ? ['--add-host', 'host.docker.internal:host-gateway'] : []),
   ];
 
@@ -161,26 +153,22 @@ function dockerRunCommand(
   return args.map(shellQuote).join(' ');
 }
 
-/**
- * "<id> <owner label>" from one inspect, so the removed ID is the one whose
- * label was checked: a name can be re-pointed between two commands, an ID cannot.
- */
+// "<id> <owner label>" from one inspect, so the removed ID is the one whose label was
+// checked: a name can be re-pointed between two commands, an ID cannot.
 function containerIdentityTemplate(): string {
   return `{{.Id}} {{if .Config.Labels}}{{index .Config.Labels "${PROJECT_LABEL}"}}{{end}}`;
 }
 
-/** Network labels sit at the top level. */
+// Network labels sit at the top level, not under .Config.
 function networkOwnerTemplate(): string {
   return `{{if .Labels}}{{index .Labels "${PROJECT_LABEL}"}}{{end}}`;
 }
 
-/** Splits containerIdentityTemplate's output; owner may be empty. */
+// Splits containerIdentityTemplate's output; owner may be empty.
 const SPLIT_IDENTITY = 'cid=${info%% *}; owner=${info#* }';
 
-/**
- * Removes a leftover container of our name by ID, only if labelled as ours; a
- * foreign one aborts the start. `-v` drops its anonymous volumes, as `--rm` would.
- */
+// Removes a leftover container of our name by ID, only if labelled ours; a foreign one aborts
+// the start. `-v` drops its anonymous volumes, as `--rm` would.
 function preflightRemoveContainer(config: PortlerConfig, containerName: string): string {
   const name = shellQuote(containerName);
   const project = shellQuote(config.projectDir);
@@ -199,7 +187,7 @@ function preflightRemoveContainer(config: PortlerConfig, containerName: string):
   );
 }
 
-/** Exit trap: removes our own container by ID, never a foreign one. */
+// Exit trap: removes our own container by ID, never a foreign one.
 function trapRemoveContainer(config: PortlerConfig, containerName: string): string {
   const name = shellQuote(containerName);
   const project = shellQuote(config.projectDir);
@@ -212,11 +200,8 @@ function trapRemoveContainer(config: PortlerConfig, containerName: string): stri
   );
 }
 
-/**
- * Uses the network only if it is this project's; a foreign one aborts the start.
- * After a create, re-inspect: a parallel `docker network create` may have won
- * the race. A failing final inspect exits non-zero with docker's error.
- */
+// A foreign network aborts the start. Re-inspect after a create: a parallel `docker network
+// create` may have won the race; a failing final inspect exits with docker's error.
 function ensureNetwork(config: PortlerConfig): string {
   const network = shellQuote(config.dockerNetwork);
   const project = shellQuote(config.projectDir);
@@ -237,11 +222,7 @@ function ensureNetwork(config: PortlerConfig): string {
   );
 }
 
-/**
- * The shell command that builds (if configured), ensures the network and
- * volumes, removes a stale container of ours, and runs the container with a
- * cleanup trap on EXIT/INT/TERM.
- */
+/** Build (if set), owned network and volumes, stale-container removal, then the run with a cleanup trap. */
 export function dockerShellCommand(
   config: PortlerConfig,
   service: ServiceConfig,

@@ -39,9 +39,8 @@ export interface DockerConfig {
   env: UnknownMap;
   command?: string;
   /**
-   * The container runs the service's `command` (top-level `image`/`build`), so
-   * `prod.command` reaches it. Absent for a `docker:` block, even when its
-   * command text matches `command`.
+   * The container runs the service's `command` (top-level `image`/`build`), so `prod.command`
+   * reaches it. Absent for a `docker:` block, even when its command text matches.
    */
   commandFromService?: true;
 }
@@ -61,14 +60,14 @@ export interface K8sConfig {
 }
 
 /**
- * A plain string in portler.yml is `{ run }`: it runs once per checkout and again
- * when its command or cwd changes (receipt in `.portler/setup.json`). `if_missing`
- * runs only while that path (relative to the step's cwd) is absent; `always` runs
- * on every `up` and `setup`. Neither keeps a receipt.
+ * A plain string is `{ run }`: runs once, and again when its command or cwd changes (receipt in
+ * `.portler/setup.json`).
  */
 export interface SetupStep {
   run: string;
+  /** Runs only while this path (relative to the step's cwd) is absent; keeps no receipt. */
   ifMissing?: string;
+  /** Runs on every `up` and `setup`; keeps no receipt. */
   always?: boolean;
   /** Plain steps only: files whose content is part of the receipt, relative to the step's cwd. */
   watch?: string[];
@@ -103,25 +102,15 @@ export interface ServiceConfig {
   preferDeclaredPort: boolean;
   dependsOn: DependencyConfig[];
   healthcheck?: HealthcheckConfig;
-  /**
-   * Set when the service always runs in Docker (top-level image/build/
-   * dockerfile/volumes/type: docker keys).
-   */
+  /** Set when the service always runs in Docker (top-level image/build/dockerfile/volumes/type: docker). */
   docker?: DockerConfig;
-  /**
-   * Docker config from the service's `docker:` key, used only when running
-   * `portler up docker`; plain `up` ignores it. See applyDockerMode.
-   */
+  /** The service's `docker:` key, used only by `portler up docker` (applyDockerMode). */
   dockerModeOverride?: DockerConfig;
-  /**
-   * Kubernetes config from the service's `k8s:` key, used only when running
-   * `portler up k8s` / `portler k8s render`. See applyK8sMode.
-   */
+  /** The service's `k8s:` key, used only by `portler up k8s` / `portler k8s render` (applyK8sMode). */
   k8s?: K8sConfig;
   /**
-   * Values offered to others as `${service.<name>}`, e.g. a connection URL.
-   * Templates may use `self.*` and `env.KEY` (the service's own env) and
-   * resolve for whoever reads them.
+   * Values offered as `${service.<name>}`, e.g. a connection URL. Templates may use `self.*` and
+   * `env.KEY` (the service's own env) and resolve for whoever reads them.
    */
   exports?: Record<string, string>;
 }
@@ -154,10 +143,7 @@ export interface ProxyConfig {
   port?: number;
   /** Routes sorted longest-prefix-first, ready for first-match routing. */
   routes: ProxyRoute[];
-  /**
-   * Hostnames allowed besides the loopback names; any other Host header is
-   * refused (DNS-rebinding protection).
-   */
+  /** Hostnames allowed besides loopback; any other Host header is refused (DNS-rebinding protection). */
   allowedHosts: string[];
 }
 
@@ -173,10 +159,8 @@ export interface PortlerConfig {
   setup?: SetupStep[];
   prod?: ProductionConfig;
   /**
-   * Stable project name (`name:`). Under --prod it replaces the directory hash
-   * in network, container and volume names, so a release unpacked into a new
-   * folder keeps its volumes and Docker refuses a second release on the
-   * container name. Ignored in development.
+   * Under --prod, replaces the directory hash in network, container and volume names, so a new
+   * release folder keeps its volumes and Docker refuses a second release by container name. Ignored in development.
    */
   name?: string;
   /** `docker_network:` was set in the config; `name` does not rename it. */
@@ -195,15 +179,9 @@ export interface PortlerConfig {
   portRange: PortRange;
   preferDeclaredPort: boolean;
   dockerNetwork: string;
-  /**
-   * Scopes managed volume names: the main repository root for a linked git
-   * worktree (so worktrees share `@name` volumes), projectDir otherwise.
-   */
+  /** Scopes managed volume names: the main repo root for a linked git worktree (shared `@name`), else projectDir. */
   volumeRoot: string;
-  /**
-   * Active volume set (from --volume-set or PORTLER_VOLUME_SET). When set,
-   * `@name` volumes resolve to the `<name>--<set>` variant.
-   */
+  /** From --volume-set or PORTLER_VOLUME_SET: `@name` volumes resolve to `<name>--<set>`. */
   volumeSet?: string;
   /** Portler-managed volumes (`@name` sources) declared across all services. */
   volumes: DeclaredVolume[];

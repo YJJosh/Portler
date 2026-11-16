@@ -20,10 +20,7 @@ function serviceCommandFor(
   return service.command;
 }
 
-/**
- * Spawns a service in its own process group, streaming prefixed logs
- * (`attachLogs`) or writing them to `logFilePath` for `portler logs`.
- */
+/** Spawns in its own process group; streams prefixed logs (`attachLogs`) or writes `logFilePath`. */
 export function spawnService(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -40,7 +37,6 @@ export function spawnService(
   const cwd = resolveServiceCwd(config, service);
 
   // The child inherits the fd, so capture keeps working after Portler exits.
-  // Each start replaces the previous log with a new generation.
   let logFd: number | undefined;
   if (!attachLogs && logFilePath) {
     logFd = openServiceLog(logFilePath);
@@ -50,8 +46,7 @@ export function spawnService(
     cwd,
     env,
     shell: true,
-    // Its own process group, so stopServices can signal -pid and reach the
-    // shell's grandchildren; foreground mode needs it too.
+    // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren.
     detached: true,
     stdio: attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
   });

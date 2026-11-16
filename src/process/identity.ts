@@ -1,9 +1,7 @@
 /**
- * A pid alone does not identify a process: the OS can hand a recorded pid to a
- * stranger, and `kill(-pid)` would kill their whole group. So a start token (the
- * kernel's start time for the pid) is recorded at spawn and re-read before every
- * signal. Fail-closed: only a matching token permits a signal, so an entry with
- * no token or a failed capture is never signalled.
+ * The OS can hand a recorded pid to a stranger, and `kill(-pid)` would kill their group, so
+ * a start token (the kernel's start time) is recorded at spawn and re-read before every signal.
+ * Fail-closed: only a matching token permits a signal; no token or a failed capture never does.
  */
 import fs from 'node:fs/promises';
 import { runCommand } from '../util/exec.ts';
@@ -16,10 +14,7 @@ export type IdentityVerdict =
   | 'reused'
   /** Nothing holds the pid. */
   | 'gone'
-  /**
-   * Live, but no recorded token, a failed capture, or a platform that cannot
-   * report the current token. Never signal it.
-   */
+  /** Live, but no recorded token, a failed capture, or a platform without tokens. Never signal it. */
   | 'unverifiable';
 
 export function identityVerdict(
@@ -39,10 +34,8 @@ export function maySignal(verdict: IdentityVerdict): boolean {
   return verdict === 'match';
 }
 
-/**
- * Linux: /proc/<pid>/stat field 22 is the start time in clock ticks since boot.
- * comm (field 2) may contain spaces and parens, so count from the last ')'.
- */
+// Linux: /proc/<pid>/stat field 22 is the start time in clock ticks since boot. comm
+// (field 2) may contain spaces and parens, so count from the last ')'.
 async function readLinuxStartToken(pid: number): Promise<string | null> {
   let stat: string;
   try {
@@ -62,10 +55,8 @@ async function readLinuxStartToken(pid: number): Promise<string | null> {
 }
 
 /**
- * macOS `ps`: `lstart` is only to the second, so `pgid` is added (a detached
- * service leads its own group). A pid reused within the same second by another
- * group leader still matches: a small residual risk, documented in
- * docs/reference. (`sess` can read as zero on macOS, so it is not used.)
+ * macOS `ps`: `lstart` is only to the second, so `pgid` is added (`sess` can read as zero). Reuse
+ * within that second by another group leader still matches: a residual risk, see docs/reference.
  */
 export function darwinPsArgs(pid: number): string[] {
   return ['-o', 'lstart=,pgid=', '-p', String(pid)];
@@ -93,10 +84,7 @@ async function readDarwinStartToken(pid: number, run: CommandRunner): Promise<st
   return parseDarwinStartToken(result.code, result.stdout);
 }
 
-/**
- * Null when the pid does not exist or the platform (anything but Linux and
- * macOS) cannot report it, so recorded pids are never signalled there.
- */
+/** Null when the pid does not exist or the platform is not Linux or macOS (never signalled there). */
 export async function readProcessStartToken(pid: number, run: CommandRunner = runCommand): Promise<string | null> {
   if (!Number.isInteger(pid) || pid <= 0) return null;
 

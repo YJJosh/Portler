@@ -1,15 +1,10 @@
 /**
- * Every signal goes to a process group (`kill(-pid)`), since the leader is often
- * a `shell: true` wrapper. A wrong pid kills a stranger's whole process tree.
- *
- * 1. Signal only a pid whose recorded start token still matches. Entries with no
- *    token or a failed capture are reported, never signalled without --force.
- * 2. Re-verify right before SIGTERM and again before SIGKILL: the pid can be
- *    recycled inside the grace window.
- * 3. The kernel keeps a pgid reserved while the group has members, so a group
- *    proven ours earlier in this stop may still be signalled after its leader exits.
- * 4. "Stopped" means the group is confirmed gone. A refused SIGKILL, a failed
- *    kill (EPERM) or a surviving group keeps the PID entry and fails `down`.
+ * Signals go to process groups (`kill(-pid)`; the leader is often a `shell: true` wrapper),
+ * so a wrong pid kills a stranger's tree. Signal only a pid whose start token matches,
+ * re-verified before SIGTERM and again before SIGKILL (pids recycle in the grace window).
+ * The kernel keeps a pgid reserved while the group has members, so a group proven ours
+ * earlier in this stop may be signalled after its leader exits. "Stopped" means the group
+ * is confirmed gone; a refused SIGKILL, EPERM or a survivor keeps the entry and fails `down`.
  */
 import { sleep } from '../util/sleep.ts';
 import { identityVerdict, readProcessStartToken } from './identity.ts';
@@ -20,15 +15,12 @@ import { isPidAlive, isPidRunning, processGroupAlive, processGroupAliveAfterKill
 import type { PidServiceInfo } from '../types/index.ts';
 
 const SIGTERM_GRACE_MS = 1_500;
-/** Time a SIGKILLed group gets to disappear before it counts as a failure. */
+// A group still alive this long after SIGKILL counts as a failure.
 const SIGKILL_CONFIRM_MS = 2_000;
 const POLL_MS = 50;
 
 export interface StopOptions {
-  /**
-   * Signal pids whose identity cannot be verified (no start token, failed
-   * capture). A pid proven to be someone else's ('reused') is never signalled.
-   */
+  /** Signal unverifiable pids (no start token, failed capture); a 'reused' pid never. */
   force?: boolean;
 }
 
@@ -37,26 +29,20 @@ export interface StopResult {
   stopped: string[];
   /** Live pids not signalled because they could not be proven ours. */
   unverified: string[];
-  /**
-   * Failed Docker removals, rejected signals and groups that survived SIGKILL.
-   * Their PID entries are kept and `down` exits non-zero.
-   */
+  /** Failed Docker removals, rejected signals, groups alive after SIGKILL; entries kept, `down` fails. */
   failures: string[];
   /** Targets fully cleaned, stale entries included; their ports may be released. */
   completed: string[];
   /** Targets kept in pids.json; their port reservations must remain. */
   remaining: string[];
-  /**
-   * Services whose running container this call removed, so their dependents lost
-   * them, even if the entry is kept because a `docker run` client holds the group.
-   */
+  /** Services whose running container was removed (dependents lost it), even if the entry is kept. */
   containersRemoved: string[];
 }
 
 /** 'alive' also covers EPERM: the group exists but is not ours to signal. */
 export type GroupState = 'alive' | 'gone';
 
-/** A group holding only zombies is gone: see processGroupAlive. */
+// A group of only zombies reads as gone (see processGroupAlive).
 function realProcessGroupState(pid: number): GroupState {
   return processGroupAlive(pid) ? 'alive' : 'gone';
 }
@@ -65,10 +51,7 @@ function realProcessGroupStateAfterKill(pid: number): GroupState {
   return processGroupAliveAfterKill(pid) ? 'alive' : 'gone';
 }
 
-/**
- * 'gone' (ESRCH) is a success for a teardown. Anything else, EPERM above all, is
- * a failure: the group may still be running.
- */
+/** 'gone' (ESRCH) is a teardown success; 'error' (EPERM above all) means the group may still run. */
 export type SignalOutcome = { status: 'sent' } | { status: 'gone' } | { status: 'error'; message: string };
 
 function realSendSignal(pid: number, signal: NodeJS.Signals): SignalOutcome {
@@ -87,10 +70,7 @@ function realSendSignal(pid: number, signal: NodeJS.Signals): SignalOutcome {
   }
 }
 
-/**
- * Test hooks for the system calls, so tests can drive races (a token changing
- * between SIGTERM and SIGKILL, a rejected kill, a group surviving SIGKILL).
- */
+/** Test hooks for the system calls, to drive races: token change mid-stop, rejected kill, survivor. */
 export interface StopHooks {
   readStartToken?: (pid: number) => Promise<string | null>;
   pidRunning?: (pid: number) => boolean;
@@ -128,11 +108,8 @@ function resolveHooks(hooks: StopHooks): Probes {
   };
 }
 
-/**
- * Zombies count as gone: under a PID 1 that does not reap orphans they never
- * vanish. Identity checks still use pidRunning, since a zombie keeps its start
- * token. After SIGKILL (`afterKill`) no member can fork, so no repeated scans.
- */
+// Zombies count as gone (a PID 1 that does not reap never clears them); identity checks use
+// pidRunning, as a zombie keeps its token. After SIGKILL no member can fork: no repeated scans.
 function isProcessGroupRunning(probes: Probes, pid: number, afterKill: boolean): boolean {
   const group = afterKill ? probes.groupStateAfterKill(pid) : probes.groupState(pid);
   return group === 'alive' || probes.pidAlive(pid);
@@ -141,11 +118,8 @@ function isProcessGroupRunning(probes: Probes, pid: number, afterKill: boolean):
 export type SignalAction = 'group' | 'none';
 
 /**
- * The one place that decides whether a signal may be sent.
- *
- * `provenOurs`: the leader's token matched earlier in this stop while the group
- * was alive. The kernel does not recycle a pid in use as a pgid, so that group
- * is still ours. Without it, a live group with a gone leader may be a stranger's.
+ * The one place that decides whether a signal may be sent. `provenOurs` (token matched earlier
+ * in this stop, group alive since) keeps a leaderless group ours: a pgid in use is not recycled.
  */
 export function signalDecision(verdict: IdentityVerdict, group: GroupState, provenOurs: boolean): SignalAction {
   if (verdict === 'match') return 'group';
@@ -220,11 +194,8 @@ function warnOrphanGroup(name: string, pid: number): void {
   );
 }
 
-/**
- * Removes this project's containers and leaves foreign ones alone. `keep` names
- * services whose container could not be removed, `removed` those whose running
- * container was removed.
- */
+// Foreign containers are left alone. `keep`: services whose container could not be removed;
+// `removed`: those whose running container was removed.
 async function removeDockerContainers(
   projectDir: string,
   targets: Target[],
@@ -277,7 +248,7 @@ function handleRemoval(
   }
 }
 
-/** Remove this project's Docker networks (full teardown only). */
+// Full teardown only: another service may still be attached.
 async function removeDockerNetworks(
   projectDir: string,
   targets: Target[],
@@ -302,11 +273,8 @@ async function removeDockerNetworks(
   return { keep, failures };
 }
 
-/**
- * Signals every target still provably ours, re-verifying identity right before.
- * A refusal in the SIGKILL round means the pid stopped being provably ours
- * during the stop, so the service must not be reported stopped.
- */
+// Re-verifies identity right before signalling. A refusal in the SIGKILL round means the pid
+// stopped being provably ours mid-stop, so the service must not be reported stopped.
 async function signalRound(
   probes: Probes,
   targets: Target[],
@@ -355,7 +323,6 @@ async function signalRound(
   return results;
 }
 
-/** A refusal in the second round: the pid stopped being provably ours mid-stop. */
 function warnSecondRoundRefusal(target: Target): void {
   const { name, info, verdict } = target;
   const reason =
@@ -372,11 +339,8 @@ function warnSecondRoundRefusal(target: Target): void {
   );
 }
 
-/**
- * True when the leader is not runnable code of this service: its pid is not
- * alive (or is a zombie), or a second identity check finds it gone or reused.
- * The second check catches a pid reused since the first one.
- */
+// Not alive (or a zombie), or a second identity check, which catches a pid reused since the
+// first one, finds it gone or reused.
 async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<boolean> {
   if (!probes.pidAlive(info.pid)) return true;
   const again = await verifyPid(probes, info);
@@ -384,10 +348,8 @@ async function leaderNotRunnable(probes: Probes, info: PidServiceInfo): Promise<
 }
 
 /**
- * Splits services into stop levels, dependents first. Edges come from the
- * `dependsOn` recorded in each PID entry (the order that run used, not the
- * current portler.yml). Entries without it go in the first level; names on a
- * cycle share the last.
+ * Stop levels, dependents first, from each PID entry's recorded `dependsOn` (not the current
+ * portler.yml). Entries without it go in the first level; names on a cycle share the last.
  */
 export function stopOrder(services: Record<string, PidServiceInfo>, names: string[]): string[][] {
   const selected = new Set(names);
@@ -412,11 +374,7 @@ export function stopOrder(services: Record<string, PidServiceInfo>, names: strin
   return levels;
 }
 
-/**
- * Stops the selected services (default: all), dependents first, so a draining
- * worker can still reach its database or queue. Each level is a full stop
- * before the next starts.
- */
+/** Stops the selected services (default: all), dependents first, so a draining worker still reaches its database. */
 export async function stopServices(
   projectDir: string,
   serviceNames?: string[],
@@ -430,8 +388,8 @@ export async function stopServices(
   const levels = stopOrder(pids.services, selected);
   if (levels.length <= 1) return stopLevel(projectDir, serviceNames, options, hooks, true);
 
-  // A dependent pruned in an earlier level may hold the only entry naming the
-  // network, so networks are removed once at the end, from the original entries.
+  // Networks go once at the end, from the original entries: a dependent pruned in an earlier
+  // level may hold the only entry naming one.
   const fullTeardown = selected.length === Object.keys(pids.services).length;
   const networkTargets: Target[] = selected
     .filter((name) => pids.services[name]!.dockerNetwork)
@@ -445,9 +403,8 @@ export async function stopServices(
     }));
 
   const total: StopResult = { stopped: [], unverified: [], failures: [], completed: [], remaining: [], containersRemoved: [] };
-  // A dependent that could not be stopped keeps everything it depends on
-  // (transitively) up; otherwise a restart would abort on that failure with the
-  // dependency already down.
+  // A dependent that could not be stopped keeps its (transitive) dependencies up; otherwise a
+  // restart would abort on that failure with the dependency already down.
   const heldBy = new Map<string, Set<string>>();
   const holdDependencies = (dependent: string): void => {
     const stack = [dependent];
@@ -488,8 +445,7 @@ export async function stopServices(
   if (fullTeardown && networkTargets.length > 0) {
     const networkCleanup = await removeDockerNetworks(projectDir, networkTargets);
     total.failures.push(...networkCleanup.failures);
-    // A network that could not be removed keeps the entries naming it: they are
-    // the only record of it.
+    // A network not removed keeps the entries naming it: they are its only record.
     const restore = total.completed.filter((name) => networkCleanup.keep.has(name));
     if (restore.length > 0) {
       await updatePids(projectDir, (current) => {
@@ -502,14 +458,8 @@ export async function stopServices(
   return total;
 }
 
-/**
- * Removes containers, signals the groups proven ours (SIGTERM, then SIGKILL),
- * prunes the PID entries that are safe to drop, and with `cleanNetworks` removes
- * networks on a full teardown. 'Stopped' means the group is confirmed gone.
- * Entries of gone or reused pids are dropped; entries are kept for a live
- * unverifiable pid, a failed signal, a group alive after SIGKILL, or a failed
- * Docker removal.
- */
+// Drops entries of gone or reused pids; keeps them for a live unverifiable pid, a failed
+// signal, a group alive after SIGKILL, or a failed Docker removal.
 async function stopLevel(
   projectDir: string,
   serviceNames: string[] | undefined,
@@ -538,21 +488,18 @@ async function stopLevel(
   const failures: string[] = [];
   const keep = new Set<string>();
 
-  // Containers first, for all selected entries: a `docker run` container can
-  // outlive its shell pid, and ownership comes from its label, not the pid.
+  // Containers first: a `docker run` container can outlive its shell pid, and ownership comes
+  // from its label, not the pid.
   const containerCleanup = await removeDockerContainers(projectDir, targets);
   for (const name of containerCleanup.keep) keep.add(name);
   failures.push(...containerCleanup.failures);
 
-  // Shell already exited, container ran on: removing the container stops it, and
-  // the `docker run` client left in the group exits then, maybe after `docker rm`
-  // returns. Wait up to the confirm window, without signalling, so the service
-  // reads as stopped and not as an unprovable orphan group.
+  // Shell gone, container ran on: its `docker run` client exits once the container is removed,
+  // maybe after `docker rm` returns. Wait (no signal) so it reads stopped, not an orphan group.
   const settling = targets.filter(
     (target) => containerCleanup.removed.has(target.name) && !probes.pidAlive(target.info.pid),
   );
-  // Gone is latched: nothing of ours can revive the group, and once its pid is
-  // free a stranger may lead a new group with that number.
+  // Gone is latched: nothing of ours revives the group, and a stranger may then lead its pgid.
   const sawGone = new Set<Target>();
   const settleDeadline = Date.now() + probes.confirmMs;
   for (;;) {
@@ -562,9 +509,8 @@ async function stopLevel(
     if (sawGone.size === settling.length || Date.now() >= settleDeadline) break;
     await sleep(POLL_MS);
   }
-  // A reused leader pid proves the old group is empty: the kernel never hands out
-  // a pid still in use as a pgid, so a group with that number is a stranger's.
-  // The service is stopped once its container is removed; never signal its pid.
+  // A reused leader pid proves the old group empty (the kernel never hands out a pid in use as
+  // a pgid): with its container removed the service is stopped; never signal that pid.
   // Checked after the wait so a reuse during it counts.
   const settled = new Set<Target>();
   for (const target of targets) {
@@ -576,14 +522,11 @@ async function stopLevel(
     }
   }
 
-  // Settled services skip the signal rounds: nothing runnable is left, and
-  // re-verifying could only fail for reasons that no longer matter (a token-less
-  // entry with a zombie leader reads as unverifiable).
+  // Settled services skip the signal rounds: nothing runnable is left, and re-verifying could
+  // only fail for moot reasons (a token-less entry with a zombie leader reads as unverifiable).
   for (const target of settled) stopped.push(target.name);
-  // The leader can still exit just before this round, with the `docker run`
-  // client briefly in its group, and its pid can be reused meanwhile. So any
-  // refusal for a service whose running container was just removed is deferred
-  // and judged once below, after a confirm window.
+  // The leader may exit just before this round, with the `docker run` client briefly in its
+  // group and the pid reusable, so refusals for a just-removed container are judged later.
   const termRound = await signalRound(
     probes,
     targets.filter((target) => !settled.has(target)),
@@ -594,11 +537,8 @@ async function stopLevel(
   const termed: Target[] = [];
   const lateSettling: Target[] = [];
 
-  // Targets not signalled:
-  // - 'reused': the pid is a stranger's, so the entry is stale; drop it.
-  // - 'unverifiable', or 'gone' with an unproven live group: keep the entry so
-  //   it stays visible.
-  // - the kill failed (EPERM): a failure, not a stop.
+  // Not signalled: 'reused' is a stale entry, dropped. 'unverifiable', or 'gone' with an
+  // unproven live group, keeps the entry visible. A failed kill (EPERM) is a failure.
   for (const target of targets) {
     if (settled.has(target)) continue;
     const result = termRound.get(target)!;
@@ -625,17 +565,14 @@ async function stopLevel(
     }
   }
 
-  // Deferred refusals: wait for the group without signalling, then judge it once.
-  // A reused leader pid (see the settle wait), or a gone group with a leader not
-  // runnable, is stopped; anything else keeps the refusal and its held-back
-  // warning. A service that sat through the settle wait keeps that deadline, so
-  // none waits longer than one confirm window.
+  // Deferred refusals: wait without signalling, then judge once. A reused leader pid, or a gone
+  // group with a leader not runnable, is stopped; else the refusal and its warning stand.
+  // A service that sat through the settle wait keeps that deadline: one confirm window at most.
   const lateStart = Date.now();
   const lateDeadlineFor = (target: Target): number =>
     settling.includes(target) ? settleDeadline : lateStart + probes.confirmMs;
-  // A group seen gone is latched: its pid can go to a stranger whose group then
-  // reads alive. After that only a leader proven ours and still runnable (moved
-  // to another group) keeps the entry.
+  // A group seen gone is latched (its pid may lead a stranger's group). Then only a leader
+  // proven ours and still runnable (moved to another group) keeps the entry.
   const judgeLate = async (target: Target, sawGroupGone: boolean): Promise<void> => {
     const verdict = await verifyPid(probes, target.info);
     const groupGone = sawGroupGone || probes.groupState(target.info.pid) === 'gone';
@@ -669,8 +606,8 @@ async function stopLevel(
     if (pendingLate.length > 0) await sleep(POLL_MS);
   }
 
-  // Gone is latched once seen: an exited group cannot return, but its pid can go
-  // to a stranger, and a re-probe would turn a finished teardown into a failure.
+  // Gone is latched: an exited group cannot return, but a stranger may take its pid, and a
+  // re-probe would turn a finished teardown into a failure.
   const confirmedGone = new Set<Target>();
   const sentKill = new Set<Target>();
   const observe = (target: Target): boolean => {
@@ -689,8 +626,7 @@ async function stopLevel(
   const survivors = termed.filter((target) => !observe(target));
   const killRound = await signalRound(probes, survivors, 'SIGKILL', false);
 
-  // SIGKILL is asynchronous. Only a group confirmed gone may be reported stopped
-  // and have its entry dropped.
+  // SIGKILL is asynchronous: only a group confirmed gone is reported stopped and dropped.
   const killDeadline = Date.now() + probes.confirmMs;
   const killed = survivors.filter((target) => killRound.get(target)!.status === 'signalled');
   for (const target of killed) sentKill.add(target);
@@ -699,8 +635,7 @@ async function stopLevel(
   }
   for (const target of survivors) observe(target);
 
-  // A signalled group not confirmed gone keeps its entry and is reported as
-  // unverified (identity) or failed (anything else).
+  // Not confirmed gone: keep the entry; unverified (identity) or failed (anything else).
   for (const target of termed) {
     if (confirmedGone.has(target)) {
       stopped.push(target.name);
@@ -729,8 +664,8 @@ async function stopLevel(
     failures.push(message);
   }
 
-  // Networks only on a full teardown: another service may still be attached. A
-  // staged stop removes them after its last level.
+  // Networks only on a full teardown (another service may be attached); a staged stop
+  // removes them after its last level.
   const selectedNames = targets.map((target) => target.name);
   const isFullTeardown = targets.length === Object.keys(pids.services).length;
 
@@ -744,8 +679,8 @@ async function stopLevel(
   const remaining = selectedNames.filter((name) => keep.has(name));
   if (completed.length > 0) await removePidEntries(projectDir, completed);
 
-  // Removing the running container is what stops a Docker service, so a pruned
-  // entry whose container was removed counts as stopped, whatever the rounds saw.
+  // Removing the running container stops a Docker service: a pruned entry whose container was
+  // removed counts as stopped, whatever the rounds saw.
   for (const name of completed) {
     if (containerCleanup.removed.has(name) && !stopped.includes(name)) stopped.push(name);
   }
