@@ -2,9 +2,8 @@ import path from 'node:path';
 import { withDirLock } from '../util/lock.ts';
 import { portlerDir } from './index.ts';
 
-// Critical sections are short, so a lock held this long is a crashed process's.
-// A live holder is never taken over (see util/lock.ts); these windows only bound
-// how long a crash blocks the next run.
+// These windows bound how long a crashed holder blocks the next run.
+// A live holder is never taken over, regardless of age (see util/lock.ts).
 const LOCK_STALE_MS = 15_000;
 const LOCK_WAIT_MS = 10_000;
 

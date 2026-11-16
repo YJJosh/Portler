@@ -37,8 +37,8 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
- * Waiting for the lock timed out. A separate class so callers that must go on
- * anyway (foreground-run teardown) can tell it from an error thrown inside `fn`.
+ * Distinguishes an acquisition timeout from an error thrown inside `fn`.
+ * Foreground teardown fails closed when it cannot acquire the lifecycle lock.
  */
 export class LockTimeoutError extends Error {
   readonly lockDir: string;

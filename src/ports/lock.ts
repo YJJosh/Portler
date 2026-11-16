@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import { withDirLock } from '../util/lock.ts';
 import { globalPortlerDir, registryLockDir } from './locations.ts';
 
-// Critical sections under withRegistryLock must finish well under this, or a
-// crashed-holder takeover can hit a live one; allocateAssignments probes ports in it.
+// Staleness threshold for crashed holders; live owners are never taken over.
+// Keep registry work short (allocation probes ports here) to limit contention.
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 10_000;
 

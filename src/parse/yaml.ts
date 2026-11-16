@@ -102,7 +102,7 @@ function readQuotedString(text: string, start: number): QuotedString | null {
   return null;
 }
 
-/** Apply YAML 1.2 core typing rules to a plain (unquoted) scalar. */
+/** Types plain scalars as booleans, null or decimal numbers; other text stays literal. */
 function typedScalar(text: string): unknown {
   if (text === '') return null;
   if (text === 'true' || text === 'True' || text === 'TRUE') return true;
@@ -622,8 +622,8 @@ class YamlParser {
 
 /**
  * Parses the YAML subset portler.yml and Compose-style files use: block and flow
- * collections, quoted strings, `|` and `>` block scalars, YAML 1.2 core scalars and
- * a leading `---`. Throws YamlParseError, also for what is not supported: anchors,
+ * collections, quoted strings, `|` and `>` block scalars, booleans, null, decimal
+ * numbers and a leading `---`. Throws YamlParseError for unsupported anchors,
  * aliases, tags, multiple documents, `? ` keys and tab indentation.
  */
 export function parseYaml(text: string, sourceName = 'YAML'): UnknownMap {
