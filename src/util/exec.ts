@@ -1,11 +1,7 @@
 /**
- * Capturing command runner used by the ownership checks (Docker and kubectl).
- *
- * Those checks decide whether Portler is allowed to destroy something, so they
- * need the exit code, stdout AND stderr — "it failed" is not enough: a missing
- * container and an unreachable daemon both exit non-zero, and only one of them
- * means "nothing to remove". Injecting a CommandRunner also lets the tests
- * assert the exact argv and drive the control flow without a real daemon.
+ * Ownership checks (Docker, kubectl) need exit code, stdout and stderr: a missing
+ * container and an unreachable daemon both exit non-zero, and only the first means
+ * "nothing to remove". Tests inject a CommandRunner instead of a real daemon.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { drainOwnedProcessGroup, signalOwnedProcessGroup } from '../process/shell.ts';
@@ -20,11 +16,10 @@ export interface CommandResult {
 export type CommandRunner = (command: string, args: string[], input?: string, signal?: AbortSignal) => Promise<CommandResult>;
 
 /**
- * On abort, signal the child's whole process group, then SIGKILL it after 2 s. Not just
- * the leader: a credential helper can keep kubectl's pipes open after kubectl exits, and a
- * build helper must be over before the rollback starts. Callers that pass a signal spawn
- * the child as the leader of its own group, and we still hold it, so the group is ours.
- * The returned cleanup keeps the SIGKILL armed until the cancelled group has drained.
+ * On abort, signals the child's whole group, then SIGKILLs it after 2 s: a credential
+ * helper can outlive kubectl, and a build helper must stop before rollback. The group
+ * is ours: callers that pass a signal spawn the child as its leader and still hold it.
+ * The returned cleanup keeps the SIGKILL armed until the group has drained.
  */
 export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => Promise<void> {
   if (!signal) return async () => {};
@@ -40,8 +35,7 @@ export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () 
   return async () => {
     signal.removeEventListener('abort', abort);
     try {
-      // A helper may close its inherited pipes yet keep running. Do not finish a
-      // cancelled command (and begin rollback) until those group members stop too.
+      // A helper can close its pipes and keep running; rollback waits for it to stop.
       if (signal.aborted && child.pid) await drainOwnedProcessGroup(child.pid, 2_000);
     } finally {
       clearTimeout(killTimer);
@@ -82,8 +76,7 @@ export const runCommand: CommandRunner = (command, args, input, signal) => {
 
     if (input !== undefined && child.stdin) {
       child.stdin.on('error', () => {
-        // The child may exit before reading stdin (e.g. binary not found);
-        // the exit path above already reports that.
+        // The child may exit before reading stdin; the exit handler reports that.
       });
       child.stdin.end(input);
     }

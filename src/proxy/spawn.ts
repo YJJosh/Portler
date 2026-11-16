@@ -7,22 +7,16 @@ import { prefixStream } from '../process/logs.ts';
 import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment } from '../types/index.ts';
 import type { ProxyServerOptions } from './server.ts';
 
-/**
- * Node flags the daemon needs to execute TypeScript directly when running
- * from a dev checkout (dist runs plain JS and needs none). Deliberately not
- * the whole execArgv: flags like --inspect must not be inherited.
- */
+/** Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited. */
 function typeStrippingArgs(): string[] {
   return process.execArgv.filter((arg) => arg.includes('strip-types') || arg.includes('transform-types'));
 }
 
-/** Dev checkouts run daemon.ts; the compiled dist layout runs daemon.js. */
 function daemonPath(): string {
   const daemonFile = import.meta.url.endsWith('.ts') ? './daemon.ts' : './daemon.js';
   return fileURLToPath(new URL(daemonFile, import.meta.url));
 }
 
-/** Resolve the proxy routes to the services' assigned localhost ports. */
 export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments): ProxyServerOptions {
   const assignment = assignments[PROXY_SERVICE_NAME];
   if (!assignment) throw new Error('proxy has no assigned port');
@@ -35,21 +29,16 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
       if (!target) throw new Error(`proxy route "${route.prefix}" targets service "${route.service}" with no assigned port`);
       return { prefix: route.prefix, service: route.service, host: target.host, port: target.port };
     }),
-    // The project's own url_host is always legitimate — it is the name Portler
-    // itself prints and tells services to use. Loopback names are allowed
-    // unconditionally by isAllowedHost; anything else must be opted into via
-    // proxy.allowed_hosts.
+    // url_host is the name Portler prints; other non-loopback names need proxy.allowed_hosts.
     allowedHosts: [assignment.urlHost, ...proxy.allowedHosts],
     trustedProxies: proxy.trustedProxies,
   };
 }
 
-/** Spawn the proxy daemon in its own process group, like spawnService. */
 export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachLogs: boolean): ChildProcess {
   const options = buildProxyServerOptions(proxy, assignments);
   const child = spawn(process.execPath, [...typeStrippingArgs(), daemonPath(), JSON.stringify(options)], {
-    // detached gives the proxy its own process group so stopServices can
-    // signal -pid — required even in foreground mode (see spawnService).
+    // Its own process group, so stopServices can signal -pid, in foreground mode too (see spawnService).
     detached: true,
     stdio: attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'ignore', 'ignore'],
   });
@@ -68,7 +57,6 @@ export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachL
   return child;
 }
 
-/** Build the pids.json record for the proxy daemon. */
 export async function proxyPidInfoFor(
   config: PortlerConfig,
   child: ChildProcess,

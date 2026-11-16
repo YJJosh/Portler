@@ -13,28 +13,23 @@ import type { OwnershipVerdict } from '../process/ownership.ts';
 import { dockerOrThrow, ensureDockerRunning, runDocker } from './docker.ts';
 import type { PortlerConfig } from '../types/index.ts';
 
-/** Image used to copy data between volumes when forking. */
 const COPY_IMAGE = 'alpine:3';
 
 /**
- * Label holding a random token for the fork attempt that created a target volume.
- * The project label cannot tell two concurrent forks of the same project apart, and
- * `docker volume create` succeeds for an existing name, so this token is what proves
- * that this attempt created the target it copies into (and may roll back).
+ * A random token per fork attempt. The project label cannot tell concurrent forks
+ * apart, and `docker volume create` succeeds for an existing name, so only this
+ * proves the attempt created the target it copies into and may roll back.
  */
 const FORK_ATTEMPT_LABEL = 'portler.fork-attempt';
 
 export interface ProjectVolume {
-  /** Full Docker volume name. */
   fullName: string;
   /** Short name as declared in portler.yml. */
   name: string;
-  /** Volume set variant, if any. */
   volumeSet?: string;
   driver?: string;
   /** Human-readable size from `docker system df -v`, when available. */
   size?: string;
-  /** Names of running containers currently mounting the volume. */
   usedBy: string[];
   /** Services declaring this volume in portler.yml (empty for undeclared leftovers). */
   services: string[];
@@ -48,7 +43,6 @@ export interface ForkResult {
   volumeSet: string;
 }
 
-/** Split a full project volume name back into short name + volume set. */
 export function parseProjectVolumeName(
   config: PortlerConfig,
   fullName: string,
@@ -95,7 +89,6 @@ function declaredServicesFor(config: PortlerConfig, volumeName: string): string[
   return config.volumes.find((volume) => volume.name === volumeName)?.services ?? [];
 }
 
-/** Best-effort map of volume name -> human-readable size via `docker system df -v`. */
 async function volumeSizes(): Promise<Map<string, string>> {
   const sizes = new Map<string, string>();
   const result = await runDocker(['system', 'df', '-v', '--format', '{{ json .Volumes }}']);
@@ -135,20 +128,14 @@ async function containersUsing(fullName: string, bestEffort = false): Promise<st
   return output.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
-/**
- * List this project's Portler-managed volumes: every existing Docker volume
- * with the project's name prefix, plus volumes declared in portler.yml that
- * Docker has not created yet (exists: false).
- */
+/** Existing volumes with the project prefix, plus declared ones Docker has not created yet (exists: false). */
 export async function listProjectVolumes(config: PortlerConfig): Promise<ProjectVolume[]> {
   await ensureDockerRunning();
 
   const scope = volumeScope(config);
   const prefix = scope.prefix;
-  // Under a name only volumes labelled with the name as owner are listed, so a volume that
-  // merely matches the prefix (portler-<name>--) is never shown as this release's.
-  // Development keeps the prefix match, which also shows unlabelled volumes that `remove`
-  // will then refuse.
+  // A named production project lists only volumes labelled as its own, not every prefix
+  // match. Development matches the prefix, so it also shows unlabelled volumes `remove` refuses.
   const labelFilter = config.production && config.name ? ['--filter', `label=${PROJECT_LABEL}=${scope.owner}`] : [];
   const output = await dockerOrThrow(['volume', 'ls', ...labelFilter, '--format', '{{.Name}}\t{{.Driver}}']);
   const sizes = await volumeSizes();
@@ -197,9 +184,8 @@ async function volumeExists(fullName: string): Promise<boolean> {
 }
 
 /**
- * Clone a volume's data into a new `--<set>` variant so a branch or worktree
- * can experiment (e.g. test a migration) without touching the original. A
- * volume a running container mounts is refused unless `force`.
+ * Copies a volume into a new `--<set>` variant. Refuses a source a running
+ * container mounts unless `force`. Rolls back the target if the copy fails.
  */
 export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string, force = false): Promise<ForkResult> {
   await ensureDockerRunning();
@@ -224,8 +210,7 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     throw new Error(`target volume already exists: ${target}. Remove it first with "portler volumes remove ${parsed.name}${VOLUME_SET_SEPARATOR}${newSet}"`);
   }
 
-  // A database writes while it runs, so a file copy of its volume can be broken in ways
-  // that only show later. Copy a volume nothing runs on, unless told otherwise.
+  // A file copy of a running database's volume can be silently broken.
   const users = await containersUsing(source);
   if (users.length > 0 && !force) {
     throw new Error(
@@ -248,23 +233,19 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
     target,
   ]);
 
-  // Whether the target is still the volume this attempt created: ours, and carrying
-  // this attempt's token. Unknown (inspect failed) counts as not ours.
+  // A failed inspect counts as not ours.
   const createdByThisAttempt = async (): Promise<boolean> => {
     const labels = await volumeLabels(target).catch(() => null);
     return labels !== null && ownershipVerdict(labels, owner) === 'owned' && labels[FORK_ATTEMPT_LABEL] === attempt;
   };
-  // Fail closed on the cleanup too: only remove a target that STILL carries this
-  // attempt's token. A name can be deleted/recreated between Docker calls, and a
-  // concurrent fork's target carries the project label just like ours.
+  // Re-check right before removing: the name can be recreated between Docker calls,
+  // and a concurrent fork's target carries the project label too.
   const rollback = async (): Promise<void> => {
     if (await createdByThisAttempt()) await runDocker(['volume', 'rm', target]);
   };
 
-  // `docker volume create` returns success for an existing volume and keeps its
-  // labels. Re-check after creation so a volume that won the exists/create race,
-  // foreign or made by a concurrent fork, is never used as the copy target (and
-  // never removed by our rollback).
+  // `docker volume create` succeeds for an existing volume and keeps its labels, so a
+  // volume that won the race (foreign or another fork's) is never copied into or rolled back.
   const labels = await volumeLabels(target);
   if (labels !== null && ownershipVerdict(labels, owner) !== 'owned') {
     throw new Error(`target volume ${target} appeared during creation but is not owned by this project; refusing to overwrite it`);
@@ -303,11 +284,7 @@ export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNe
   return { source, target, volumeSet: newSet };
 }
 
-/**
- * Whether a volume carries this project's label. The name alone is not proof of
- * ownership, and this is the one Portler operation that destroys data
- * irreversibly — so it is checked separately.
- */
+/** Decided by the project label; a volume's name alone is not proof of ownership. */
 export async function volumeOwnership(fullName: string, volumeRoot: string): Promise<OwnershipVerdict> {
   const labels = await volumeLabels(fullName);
   return labels === null ? 'absent' : ownershipVerdict(labels, volumeRoot);
@@ -336,10 +313,8 @@ export async function removeVolume(config: PortlerConfig, volumeArg: string, for
     throw new Error(`volume not found: ${fullName}. Run "portler volumes" to see this project's volumes.`);
   }
 
-  // Deleting a volume destroys its data for good, so require proof it is ours.
-  // --force may bypass the separate in-use guard below, but it must never turn
-  // an expected name into proof of ownership. In particular, legacy Portler
-  // versions could leave unlabelled volumes under a convincing managed name.
+  // Deleting destroys data for good, so require the label even with --force, which
+  // skips only the in-use check. Older Portler versions left unlabelled volumes under managed names.
   if ((await volumeOwnership(fullName, volumeScope(config).owner)) !== 'owned') {
     throw new Error(
       `volume ${fullName} is not labelled as this project's (${PROJECT_LABEL}=${volumeScope(config).owner}), so Portler ` +
@@ -353,9 +328,7 @@ export async function removeVolume(config: PortlerConfig, volumeArg: string, for
     throw new Error(`volume ${fullName} is in use by ${users.join(', ')}. Stop the services (portler down) or pass --force.`);
   }
 
-  // The in-use query is another Docker round trip during which a named volume
-  // can be removed and recreated. Re-check at the destructive boundary so a
-  // foreign replacement is refused rather than removed under the old verdict.
+  // The volume can be recreated during the in-use query, so re-check right before removing.
   if ((await volumeOwnership(fullName, volumeScope(config).owner)) !== 'owned') {
     throw new Error(
       `ownership of volume ${fullName} changed while preparing to remove it; refusing to delete it. ` +
@@ -367,7 +340,6 @@ export async function removeVolume(config: PortlerConfig, volumeArg: string, for
   return fullName;
 }
 
-/** Classic two-row Levenshtein edit distance, used for did-you-mean hints. */
 function editDistance(left: string, right: string): number {
   let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
 
@@ -386,7 +358,6 @@ function editDistance(left: string, right: string): number {
   return previous[right.length]!;
 }
 
-/** Closest candidate within a small edit distance, or undefined when nothing is close. */
 function didYouMean(input: string, candidates: readonly string[]): string | undefined {
   let best: string | undefined;
   let bestDistance = Math.max(2, Math.floor(input.length / 4)) + 1;
@@ -416,11 +387,7 @@ function managedVolumesFor(config: PortlerConfig, serviceNames: readonly string[
   return [...names].sort();
 }
 
-/**
- * Managed volumes the given services would create because they do not exist yet in
- * the active volume set (a first start, a new set, or one removed with `volumes
- * remove` or `docker volume rm`). `undefined` when Docker cannot be asked.
- */
+/** Managed volumes the services would create in the active set. `undefined` when Docker cannot be asked. */
 export async function missingManagedVolumes(config: PortlerConfig, serviceNames: readonly string[]): Promise<string[] | undefined> {
   const managed = managedVolumesFor(config, serviceNames);
   if (managed.length === 0) return [];
@@ -431,13 +398,9 @@ export async function missingManagedVolumes(config: PortlerConfig, serviceNames:
 }
 
 /**
- * Guard against typos in `up --volume-set` / PORTLER_VOLUME_SET: starting with
- * a set that was never forked silently creates a fresh EMPTY variant, which
- * looks like data loss. For each managed volume the selected services are
- * about to create, warn when the requested set variant does not exist but the
- * base volume or other set variants do (with a did-you-mean when a set name is
- * close). Best effort: Docker errors are ignored here and surface when the
- * services actually start. The volume is still created — warning, not error.
+ * A mistyped `--volume-set` creates an empty variant, which looks like data loss.
+ * Warns when the variant is missing but the base or other sets exist; never throws
+ * on Docker errors, which surface when the services start.
  */
 export async function warnMissingVolumeSetVariants(config: PortlerConfig, serviceNames: readonly string[]): Promise<void> {
   if (!config.volumeSet) return;

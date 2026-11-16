@@ -1,12 +1,3 @@
-/**
- * Reverse proxy server for the top-level `proxy:` block.
- *
- * Routing is longest-prefix-first with path-segment boundaries ('/api'
- * matches '/api' and '/api/users' but not '/apifoo'). The matched prefix is
- * NOT stripped: the upstream service receives the original URL, like most
- * dev proxies. The Host header is preserved and X-Forwarded-For/Proto/Host
- * are set; WebSocket upgrades are piped through raw net sockets.
- */
 import http from 'node:http';
 import net from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -27,10 +18,7 @@ export interface ProxyServerOptions {
   port: number;
   /** Sorted longest-prefix-first; the first match wins. */
   routes: ProxyTarget[];
-  /**
-   * Hostnames (no port) the proxy answers for. A request whose Host header is
-   * not in this list is rejected — see isAllowedHost.
-   */
+  /** Hostnames (no port) the proxy answers for besides loopback names; see isAllowedHost. */
   allowedHosts: string[];
   /** Exact peer IP allowlist; loopback is not implicitly trusted. */
   trustedProxies: string[];
@@ -69,24 +57,13 @@ export function hostnameOf(hostHeader: string): string {
 }
 
 /**
- * DNS-rebinding guard.
- *
- * By default the proxy listens on a loopback port with no authentication, which is fine
- * as long as only local clients can reach it. But any web page the developer
- * visits can make their browser send requests to http://127.0.0.1:<port> — and
- * with a DNS rebind (attacker.com briefly resolving to 127.0.0.1) those
- * requests carry `Host: attacker.com` and are treated as same-origin by the
- * browser, letting a remote page read the responses of every service behind the
- * proxy. Browsers cannot forge the Host header, so pinning it to the names the
- * proxy is actually reachable under closes the hole: a rebound request arrives
- * with the attacker's hostname and is refused.
- *
- * `*.localhost` is allowed because it always resolves to loopback per RFC 6761.
- * A bare IP literal is allowed only when it is a loopback address.
+ * DNS-rebinding guard. The proxy has no authentication, and a page that rebinds
+ * attacker.com to 127.0.0.1 could read every service behind it. Browsers cannot
+ * forge Host, so a rebound request arrives as `Host: attacker.com` and is refused.
+ * `*.localhost` always resolves to loopback (RFC 6761); IP literals must be loopback.
  */
 export function isAllowedHost(hostHeader: string | undefined, allowedHosts: readonly string[]): boolean {
-  // HTTP/1.0 clients (and some probes) send no Host header. They cannot be a
-  // browser rebinding attack, which always sets one.
+  // HTTP/1.0 clients send no Host; a browser, and so a rebinding attack, always does.
   if (hostHeader === undefined || hostHeader === '') return true;
 
   if (!isValidAuthority(hostHeader)) return false;
@@ -96,18 +73,17 @@ export function isAllowedHost(hostHeader: string | undefined, allowedHosts: read
   if (allowedHosts.some((allowed) => allowed.toLowerCase() === hostname)) return true;
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
   if (hostname === '[::1]' || hostname === '::1') return true;
-  // 127.0.0.0/8 is entirely loopback, but only accept a real IPv4 literal.
-  // Numeric-looking DNS names such as 127.0.0.1.999 must not bypass the Host
-  // guard if a resolver happens to accept them.
+  // A real IPv4 literal only: a DNS name such as 127.0.0.1.999 must not pass.
   if (net.isIP(hostname) === 4 && Number(hostname.split('.')[0]) === 127) return true;
 
   return false;
 }
 
-/** Reject ambiguous authorities before either HTTP or upgrade forwarding. */
+/**
+ * Refuses duplicate Host headers: Node checks only the first, but an upstream
+ * with another parser may route on a later, unchecked one.
+ */
 function hasAllowedRequestHost(req: IncomingMessage, allowedHosts: readonly string[]): boolean {
-  // REVIEW: Node keeps only the first Host in req.headers; raw WebSocket heads
-  // used to relay unchecked later values to upstreams with different parsers.
   let count = 0;
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
     if (req.rawHeaders[index]!.toLowerCase() === 'host') count += 1;
@@ -123,10 +99,7 @@ function rejectForbiddenHost(hostHeader: string | undefined): string {
   );
 }
 
-/**
- * Pick the first (= longest, routes are pre-sorted) route whose prefix
- * matches the request path on a path-segment boundary.
- */
+/** Routes are sorted longest first. '/api' matches '/api' and '/api/users', not '/apifoo'. */
 export function matchRoute(routes: ProxyTarget[], url: string): ProxyTarget | undefined {
   const queryIndex = url.indexOf('?');
   const path = queryIndex === -1 ? url : url.slice(0, queryIndex);
@@ -165,15 +138,15 @@ function connectionListedHeaders(connectionHeader: string | string[] | undefined
   return names;
 }
 
-/** Only these three forwarding headers are supported; never relay competing metadata. */
+/** Dropped from client requests: the proxy sets X-Forwarded-For/Proto/Host itself. */
 function isForwardingHeader(name: string): boolean {
   return name === 'forwarded' || name === 'x-real-ip' || name.startsWith('x-forwarded-');
 }
 
-/** A single authority, not a URL, comma-separated list, userinfo or scoped IP. */
-// REVIEW: underscores are not valid in public DNS names, but internal/container
-// names such as `my_app` were explicitly allowlisted before this check existed.
-// Keep them allowed; the goal is rejecting lists, userinfo and URL syntax.
+/**
+ * A single authority, not a URL, list, userinfo or scoped IP. Underscores are
+ * allowed: not valid in public DNS, but container names such as `my_app` use them.
+ */
 function isValidAuthority(value: string): boolean {
   const match = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9._-]+)(?::([0-9]+))?$/.exec(value);
   if (!match) return false;
@@ -220,9 +193,8 @@ function forwardedRequestHeaders(req: IncomingMessage, options: ProxyServerOptio
     headers[name] = value;
   }
 
-  // REVIEW: Host is routing identity, not an optional connection extension.
-  // Preserve the checked authority even when Connection nominates it; otherwise
-  // http.request synthesizes the private upstream authority instead.
+  // Keep the checked Host even when Connection lists it; otherwise http.request
+  // sends the upstream's own address.
   if (req.headers.host !== undefined) headers.host = req.headers.host;
   return { ...headers, ...forwardingHeaders(req, options) };
 }
@@ -263,7 +235,7 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
     host: route.host,
     port: route.port,
     method: req.method,
-    // The full original URL — route prefixes are intentionally not stripped.
+    // Route prefixes are not stripped.
     path: req.url,
     headers: forwardedRequestHeaders(req, options),
   });
@@ -282,26 +254,24 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
     res.end(badGatewayMessage(route, error));
   });
 
-  // Client gone (or response finished): make sure the upstream request dies too.
   res.on('close', () => upstream.destroy());
   req.pipe(upstream);
 }
 
-/** Rebuild an upgrade head, retaining only the required upgrade hop. */
+/**
+ * Strips the same headers as HTTP. The client's Connection list is not relayed:
+ * it could nominate our forwarding headers as hop-by-hop upstream.
+ */
 function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): string {
   const lines = [`${req.method} ${req.url ?? '/'} HTTP/${req.httpVersion}`];
   const connectionListed = connectionListedHeaders(req.headers.connection);
 
-  // REVIEW: Upgrades must sanitize the same proxy credentials and nominated
-  // hop headers as HTTP. Relaying the raw Connection list also incorrectly
-  // nominates our newly generated forwarding metadata as hop-by-hop upstream.
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
     const name = req.rawHeaders[index]!.toLowerCase();
     if (name === 'host' || isForwardingHeader(name) || HOP_BY_HOP_HEADERS.has(name) || connectionListed.has(name)) continue;
     lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
   }
-  // Use the same single checked Host as HTTP, never a raw duplicate or omission
-  // introduced by Connection: Host.
+  // The single checked Host, even when Connection lists it.
   if (req.headers.host !== undefined) lines.push(`Host: ${req.headers.host}`);
   lines.push('Connection: Upgrade', `Upgrade: ${req.headers.upgrade}`);
   for (const [name, value] of Object.entries(forwardingHeaders(req, options))) lines.push(`${name}: ${value}`);
@@ -312,8 +282,7 @@ function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): stri
 function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket: net.Socket, head: Buffer): void {
   socket.on('error', () => {});
 
-  // WebSockets are not protected by the same-origin policy, so an unchecked
-  // Host here would reopen exactly the rebinding hole the request path closes.
+  // WebSockets are not covered by the same-origin policy, so they need the Host check too.
   if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;

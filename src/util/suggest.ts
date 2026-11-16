@@ -1,6 +1,4 @@
-/** Small edit-distance helpers used to add "did you mean ...?" hints to errors. */
-
-/** Case-sensitive Levenshtein edit distance. */
+/** Case-sensitive Levenshtein distance. */
 export function editDistance(left: string, right: string): number {
   const columns = right.length + 1;
   let previous = Array.from({ length: columns }, (_unused, index) => index);
@@ -17,10 +15,7 @@ export function editDistance(left: string, right: string): number {
   return previous[columns - 1]!;
 }
 
-/**
- * The candidate closest to `input` (case-insensitive), or undefined when even
- * the best candidate is too far away to be a plausible typo.
- */
+/** Case-insensitive; undefined when even the best candidate is too far off to be a typo. */
 export function closestMatch(input: string, candidates: Iterable<string>): string | undefined {
   const target = input.toLowerCase();
   let best: string | undefined;

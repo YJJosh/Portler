@@ -1,6 +1,5 @@
 import type { UnknownMap } from '../types/index.ts';
 
-/** Type guard for plain (non-array) objects, e.g. parsed YAML/JSON records. */
 export function isObject(value: unknown): value is UnknownMap {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

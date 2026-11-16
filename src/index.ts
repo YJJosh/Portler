@@ -1,5 +1,4 @@
-// Public library API. Lets other tools (e.g. Cloudler) load and inspect
-// portler.yml without shelling out to the CLI.
+// Public library API (dist/src/index.d.ts): load and inspect portler.yml without the CLI.
 export { findConfigFile, loadConfig } from './config/loader.ts';
 export { applyDockerMode, applyImageOverrides } from './config/docker.ts';
 export { parseYaml } from './parse/yaml.ts';

@@ -1,8 +1,4 @@
-/**
- * Error thrown by the YAML parser. Carries the source name and the 1-based
- * line (and column, when known) so callers and the CLI can point users at the
- * exact spot in their portler.yml.
- */
+/** `line` and `column` (when known) are 1-based. */
 export class YamlParseError extends Error {
   readonly source: string;
   readonly line: number;

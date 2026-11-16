@@ -33,11 +33,7 @@ function makeAssignment(service: ServiceConfig, port: number): ServiceAssignment
   };
 }
 
-/**
- * Every service that declares a port, plus the synthetic proxy service when a
- * `proxy:` block exists (the proxy always needs a port, even with
- * `port: auto`).
- */
+/** Includes the synthetic proxy service when a `proxy:` block exists. */
 function servicesToAllocate(config: PortlerConfig): ServiceConfig[] {
   const services = Object.values(config.services).filter((service) => service.port !== undefined);
   if (config.proxy) services.push(proxyServiceConfig(config, config.proxy));
@@ -51,15 +47,8 @@ async function choosePort(
   reservedPorts: Set<number>,
   ownRegisteredPort?: number,
 ): Promise<number> {
-  // Reclaim the service's own previous registry port when it is still free.
-  //
-  // The reservedPorts check is essential: reservedPorts also holds the ports
-  // handed out EARLIER IN THIS VERY LOOP. Without it, two services of the same
-  // project restarting together can both land on one port — service A's stale
-  // registry entry is dropped (it is being reserved), A's port is therefore not
-  // in reservedPorts initially, service B probes and picks it (nothing is bound
-  // yet, so it reads as free), and then A's own-port reclaim hands A the same
-  // port because nothing is listening on it either. Both then race to bind.
+  // reservedPorts includes ports handed out earlier in this loop. Nothing is bound
+  // yet, so without it two services restarting together could get the same port.
   if (
     ownRegisteredPort !== undefined &&
     isPort(ownRegisteredPort) &&
@@ -72,9 +61,7 @@ async function choosePort(
   const candidates: number[] = [];
   const previous = state?.services?.[service.name]?.port;
 
-  // A preferred declared port beats the previous assignment: the service
-  // (or the proxy with an explicit port) should return to its declared home
-  // once it frees up, instead of sticking to a drifted port forever.
+  // A preferred declared port beats the previous one, so a drifted service returns home once it frees up.
   if (service.preferDeclaredPort && service.port !== undefined) candidates.push(service.port);
   if (previous !== undefined) candidates.push(previous);
 
@@ -86,9 +73,7 @@ async function choosePort(
 
   const { start, end } = config.portRange;
   const size = end - start + 1;
-  // Hash-derived scan offset: gives each (project, service) a stable home in
-  // the range so different projects spread out instead of all contending for
-  // the ports at the start of the range.
+  // A stable per-service offset, so projects spread out instead of contending for the start of the range.
   const offset = fnv1a(`${config.projectDir}:${service.name}`) % size;
 
   for (let attempt = 0; attempt < size; attempt += 1) {
@@ -101,18 +86,13 @@ async function choosePort(
 }
 
 /**
- * Assign a free localhost port to every service that declares one, reusing
- * prior assignments where possible and recording reservations in the global
- * registry for the services named in `reserveServices`.
+ * Assigns a port to every service that declares one, and records registry
+ * reservations for `reserveServices` only.
  *
- * `runningServiceNames` are this project's services with a live process:
- * their recorded port is reused verbatim (it is busy precisely because they
- * listen on it), never re-probed. Callers must NOT include them in
- * `reserveServices`, since reserving deletes the registry entry and
- * re-probes. `options.recorded` is this project's pids.json services: a running
- * service's port there is the last place to find it when neither the registry
- * nor state.json still has it (a reset registry, a new PORTLER_GLOBAL_DIR, a
- * deleted state.json).
+ * `runningServiceNames` keep their port without a probe (it is busy because they
+ * listen on it); callers must not also list them in `reserveServices`, which
+ * re-probes. `options.recorded` (pids.json) is the last fallback for a running
+ * service's port when the registry and state.json no longer have it.
  */
 export async function allocateAssignments(
   config: PortlerConfig,
@@ -127,16 +107,12 @@ export async function allocateAssignments(
 
     const reserveSet = new Set(reserveServices);
 
-    // Ports this project's services currently hold in the registry — for
-    // services we are not (re)starting these are likely in active use and
-    // must be reused verbatim, not re-probed.
     const ownPorts = new Map<string, number>();
     for (const entry of Object.values(registry.ports)) {
       if (entry.project === config.projectDir) ownPorts.set(entry.service, entry.port);
     }
 
-    // Drop the reserved services' own entries so choosePort can reclaim their
-    // previous ports (the callers guarantee those services are not running).
+    // So choosePort can reclaim them; callers guarantee these services are not running.
     for (const [portText, entry] of Object.entries(registry.ports)) {
       if (entry.project === config.projectDir && reserveSet.has(entry.service)) {
         delete registry.ports[portText];
@@ -152,14 +128,8 @@ export async function allocateAssignments(
     const assignments: Assignments = {};
     const allocatable = servicesToAllocate(config);
 
-    // Every service with a port gets an assignment — even unselected ones —
-    // because selected services may reference them (${other.port}) and
-    // state.json must stay complete. Only reserveServices get registry
-    // entries below.
-    //
-    // Pass 1: verbatim reuse for RUNNING services we are not (re)starting —
-    // their port is busy precisely because they listen on it, so probing
-    // would wrongly move them.
+    // Unselected services get an assignment too: others may reference ${other.port},
+    // and state.json must stay complete. Running services keep their port unprobed.
     for (const service of allocatable) {
       if (reserveSet.has(service.name) || !runningServiceNames.has(service.name)) continue;
 
@@ -175,9 +145,7 @@ export async function allocateAssignments(
       reservedPorts.add(port);
     }
 
-    // Pass 2: probe for everything else — services being started, and
-    // stopped services whose recorded port may have been taken by a foreign
-    // process in the meantime.
+    // A stopped service's recorded port may have been taken meanwhile, so it is probed.
     for (const service of allocatable) {
       if (assignments[service.name]) continue;
       const port = await choosePort(config, service, state, reservedPorts, ownPorts.get(service.name));
@@ -206,9 +174,8 @@ export async function allocateAssignments(
 }
 
 /**
- * Prune stale entries (any project) from the global registry: entries whose
- * port is free again and whose reservation is old enough that no concurrent
- * `up` can still be binding it. Returns the number of entries removed.
+ * Prunes every project's stale entries (see pruneRegistry); returns how many were
+ * removed. With `force`, a corrupt registry is reset instead of throwing.
  */
 export async function pruneGlobalRegistry(force = false): Promise<number> {
   return withRegistryLock(async () => {
@@ -218,9 +185,7 @@ export async function pruneGlobalRegistry(force = false): Promise<number> {
     } catch (error) {
       if (!force || !(error instanceof CorruptStateFileError)) throw error;
 
-      // Keep recovery in this lock acquisition. Releasing after the failed read
-      // and reacquiring just to reset would leave a needless race window between
-      // the decision that the registry is corrupt and its replacement.
+      // Reset under the same lock, so nothing can write between the failed read and the reset.
       process.stderr.write(
         '[portler] warning: reset the corrupt global port registry because --global --force was specified. ' +
           'Any in-flight, not-yet-bound reservation was discarded; active listening ports will still be detected by probing.\n',

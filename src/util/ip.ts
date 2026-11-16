@@ -1,8 +1,8 @@
 import net from 'node:net';
 
-/** Exact IP identity, including equivalent IPv6 spellings and mapped IPv4 peers. */
+/** Canonical form, so IPv6 spellings and IPv4-mapped peers compare equal; undefined for a non-IP. */
 export function normalizeIpAddress(value: string): string | undefined {
-  // Scope identifiers are interface-dependent, not portable exact IP identities.
+  // A scope id (`%eth0`) depends on the interface, so it has no exact identity.
   if (value.includes('%') || net.isIP(value) === 0) return undefined;
   if (net.isIP(value) === 4) return value;
   const canonical = new URL(`http://[${value}]/`).hostname.slice(1, -1);
