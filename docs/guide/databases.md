@@ -64,7 +64,6 @@ db:
   use: postgres@16
 ```
 
-<!-- REVIEW: The warning only held for Postgres. With real Docker, mysql@8.0 to @8.4 and redis@7 to @8 upgraded the volume on start, then the old version refused it, so "going back works" would have cost a MySQL or Redis user their way back. -->
 ::: warning Changing the version of an existing volume
 What happens depends on the database, and in both cases a failed start reads `service "db" exited before it became ready`:
 
@@ -72,7 +71,6 @@ What happens depends on the database, and in both cases a failed start reads `se
 - **MySQL and Redis** upgrade the data when a newer version starts (`mysql@8.0` to `@8.4`, `redis@7` to `@8`), and the older version can't open it afterwards. To keep a way back, copy the volume first with `portler volumes fork db-data before-upgrade`; `portler up --volume-set before-upgrade` then runs the old version on the copy.
 :::
 
-<!-- REVIEW: "use: postgres@13" with its own image is still an error, so say that use: keeps a listed version. -->
 For a version the preset doesn't list, keep a listed one in `use:` and set `image:` and `volumes:` yourself. Set both: with only `image:` set to an older Postgres, the data lands outside the managed volume and is gone after `portler down`.
 
 ```yaml
@@ -109,7 +107,6 @@ services:
 
 `${self.name}` becomes the service's name when the file loads, so two services using one preset get separate volumes. Paths are relative to the project root. See [use](/reference/configuration#use-presets) for the exact rules.
 
-<!-- REVIEW: Moved below the service example: between the two, the bare use: above followed a preset with versions:, and copying it was an error. -->
 To offer versions, add a `versions:` map and use `${version}`. A version's keys replace the preset's, except `env` and `exports`, which merge key by key, and the service must then name one (`use: ./portler/presets/clickhouse.yml@25.3`):
 
 ```yaml
