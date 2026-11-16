@@ -15,10 +15,7 @@ export function k8sManifestDir(projectDir: string): string {
 export const NAMESPACE_MANIFEST_FILE = '00-namespace.yml';
 
 export interface RenderedManifests {
-  /**
-   * One YAML file per resource group. NAMESPACE_MANIFEST_FILE sorts first, so
-   * `kubectl apply -f <dir>` creates the namespace before the resources in it.
-   */
+  /** One YAML file per resource group, NAMESPACE_MANIFEST_FILE first. */
   files: Array<{ fileName: string; text: string }>;
   /** Portler service name -> sanitized Kubernetes resource name. */
   names: Map<string, string>;

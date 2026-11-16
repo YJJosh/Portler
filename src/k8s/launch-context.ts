@@ -12,10 +12,8 @@ import type { ClusterInfo } from './cluster.ts';
 import { projectDeploymentNames } from './kubectl.ts';
 import type { PortlerConfig } from '../types/index.ts';
 
-/**
- * The kubectl context `up k8s` deployed to, so after a context switch `env` and `down k8s`
- * still act on that cluster, not the active one. Read and written under the lifecycle lock.
- */
+// The context `up k8s` deployed to, so after a context switch `env` and `down k8s` still act on
+// that cluster. Read and written under the lifecycle lock.
 interface LaunchContextFile {
   version: 1;
   project: string;
@@ -58,10 +56,8 @@ export async function readLaunchContext(projectDir: string): Promise<string | nu
   return (await readLaunchRecord(projectDir))?.context ?? null;
 }
 
-/**
- * The kubeconfig kubectl reads here: KUBECONFIG made absolute (kubectl resolves it against
- * the working directory), or ~/.kube/config. Symlinks are resolved (/tmp vs /private/tmp on macOS).
- */
+// KUBECONFIG made absolute (kubectl resolves it against the cwd), or ~/.kube/config, with
+// symlinks resolved (/tmp vs /private/tmp on macOS).
 function kubeconfigInUse(): string {
   const configured = process.env.KUBECONFIG ?? '';
   const paths = configured.split(path.delimiter).filter((entry) => entry !== '');
@@ -78,10 +74,7 @@ function realPath(file: string): string {
   }
 }
 
-/**
- * An error when this command reads another kubeconfig than `up k8s` did. A context name is
- * unique only within its kubeconfig (every Docker Desktop has "docker-desktop").
- */
+// A context name is unique only within its kubeconfig (every Docker Desktop has "docker-desktop").
 function differentKubeconfig(record: LaunchContextFile, refusal: string): Error | undefined {
   const here = kubeconfigInUse();
   if (record.kubeconfig === here) return undefined;
@@ -106,10 +99,7 @@ export type LaunchCluster =
   /** The recorded context is no longer in the kubeconfig `up k8s` read it from. */
   | { source: 'gone'; context: string };
 
-/**
- * The cluster `env` and `down k8s` act on. A recorded context passes the same local-cluster
- * checks as an active one, and a failure names it, since it may not be the active one.
- */
+/** The cluster `env` and `down k8s` act on. A recorded context passes the same local-cluster checks as an active one. */
 export async function launchCluster(projectDir: string, run: CommandRunner = runCommand): Promise<LaunchCluster> {
   const record = await readLaunchRecord(projectDir);
   if (record === null) return { source: 'active', cluster: await detectCluster(run) };
@@ -127,11 +117,8 @@ export async function launchCluster(projectDir: string, run: CommandRunner = run
 }
 
 /**
- * Record `cluster` before `up k8s` touches it. Throws while the project still has Deployments
- * in another recorded context (or kubectl cannot say), since `env` and `down k8s` reach only one.
- *
- * Returns an undo for a start whose teardown removed everything it started. It keeps a record
- * an earlier `up k8s` wrote for this context, and one a later `up k8s` has rewritten since.
+ * Record `cluster` before `up k8s` touches it. Throws while Deployments may remain in another recorded context,
+ * since `env` and `down k8s` reach only one. The undo keeps a record an earlier `up k8s` wrote or a later one rewrote.
  */
 export async function recordLaunchContext(
   config: PortlerConfig,

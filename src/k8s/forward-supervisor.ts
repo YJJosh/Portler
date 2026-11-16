@@ -15,9 +15,9 @@ export interface ForwardSpec {
   context: string;
 }
 
-/** Give up after this many consecutive quick failures. */
+// Give up after this many consecutive quick failures.
 const MAX_RESTARTS = 5;
-/** A forward that survived this long resets the restart budget. */
+// A forward that survived this long resets the restart budget.
 const STABLE_RUN_MS = 10_000;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 8_000;
@@ -67,9 +67,8 @@ function runForwardOnce(spec: ForwardSpec): { child: ChildProcess; exited: Promi
 }
 
 /**
- * Rerun `kubectl port-forward` with capped exponential backoff when a pod restart kills it.
- * Runs as its own process so forwards outlive `up k8s -d`; its pid is the one in pids.json,
- * so `portler down` signals the supervisor and kubectl as one group.
+ * Rerun `kubectl port-forward` with capped exponential backoff when a pod restart kills it. Runs as its own process so
+ * forwards outlive `up k8s -d`; its pid is the one in pids.json, so `portler down` signals it and kubectl as one group.
  */
 export async function runForwardSupervisor(spec: ForwardSpec): Promise<number> {
   let shuttingDown = false;

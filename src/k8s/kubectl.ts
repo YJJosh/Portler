@@ -12,15 +12,13 @@ import { k8sServiceNames, MANAGED_BY_LABEL, namespaceManifest, PROJECT_LABEL, pr
 import type { PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
 const ROLLOUT_TIMEOUT = '180s';
-/** Pods must stay ready with no new restarts for this long after rollout. */
+// Pods must stay ready with no new restarts for this long after rollout.
 const STABILITY_WINDOW_MS = 5_000;
 const STABILITY_TIMEOUT_MS = 120_000;
 const STABILITY_POLL_MS = 1_000;
 
-/**
- * Pin `--context` on every kubectl call: with bare `kubectl`, a context switch after
- * the cluster was read would send Portler's applies and deletes to another cluster.
- */
+// Pin `--context` on every call: a context switch after the cluster was read would
+// otherwise send Portler's applies and deletes to another cluster.
 function kubectlArgs(cluster: ClusterInfo, args: string[]): string[] {
   return ['--context', cluster.context, ...args];
 }
@@ -32,7 +30,6 @@ export async function applyManifestFiles(cluster: ClusterInfo, paths: string[], 
   await runStreaming('kubectl', kubectlArgs(cluster, args), 'portler', undefined, signal);
 }
 
-/** Wait until the service's Deployment has rolled out (pods ready). */
 export async function waitForRollout(
   cluster: ClusterInfo,
   config: PortlerConfig,
@@ -62,7 +59,7 @@ export async function waitForRollout(
   }
 }
 
-/** Waiting reasons of a Deployment's pods, e.g. `ImagePullBackOff: Back-off pulling image "x"`. */
+// e.g. `ImagePullBackOff: Back-off pulling image "x"`.
 async function podProblems(cluster: ClusterInfo, namespace: string, appName: string): Promise<string[]> {
   const raw = await captureOutput(
     'kubectl',
@@ -126,9 +123,8 @@ async function podSnapshot(cluster: ClusterInfo, namespace: string, appName: str
 }
 
 /**
- * `kubectl rollout status` returns once a pod is ready, which without a readiness probe
- * only means the process started; a pod that then crashes kills its port-forward. So the
- * pods must stay ready with no new restarts for STABILITY_WINDOW_MS.
+ * `kubectl rollout status` returns once a pod is ready, which without a readiness probe only means it started, and a
+ * crash then kills its port-forward. So pods must stay ready with no new restarts for STABILITY_WINDOW_MS.
  */
 export async function waitForStablePods(
   cluster: ClusterInfo,
@@ -160,20 +156,15 @@ export async function waitForStablePods(
   throw new Error(`pods for service "${serviceName}" kept restarting; check "kubectl logs -n ${config.k8sNamespace} -l app=${name}"`);
 }
 
-/**
- * Only 'absent' lets Portler create (and later delete) the namespace. An auth error or an
- * unreachable cluster is 'error', never 'absent', so it cannot claim a namespace it never saw.
- */
+/** Only 'absent' lets Portler create (and later delete) the namespace; an auth error or unreachable cluster is 'error'. */
 export type NamespaceRead =
   | { status: 'found'; labels: Record<string, string> }
   | { status: 'absent' }
   | { status: 'error'; message: string };
 
 /**
- * True only for the API server's `Error from server (NotFound): namespaces "x" not found`.
- * Other kubectl "not found" errors (`kubectl: command not found`, a missing credential
- * plugin) are operational errors: read as 'absent', they would license creating and later
- * deleting the namespace. A NotFound about another kind does not count either.
+ * True only for the API server's NotFound for a namespace. Other "not found" errors (`kubectl: command not found`, a
+ * missing credential plugin), read as 'absent', would license creating and later deleting the namespace.
  */
 export function isNamespaceNotFound(stderr: string): boolean {
   const text = stderr.trim();
@@ -212,7 +203,6 @@ export function parseNamespaceRead(code: number, stdout: string, stderr: string)
   }
 }
 
-/** Read a namespace, keeping absent / found / error apart. */
 export async function readNamespace(
   cluster: ClusterInfo,
   namespace: string,
@@ -239,10 +229,7 @@ export async function getNamespacePhase(
   return result.stdout.trim() || null;
 }
 
-/**
- * True once a NotFound read confirms the namespace is gone within `timeoutMs`; an API error
- * counts as still there. An aborted `signal` ends the wait with its reason.
- */
+/** True once a NotFound read confirms the namespace gone within `timeoutMs`; an API error counts as still there. Abort rejects. */
 export async function waitForNamespaceDeleted(
   cluster: ClusterInfo,
   namespace: string,
@@ -273,10 +260,7 @@ export type NamespaceOwnership =
   /** Does not exist — Portler will create it. */
   | 'absent';
 
-/**
- * An existing namespace not labelled as this project's is 'foreign' even if the name matches:
- * it may be a shared one (or `default`), and deleting it would delete everyone's workloads.
- */
+/** An unlabelled namespace is 'foreign' even if the name matches: it may be shared (or `default`), with everyone's workloads. */
 export function namespaceOwnership(labels: Record<string, string> | null, config: PortlerConfig): NamespaceOwnership {
   if (labels === null) return 'absent';
 
@@ -303,10 +287,7 @@ function namespaceReadError(namespace: string, message: string): Error {
   );
 }
 
-/**
- * Read-only ownership gate: throws on a foreign or unreadable namespace. Runs before any
- * port is reserved, so `up k8s` aborts early.
- */
+/** Read-only ownership gate: throws on a foreign or unreadable namespace. Runs before any port is reserved. */
 export async function ensureNamespaceClaimable(
   cluster: ClusterInfo,
   config: PortlerConfig,
@@ -335,9 +316,8 @@ export function isAlreadyExistsError(stderr: string): boolean {
 }
 
 /**
- * Create the project's namespace when absent, or throw unless it is ours. The only place a
- * namespace is created; it is never in the manifests `up k8s` applies. If someone creates it
- * between the check and `kubectl create`, the re-read after AlreadyExists must find it ours.
+ * Create the project's namespace when absent, or throw unless it is ours. The only place a namespace is created;
+ * it is never in the manifests `up k8s` applies.
  */
 export async function ensureNamespace(
   cluster: ClusterInfo,
@@ -371,19 +351,13 @@ export async function ensureNamespace(
 export interface DeleteK8sOptions {
   /** Only these services' resources; undefined means the whole project. */
   serviceNames?: string[];
-  /**
-   * Also delete PersistentVolumeClaims, and for a full teardown the whole namespace.
-   * Off by default, so a database's data survives `portler down k8s`.
-   */
+  /** Also delete PVCs, and for a full teardown the whole namespace. Off by default, so data survives `portler down k8s`. */
   deleteVolumes?: boolean;
   /** Block (bounded) until a deleted namespace is fully gone. */
   awaitNamespace?: boolean;
 }
 
-/**
- * Label selector limiting a delete to this project's resources. A delete by service name
- * keeps the project label too: `app in (api)` alone would match another project's `api`.
- */
+/** Limits a delete to this project's labels, by service name too: `app in (api)` alone would match another project's `api`. */
 export function deleteSelector(config: PortlerConfig, serviceNames?: string[]): string {
   const ownership = `${MANAGED_BY_LABEL}=portler,${PROJECT_LABEL}=${projectLabels(config)[PROJECT_LABEL]}`;
   if (!serviceNames) return ownership;
@@ -406,9 +380,8 @@ export interface K8sDeleteResult {
 }
 
 /**
- * Delete the project's Deployments and Services by label, after checking namespace
- * ownership; a foreign namespace is never touched. The namespace and PVCs stay unless
- * `deleteVolumes`, which for a full teardown deletes the whole owned namespace.
+ * Delete the project's Deployments and Services by label after an ownership check; a foreign namespace is never touched.
+ * Namespace and PVCs stay unless `deleteVolumes`, which for a full teardown deletes the whole owned namespace.
  */
 export async function deleteK8sResources(
   cluster: ClusterInfo,
@@ -506,10 +479,7 @@ export async function deleteK8sResources(
   return { deleted: true, services: owners((kind) => kind.startsWith('deployment')) };
 }
 
-/**
- * Services with a Deployment in the namespace, tracked by a port-forward or not. Undefined
- * when kubectl could not say, or when two services share a Kubernetes name.
- */
+/** Services with a Deployment in the namespace, forwarded or not. Undefined if kubectl can't say or two share a k8s name. */
 export async function deployedK8sServices(
   cluster: ClusterInfo,
   config: PortlerConfig,
@@ -528,10 +498,7 @@ export async function deployedK8sServices(
   });
 }
 
-/**
- * Names of this project's Deployments in `namespace` (default: the configured one), by label,
- * so including services removed from portler.yml. Undefined when kubectl could not say.
- */
+/** This project's Deployments by label, including services removed from portler.yml. Undefined when kubectl can't say. */
 export async function projectDeploymentNames(
   cluster: ClusterInfo,
   config: PortlerConfig,
@@ -551,9 +518,8 @@ export async function projectDeploymentNames(
 }
 
 /**
- * Start `portler __k8s-forward`, which reruns `kubectl port-forward` with capped backoff when
- * a pod restart kills it. It is the tracked pid and leads its own process group with kubectl
- * inside, so it survives `up k8s -d` and stopServices' group signal stops both.
+ * Starts `portler __k8s-forward`, which reruns `kubectl port-forward` with capped backoff when a pod restart kills it.
+ * As the tracked pid it leads its own process group with kubectl inside: it survives `up k8s -d`, one group signal stops both.
  */
 export function spawnPortForward(
   cluster: ClusterInfo,

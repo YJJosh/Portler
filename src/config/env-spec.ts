@@ -11,10 +11,7 @@ export interface EnvSpecFields {
   description?: string;
 }
 
-/**
- * An env entry written as a mapping (`KEY: { default: dev, secret: true }`). The loader turns
- * every mapping in an env block into one, so readers tell it from a plain value by `instanceof`.
- */
+/** An env entry written as a mapping (`KEY: { default: dev }`). Every env mapping becomes one, so `instanceof` tells them apart. */
 export class EnvSpec {
   /** The config value. Like a plain value, it wins over the shell and use_env files in development. */
   declare value?: unknown;
@@ -90,9 +87,8 @@ export function envEntryValue(entry: unknown): { value: unknown; isDefault: bool
 }
 
 /**
- * One key of a higher env layer over a lower one. The upper value or default replaces the
- * lower one; `required`, `secret` and `description` stay unless the upper entry sets them.
- * An upper entry with only metadata keeps the lower value, plain or not.
+ * One key of a higher env layer over a lower one: the upper value or default replaces the lower one, and `required`,
+ * `secret` and `description` stay unless the upper entry sets them. A metadata-only upper entry keeps the lower value.
  */
 export function mergeEnvEntry(lower: unknown, upper: unknown): unknown {
   if (!isEnvSpec(lower) && !isEnvSpec(upper)) return upper;

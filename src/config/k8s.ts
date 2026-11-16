@@ -49,10 +49,7 @@ export function normalizeK8sConfig(rawService: UnknownMap, serviceName: string):
   };
 }
 
-/**
- * The config for `up k8s` and `k8s render`: container config as in Docker mode, with
- * `k8s.env` on top so in-cluster values win.
- */
+/** The config for `up k8s` and `k8s render`: container config as in Docker mode, with `k8s.env` on top. */
 export function applyK8sMode(config: PortlerConfig): PortlerConfig {
   const services: Record<string, ServiceConfig> = {};
 

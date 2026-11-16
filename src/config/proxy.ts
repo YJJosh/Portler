@@ -5,14 +5,12 @@ import { normalizeIpAddress } from '../util/ip.ts';
 import { isObject, normalizeStringArray, optionalString } from './scalars.ts';
 import type { PortlerConfig, ProxyConfig, ProxyRoute, ServiceConfig, UnknownMap } from '../types/index.ts';
 
-/** `port: auto` (or omitting the key) asks Portler to pick a free port. */
 function normalizeProxyPort(value: unknown): number | undefined {
   if (value === undefined || value === null || value === 'auto') return undefined;
   if (!isPort(value)) throw new Error('proxy.port must be "auto" or a port number');
   return value;
 }
 
-/** Trim a trailing slash so '/api' and '/api/' route identically ('/' stays). */
 function normalizeRoutePrefix(rawPrefix: string): string {
   if (!rawPrefix.startsWith('/')) throw new Error(`proxy route "${rawPrefix}" must start with "/"`);
   if (rawPrefix !== '/' && rawPrefix.endsWith('/')) return rawPrefix.slice(0, -1);

@@ -30,15 +30,12 @@ export function defaultDockerNetwork(projectDir: string): string {
 }
 
 /**
- * Ends the project name in a named container or volume. `name:` never contains it or ends
- * in "-", so `foo` + `bar-api` and `foo-bar` + `api` differ, and no volume prefix overlaps another.
+ * Ends the project name in a named container or volume. `name:` never contains it or ends in "-", so `foo` + `bar-api`
+ * and `foo-bar` + `api` differ, and no volume prefix overlaps another.
  */
 export const PROJECT_NAME_BOUNDARY = '--';
 
-/**
- * Under --prod with a top-level `name:`, so containers and the network keep their names in
- * every folder a release unpacks into. Images keep the hashed default.
- */
+/** Under --prod with `name:`, so containers and the network keep their names in any release folder; images stay hashed. */
 export function namedDockerContainer(name: string, serviceName: string): string {
   return `portler-${name}${PROJECT_NAME_BOUNDARY}${slug(serviceName)}`;
 }
@@ -50,10 +47,7 @@ export function namedDockerNetwork(name: string): string {
 /** Before the volume set suffix. Volume and set names must not contain it, so names parse. */
 export const VOLUME_SET_SEPARATOR = '--';
 
-/**
- * Hashes volumeRoot, not projectDir, so git worktrees of one repository share volumes;
- * containers, images and networks stay per directory.
- */
+/** Hashes volumeRoot, not projectDir, so git worktrees of one repository share volumes; other objects stay per directory. */
 export function projectVolumePrefix(volumeRoot: string): string {
   return `portler-${slug(path.basename(volumeRoot))}-${fnv1aBase36(volumeRoot)}-`;
 }
@@ -69,10 +63,7 @@ export function volumeFullName(prefix: string, volumeName: string, volumeSet?: s
   return volumeSet ? `${base}${VOLUME_SET_SEPARATOR}${slug(volumeSet)}` : base;
 }
 
-/**
- * The prefix of a project's managed volumes and their owner label. Under --prod with a
- * `name:` the name scopes them, so a release in a new folder keeps its volumes.
- */
+/** Prefix and owner label of a project's managed volumes. Under --prod `name:` scopes them, so a new release folder keeps them. */
 export function volumeScope(config: Pick<PortlerConfig, 'volumeRoot' | 'name' | 'production'>): { prefix: string; owner: string } {
   if (config.production && config.name) return { prefix: `portler-${config.name}${PROJECT_NAME_BOUNDARY}`, owner: config.name };
   return { prefix: projectVolumePrefix(config.volumeRoot), owner: config.volumeRoot };

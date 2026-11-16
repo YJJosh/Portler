@@ -11,10 +11,7 @@ export function managedVolumeName(volumeEntry: string): string | undefined {
   return parts[0]!.slice(1);
 }
 
-/**
- * An `@name:/path` entry as Docker sees it: the name normalized as at volume creation
- * (`@Data Store` is `data-store`), the path cleaned as Docker cleans a mount destination.
- */
+/** An `@name:/path` entry as Docker sees it: name normalized as at creation (`@Data Store` is `data-store`), path cleaned as Docker does. */
 export function managedVolumeMount(volumeEntry: string): { name: string; destination: string } | undefined {
   const rawName = managedVolumeName(volumeEntry);
   if (rawName === undefined) return undefined;
@@ -78,8 +75,8 @@ export function collectDeclaredVolumes(services: Record<string, ServiceConfig>):
 }
 
 /**
- * The directory that scopes volume names. A linked git worktree (`.git` is a `gitdir:
- * .../.git/worktrees/<name>` file) resolves to the main repository, so worktrees share volumes.
+ * The directory that scopes volume names. A linked git worktree (`.git` is a `gitdir: .../.git/worktrees/<name>` file)
+ * resolves to the main repository, so worktrees share volumes.
  */
 export async function resolveVolumeRoot(projectDir: string): Promise<string> {
   try {

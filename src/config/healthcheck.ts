@@ -13,7 +13,6 @@ function normalizeHealthcheckType(value: string, name: string): HealthcheckType 
   throw new Error(`${name} must be one of: none, tcp, http, command`);
 }
 
-/** `accept` lists the http statuses that mean ready; a single status is allowed too. */
 function normalizeAcceptStatuses(value: unknown, name: string): number[] | undefined {
   if (value === undefined) return undefined;
   const list = Array.isArray(value) ? value : [value];

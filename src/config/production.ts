@@ -40,7 +40,7 @@ function normalizeSetupStep(item: unknown, name: string): SetupStep {
   return step;
 }
 
-/** Paths (files or folders) whose content becomes part of the step's receipt. */
+// Paths (files or folders) whose content becomes part of the step's receipt.
 function normalizeWatch(value: unknown, name: string): string[] | undefined {
   if (value === undefined) return undefined;
   const list = typeof value === 'string' ? [value] : value;
@@ -82,15 +82,12 @@ export function normalizeProduction(value: unknown, name: string, service: boole
   return production;
 }
 
-/** No prototype, as in the loader, so "constructor" is an unknown service, not an inherited one. */
+// No prototype, as in the loader, so "constructor" is an unknown service, not an inherited one.
 function serviceMap<T>(entries: Array<[string, T]>): Record<string, T> {
   return Object.assign(Object.create(null) as Record<string, T>, Object.fromEntries(entries));
 }
 
-/**
- * Under --prod only prod.services run; the deployment provides the rest. Dependencies on
- * left-out services are dropped; a proxy route to one, or naming one in `requested`, throws.
- */
+/** Under --prod only prod.services run. Dependencies on the rest are dropped; a proxy route to one, or naming one in `requested`, throws. */
 export function productionServices(config: PortlerConfig, prod = false, requested: string[] = []): PortlerConfig {
   const listed = config.prod?.services;
   if (!prod || listed === undefined) return config;

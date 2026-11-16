@@ -94,10 +94,7 @@ export function normalizeTopLevelDockerConfig(
   };
 }
 
-/**
- * The service's `docker:` key, used only by `up docker`. Undefined when absent; applyDockerMode
- * then uses the always-Docker config from normalizeTopLevelDockerConfig.
- */
+/** The service's `docker:` key, used only by `up docker`; undefined when absent (applyDockerMode then uses the top-level one). */
 export function normalizeDockerModeConfig(
   rawService: UnknownMap,
   serviceName: string,
@@ -130,10 +127,7 @@ export function normalizeDockerModeConfig(
   return normalizeDockerConfigFromObject(rawDocker, serviceName, projectDir, `services.${serviceName}.docker`, topLevelDocker?.image);
 }
 
-/**
- * The config for `portler up docker`: every service with any Docker config runs in Docker
- * (`docker:` winning), with its Docker env merged into the service env.
- */
+/** The config for `up docker`: every service with any Docker config runs in Docker (`docker:` winning), its Docker env merged in. */
 export function applyDockerMode(config: PortlerConfig): PortlerConfig {
   const services: Record<string, ServiceConfig> = {};
 
@@ -158,11 +152,7 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
   };
 }
 
-/**
- * `--image <service>=<ref>`: replaces `image` and drops `build`; everything else still comes
- * from the config. Apply after the run mode, so "runs in Docker" is judged for that mode.
- * Throws for an unknown service or one that does not run in Docker.
- */
+/** `--image <service>=<ref>`: replaces `image`, drops `build`. Apply after the run mode; throws unless the service runs in Docker. */
 export function applyImageOverrides(config: PortlerConfig, images: Readonly<Record<string, string>>): PortlerConfig {
   const entries = Object.entries(images);
   if (entries.length === 0) return config;

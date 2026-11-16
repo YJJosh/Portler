@@ -10,9 +10,8 @@ function commandLine(command: string, args: string[]): string {
 }
 
 /**
- * Stream output with a `[prefix]` per line; rejects on a non-zero exit. An aborted `signal`
- * stops the process group and rejects once it has exited, so a cancelled apply is over
- * before a rollback deletes what it applied.
+ * Stream output with a `[prefix]` per line; rejects on a non-zero exit. An aborted `signal` stops the process group and
+ * rejects once it has exited, so a cancelled apply is over before a rollback deletes what it applied.
  */
 export function runStreaming(command: string, args: string[], prefix: string, cwd?: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();

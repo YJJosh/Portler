@@ -27,15 +27,11 @@ export function builtInPresetNames(): string[] {
   }
 }
 
-/** `use: ./db.yml` (any value with a "/" or a .yml/.yaml ending) is a file; `use: postgres` a built-in preset. */
 function isPresetPath(use: string): boolean {
   return use.includes('/') || /\.ya?ml$/.test(use);
 }
 
-/**
- * `postgres@16` and `./db.yml@2` name a version. An `@` in the file part of a
- * path (`./db@2.yml`, `../@scope/db.yml`) does not.
- */
+// `postgres@16` and `./db.yml@2` name a version; an `@` in a path's file part (`./db@2.yml`, `../@scope/db.yml`) does not.
 function parseUse(value: string): { use: string; version?: string } {
   const at = value.lastIndexOf('@');
   if (at <= 0) return { use: value };
@@ -44,7 +40,7 @@ function parseUse(value: string): { use: string; version?: string } {
   return { use: value.slice(0, at), version: suffix };
 }
 
-/** `${self.name}` and `${version}` are known before the service exists, e.g. for an image or a volume name. */
+// Only `${self.name}` and `${version}`: they are known before the service exists (e.g. in an image or volume name).
 function substitutePresetValues(value: unknown, values: Record<string, string>): unknown {
   if (typeof value === 'string') {
     // A replacer function, so a "$&" in a value is not a replacement pattern.
@@ -62,10 +58,8 @@ function usesVersionPlaceholder(value: unknown): boolean {
   return false;
 }
 
-/**
- * A preset with `versions:` never picks one itself: a moving default could stop a volume
- * from opening (Postgres) or upgrade it irreversibly (MySQL, Redis). See layerServiceKeys.
- */
+// A preset with `versions:` never picks one itself: a moving default could stop a volume
+// from opening (Postgres) or upgrade it irreversibly (MySQL, Redis).
 function applyPresetVersion(preset: UnknownMap, use: string, version: string | undefined, field: string): { keys: UnknownMap; override: UnknownMap; values: Record<string, string> } {
   const { versions, ...keys } = preset;
   if (versions === undefined) {
@@ -132,10 +126,8 @@ function readEnvLayer(keys: UnknownMap, label: string): UnknownMap {
   return normalizeEnvSpecs(normalizeEnvObject(keys.env ?? keys.environment, `${label}env/environment`), `${label}env`);
 }
 
-/**
- * Upper keys replace lower ones, except `env` and `exports`, which merge key by key; a plain
- * env value keeps the lower entry's `secret` and `description`.
- */
+// Upper keys replace lower ones, except `env` and `exports`, which merge key by key; a plain
+// env value keeps the lower entry's `secret` and `description`.
 function layerServiceKeys(lower: UnknownMap, upper: UnknownMap, lowerLabel: string, upperLabel: string): UnknownMap {
   const merged: UnknownMap = { ...lower, ...upper };
   delete merged.environment;

@@ -11,9 +11,8 @@ export const MANAGED_BY_LABEL = 'app.kubernetes.io/managed-by';
 export const PROJECT_LABEL = 'portler.dev/project';
 
 /**
- * Labels on every generated resource. The project label decides which namespace and
- * resources this project may delete, so it uses the collision-resistant projectHash, not
- * the short name hash: two colliding projects could delete each other's workloads.
+ * Labels on every generated resource. The project label decides what this project may delete, so it uses the
+ * collision-resistant projectHash, not the short name hash: colliding projects could delete each other's workloads.
  */
 export function projectLabels(config: PortlerConfig): Record<string, string> {
   return {
@@ -40,10 +39,7 @@ export function k8sServiceNames(serviceNames: string[]): Map<string, string> {
   return names;
 }
 
-/**
- * As in Docker mode, only keys Portler composed are forwarded, never the inherited host env
- * or PORTLER_INTERNAL_ENV_KEYS.
- */
+/** As in Docker mode, only keys Portler composed are forwarded, never the inherited host env or PORTLER_INTERNAL_ENV_KEYS. */
 export function containerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<string>): Array<{ name: string; value: string }> {
   const entries: Array<{ name: string; value: string }> = [];
 
@@ -57,7 +53,7 @@ export function containerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<st
   return entries.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-/** `mount_path`, else the container path of the first Docker volume, else /data. */
+// `mount_path`, else the container path of the first Docker volume, else /data.
 function volumeMountPath(service: ServiceConfig): string {
   const explicit = service.k8s?.volume?.mountPath;
   if (explicit) return explicit;
@@ -153,7 +149,7 @@ function deploymentManifest(
   };
 }
 
-/** One port per protocol; Kubernetes requires a name on each when there are several. */
+// One port per protocol; Kubernetes requires a name on each when there are several.
 function servicePorts(service: ServiceConfig): UnknownMap[] {
   const protocols = transportProtocols(serviceTransport(service));
   if (protocols.length === 1 && protocols[0] === 'tcp') return [{ port: service.port, targetPort: service.port }];

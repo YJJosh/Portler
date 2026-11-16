@@ -15,16 +15,12 @@ export interface ClusterInfo {
   server?: string;
 }
 
-/**
- * Allows a local cluster with an unrecognized context name. It must name the exact context:
- * a bare "yes" flag left exported in a shell could later allow a production context.
- */
+/** Allows a local cluster with an unrecognized context name. Names the exact context: a leftover "yes" could allow production. */
 export const CONTEXT_OVERRIDE_ENV = 'PORTLER_ALLOW_K8S_CONTEXT';
 
 /**
- * Allows an API server URL that is not clearly on this machine, private/LAN addresses
- * included; it must name the exact URL. Separate from CONTEXT_OVERRIDE_ENV, so allowing a
- * context name does not also silence the check of where it points.
+ * Allows an API server URL not clearly on this machine (private/LAN included); it must name the exact URL.
+ * Separate from CONTEXT_OVERRIDE_ENV, so allowing a context name does not also silence the endpoint check.
  */
 export const ENDPOINT_OVERRIDE_ENV = 'PORTLER_ALLOW_K8S_ENDPOINT';
 
@@ -49,10 +45,7 @@ export function classifyContext(context: string): ClusterInfo | null {
   return null;
 }
 
-/**
- * Throws for an unrecognized context unless `override` names it: `up k8s` applies and
- * `down k8s` deletes, which cannot be undone on a shared or production cluster.
- */
+/** Throws for an unrecognized context unless `override` names it: applies and deletes can't be undone on a shared cluster. */
 export function resolveCluster(context: string, override: string | undefined): ClusterInfo {
   const local = classifyContext(context);
   if (local) return local;
@@ -74,17 +67,14 @@ export function resolveCluster(context: string, override: string | undefined): C
 export type EndpointLocality =
   /** 127.0.0.0/8, ::1, localhost, or a known local-runtime host alias — certainly this machine. */
   | 'loopback'
-  /**
-   * An RFC1918 / CGNAT / link-local / ULA address: a VM on this host (minikube) or a cluster
-   * on the LAN or a VPN, which Portler cannot tell apart, so it is not accepted on its own.
-   */
+  /** RFC1918 / CGNAT / link-local / ULA: a local VM (minikube) or a LAN/VPN cluster, which look alike, so not accepted alone. */
   | 'private'
   /** A routable address or a real DNS name — could be anyone's cluster. */
   | 'remote'
   /** No endpoint, or one we cannot parse. */
   | 'unknown';
 
-/** Host aliases the local-cluster runtimes publish their API server under. */
+// Host aliases the local-cluster runtimes publish their API server under.
 const LOCAL_HOST_ALIASES = new Set([
   'localhost',
   'kubernetes.docker.internal',
@@ -108,10 +98,7 @@ function isPrivateIpv4(host: string): boolean {
   return a === 100 && b >= 64 && b <= 127;
 }
 
-/**
- * The second, independent locality gate: any context can be named "minikube", but the
- * server URL is what kubectl talks to.
- */
+/** The second, independent locality gate: any context can be named "minikube", but kubectl talks to the server URL. */
 export function classifyApiEndpoint(server: string | undefined): EndpointLocality {
   const text = (server ?? '').trim();
   if (text === '') return 'unknown';
@@ -186,9 +173,8 @@ function unreadableEndpointError(context: string, server: string | null): Error 
 }
 
 /**
- * Fails closed: only a 'loopback' endpoint passes on its own. 'remote' and 'private' need
- * `override` to name the exact URL ("private" is not "on this machine"). 'unknown' always
- * throws: there is no URL to name, and Portler must not delete in a cluster it cannot identify.
+ * Fails closed: only 'loopback' passes alone; 'remote' and 'private' need `override` to name the exact URL.
+ * 'unknown' always throws: there is no URL to name, and Portler must not delete in a cluster it cannot identify.
  */
 export function checkEndpointLocality(context: string, server: string | null, override: string | undefined): void {
   const locality = classifyApiEndpoint(server ?? undefined);
@@ -208,10 +194,7 @@ export function checkEndpointLocality(context: string, server: string | null, ov
   throw nonLocalEndpointError(context, server!, locality);
 }
 
-/**
- * The active kubectl context, verified local by name and by endpoint. Later kubectl calls
- * pin `--context`, so a context switch mid-run cannot redirect an apply or a delete.
- */
+/** The active kubectl context, verified local by name and endpoint. Later calls pin `--context`, so a switch can't redirect them. */
 export async function detectCluster(run: CommandRunner = runCommand): Promise<ClusterInfo> {
   const current = await run('kubectl', ['config', 'current-context']);
   if (current.code !== 0) {
@@ -224,10 +207,7 @@ export async function detectCluster(run: CommandRunner = runCommand): Promise<Cl
   return clusterForContext(current.stdout.trim(), run);
 }
 
-/**
- * Verify a named context as detectCluster does the active one; for the context `up k8s`
- * recorded, which need not be active.
- */
+/** Verify a named context as detectCluster does the active one; for the context `up k8s` recorded, which may not be active. */
 export async function clusterForContext(context: string, run: CommandRunner = runCommand): Promise<ClusterInfo> {
   const cluster = resolveCluster(context, process.env[CONTEXT_OVERRIDE_ENV]);
   const server = await readContextServer(context, run);
@@ -244,10 +224,7 @@ export async function contextExists(context: string, run: CommandRunner = runCom
   return listed.stdout.split('\n').some((line) => line.trim() === context);
 }
 
-/**
- * kind, k3d and minikube run their own container runtime, so a local image is loaded into
- * them; Docker Desktop, Rancher Desktop, OrbStack and colima share the host Docker daemon.
- */
+/** kind, k3d and minikube run their own container runtime, so a local image is loaded in; the others share the host daemon. */
 export async function loadImageIntoCluster(cluster: ClusterInfo, image: string, signal?: AbortSignal): Promise<void> {
   switch (cluster.type) {
     case 'kind': {

@@ -68,10 +68,8 @@ function generatedEnvPrefix(serviceName: string): string {
     .toUpperCase();
 }
 
-/**
- * Service names become CLI arguments, references, Docker DNS aliases, env keys and log file
- * paths, so a name like `../../target` or `__proto__` must not get through.
- */
+// Service names become CLI arguments, references, Docker DNS aliases, env keys and log file
+// paths, so a name like `../../target` or `__proto__` must not get through.
 function validateServiceName(serviceName: string): void {
   if (!SERVICE_NAME.test(serviceName)) {
     throw new Error(
@@ -113,7 +111,7 @@ function normalizeTransport(value: unknown, serviceName: string, port: number | 
 
 const EXPORT_NAME = /^[a-z][a-z0-9_]*$/;
 
-/** `exports:` maps a name to a template; others read it as `${service.name}`. */
+// Other services read an export as `${service.name}`.
 function normalizeExports(value: unknown, serviceName: string): Record<string, string> | undefined {
   if (value === undefined || value === null) return undefined;
   const field = `services.${serviceName}.exports`;
@@ -131,7 +129,6 @@ function normalizeExports(value: unknown, serviceName: string): Record<string, s
 const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,62}$/;
 const TASK_KEYS = ['run', 'service', 'description'];
 
-/** `tasks:` maps a name to a command, or to `{ run, service, description }`, for `portler run`. */
 function normalizeTasks(value: unknown, services: Record<string, ServiceConfig>): Record<string, TaskConfig> | undefined {
   if (value === undefined || value === null) return undefined;
   if (!isObject(value)) throw new Error('tasks must be a mapping of name: command');
@@ -179,10 +176,8 @@ export interface LoadConfigOptions {
   volumeSet?: string;
 }
 
-/**
- * `name:` goes into Docker object names as-is under --prod. No "--" and no trailing "-",
- * so PROJECT_NAME_BOUNDARY stays unambiguous.
- */
+// `name:` goes into Docker object names as-is under --prod. No "--" and no trailing "-",
+// so PROJECT_NAME_BOUNDARY stays unambiguous.
 function normalizeProjectName(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || !/^[a-z0-9](?:[a-z0-9_.-]{0,38}[a-z0-9])?$/.test(value) || value.includes(VOLUME_SET_SEPARATOR)) {
@@ -340,10 +335,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
   return config;
 }
 
-/**
- * `allowMissing` skips missing use_env files, for production runs: a fresh checkout lacks
- * the gitignored files and the platform injects the env instead.
- */
+/** `allowMissing` skips missing use_env files, for production: a fresh checkout lacks them and the platform injects the env. */
 export async function loadBaseEnv(config: PortlerConfig, options: { allowMissing?: boolean; quiet?: boolean } = {}): Promise<EnvMap> {
   const env: EnvMap = {};
 
@@ -372,10 +364,7 @@ export function resolveServiceCwd(config: PortlerConfig, service: ServiceConfig)
   return path.resolve(config.projectDir, service.cwd);
 }
 
-/**
- * Throws when a service's working directory is missing or is not a directory. Spawning in a
- * missing cwd fails as `spawn /bin/sh ENOENT`, which names the shell rather than the folder.
- */
+/** Throws when a service's cwd is not a directory; spawning there would fail as `spawn /bin/sh ENOENT`, naming the shell. */
 export function assertServiceCwd(config: PortlerConfig, service: ServiceConfig): void {
   const cwd = resolveServiceCwd(config, service);
   let isDirectory: boolean | undefined;

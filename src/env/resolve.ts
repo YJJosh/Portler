@@ -3,10 +3,7 @@ import { k8sName } from '../config/naming.ts';
 import { didYouMean } from '../util/suggest.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig, UnknownMap } from '../types/index.ts';
 
-/**
- * Where the process reading a value runs (setup steps and healthcheck commands are 'host').
- * `address` depends on it.
- */
+/** Where the process reading a value runs (setup steps and healthcheck commands are 'host'); `address` depends on it. */
 export type EnvViewer = 'host' | 'container' | 'cluster';
 
 export interface ResolveOptions {
@@ -16,10 +13,7 @@ export interface ResolveOptions {
   self?: string;
   /** The config the assignments belong to: needed for `address` outside the host and for exports. */
   config?: PortlerConfig;
-  /**
-   * `${env.KEY}` inside an export of `service`: the value that service itself gets for KEY,
-   * and whether it is secret. Without it, the service's config value is used.
-   */
+  /** `${env.KEY}` in an export of `service`: the value (and secrecy) that service gets for KEY. Default: its config value. */
   exportEnv?: (service: string, key: string) => { value: string; secret: boolean } | undefined;
   /** Called when the value includes a secret, read through `${env.KEY}` in an export. */
   onSecret?: () => void;
@@ -132,10 +126,6 @@ function missingAssignment(reference: string, serviceName: string, assignments: 
   );
 }
 
-/**
- * From this machine: the assigned port. From a container: the Docker network alias and
- * container port, or `host.docker.internal` for a host process. From the cluster: its Service.
- */
 function addressOf(reference: string, serviceName: string, assignments: Assignments, options: ResolveOptions): { host: string; port: number } {
   const config = options.config;
   const viewer = config ? options.viewer ?? 'host' : 'host';
@@ -166,7 +156,7 @@ function propertyValue(reference: string, serviceName: string, property: Referen
   return assignmentValue(assignment, property);
 }
 
-/** The config value of one env key of a service, as that service gets it from portler.yml alone. */
+// The value from portler.yml alone, without the shell or use_env files.
 function configEnvValue(config: PortlerConfig, serviceName: string, key: string, assignments: Assignments, options: ResolveOptions) {
   const service = config.services[serviceName]!;
   const merged = mergeEnvMaps(config.env, service.env);
@@ -228,7 +218,6 @@ function resolveReference(reference: string, assignments: Assignments, options: 
   );
 }
 
-/** Whether a bare `a.b` value is a reference rather than literal text such as example.com. */
 function isBareReference(serviceName: string, property: string, assignments: Assignments, options: ResolveOptions): boolean {
   if (serviceName === 'env') return options.exportOf !== undefined;
   if (serviceName === 'self' || isReferenceProperty(property) || assignments[serviceName]) return true;
@@ -256,9 +245,8 @@ export function resolveEnvValue(value: unknown, assignments: Assignments, option
 }
 
 /**
- * Keys in `skip` are validated but not resolved or returned, so a value that never applies
- * cannot fail on a dangling reference. Entries without a value are left out. `secrets`
- * collects keys whose value read a secret through an export.
+ * Keys in `skip` are validated but not resolved or returned, so a value that never applies cannot fail on a dangling reference.
+ * Entries without a value are left out; `secrets` collects keys whose value read a secret through an export.
  */
 export function resolveEnvMap(
   env: UnknownMap,
