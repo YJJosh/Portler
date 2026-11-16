@@ -9,7 +9,6 @@ import { selectServiceNames } from '../services.ts';
 
 const FOLLOW_POLL_MS = 250;
 
-/** Where one service's logs live: its Docker container or a captured log file. */
 type LogSource =
   | { serviceName: string; kind: 'docker'; containerName: string }
   | { serviceName: string; kind: 'file'; filePath: string };
@@ -22,7 +21,6 @@ function containerExists(containerName: string): Promise<boolean> {
   });
 }
 
-/** Stream `docker logs` for one container, prefixing lines with the service name. */
 function streamDockerLogs(serviceName: string, containerName: string, follow: boolean): Promise<void> {
   return new Promise((resolve) => {
     const child = spawn('docker', ['logs', ...(follow ? ['--follow'] : []), containerName], {
@@ -36,7 +34,6 @@ function streamDockerLogs(serviceName: string, containerName: string, follow: bo
   });
 }
 
-/** Print a captured log file once, prefixing lines with the service name. */
 async function printLogFile(serviceName: string, filePath: string): Promise<void> {
   const content = await fs.readFile(filePath, 'utf8').catch(() => '');
   const printer = createLinePrinter(serviceName, process.stdout);
@@ -86,11 +83,7 @@ async function followLogFile(serviceName: string, filePath: string): Promise<voi
   }
 }
 
-/**
- * Resolve each requested service to its log source: a live Docker container
- * wins (delegating to `docker logs`), otherwise the `.portler/logs/` file
- * written by `up --detach`.
- */
+/** A live Docker container wins over the `.portler/logs/` file that `up --detach` writes. */
 async function resolveLogSources(projectDir: string, serviceNames: string[], explicit: boolean): Promise<LogSource[]> {
   const pids = await readPids(projectDir);
   const sources: LogSource[] = [];

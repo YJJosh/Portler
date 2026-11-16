@@ -4,11 +4,7 @@ import { K8S_FORWARD_COMMAND } from '../k8s/index.ts';
 import { didYouMean } from '../util/suggest.ts';
 import type { PidServiceInfo, PortlerConfig } from '../types/index.ts';
 
-/**
- * Strip the optional leading 'docker'/'k8s' mode token shared by `up` and
- * `down`. The loader rejects services named "docker" and "k8s", so the tokens
- * cannot collide with real service names.
- */
+/** Strips a leading `docker`/`k8s` mode token. The loader rejects services with those names. */
 export function parseRunMode(positionals: string[]): { mode: RunMode; requested: string[] } {
   if (positionals[0] === 'docker') {
     return { mode: 'docker', requested: positionals.slice(1) };
@@ -22,14 +18,10 @@ export function parseRunMode(positionals: string[]): { mode: RunMode; requested:
 }
 
 /**
- * The run mode a pids.json entry was started in. Entries without runMode predate the
- * field. One running the port-forward was started by `up k8s`, and one without a
- * container was a local process. A container of a service whose docker: block only
- * applies under `up docker` must have come from docker mode; one the service also runs
- * under plain `up` (a top-level image:) counts as local, the conservative reading. A
- * container of a service no longer in the config says neither, since plain `up` runs a
- * top-level image: in one too, so that entry has no say in the run mode.
- * `localConfig` is the plain `up` view of the config.
+ * The run mode a pids.json entry was started in. Without runMode: the port-forward means
+ * k8s, no container means local. A container means docker when the service has no Docker
+ * config in `localConfig` (the plain `up` view), else local, the conservative reading;
+ * undefined when the service is no longer configured.
  */
 export function recordedRunMode(localConfig: PortlerConfig, name: string, info: PidServiceInfo): RunMode | undefined {
   if (info.runMode !== undefined) return info.runMode;
@@ -40,7 +32,6 @@ export function recordedRunMode(localConfig: PortlerConfig, name: string, info: 
   return service.docker === undefined ? 'docker' : 'local';
 }
 
-/** Refuse to start services that already have a live pids.json entry. */
 /** Docker mode needs Docker config for every selected service. */
 export function validateDockerMode(config: PortlerConfig, selectedNames: string[]): void {
   for (const serviceName of selectedNames) {
@@ -74,7 +65,7 @@ export function ensureNoOverlap(
   }
 }
 
-/** Validate and resolve the user-requested service names (defaulting to all). */
+/** All services when none are requested; throws on an unknown name. */
 export function selectServiceNames(config: PortlerConfig, requested: string[]): string[] {
   if (requested.length === 0) return Object.keys(config.services);
 
@@ -100,10 +91,7 @@ export function selectServiceTargets(config: PortlerConfig, requested: string[])
   return requested;
 }
 
-/**
- * Expand the requested roots to include their dependencies and return them in
- * dependency-first (topological) start order. Throws on dependency cycles.
- */
+/** The requested services plus their dependencies, dependencies first. Throws on a cycle. */
 export function expandAndOrderServices(config: PortlerConfig, requested: string[]): string[] {
   const roots = selectServiceNames(config, requested);
   const order: string[] = [];
@@ -153,15 +141,13 @@ export function dependencyLevels(config: PortlerConfig, orderedNames: string[]):
   return levels;
 }
 
-/** Filter the given service names down to those that declare a port. */
 export function servicesWithPorts(config: PortlerConfig, serviceNames: string[]): string[] {
   return serviceNames.filter((serviceName) => config.services[serviceName]?.port !== undefined);
 }
 
 /**
- * Determine which services need a readiness wait: every dependency requested
- * with the `ready` condition, every service with an explicit healthcheck, and
- * requested roots that expose a port.
+ * Services that need a readiness wait: dependencies with the `ready` condition,
+ * services with a healthcheck, and requested roots with a port.
  */
 export function servicesNeedingReadiness(config: PortlerConfig, serviceNames: string[], rootNames: string[]): Set<string> {
   const names = new Set<string>();
@@ -178,7 +164,6 @@ export function servicesNeedingReadiness(config: PortlerConfig, serviceNames: st
   return names;
 }
 
-/** Say which services run from a pinned `--image`, and whether that skipped a build. */
 export function reportImageOverrides(modeConfig: PortlerConfig, images: Readonly<Record<string, string>>): void {
   for (const [serviceName, image] of Object.entries(images)) {
     const hadBuild = modeConfig.services[serviceName]?.docker?.build !== undefined;
@@ -187,10 +172,8 @@ export function reportImageOverrides(modeConfig: PortlerConfig, images: Readonly
 }
 
 /**
- * Every `--image` target has to be a service this command actually starts. `up api` and
- * `restart api` leave an already-running dependency untouched, and a service outside the
- * selection is never started at all; in both cases the flag would be accepted and change
- * nothing, so the old image keeps running while the user believes it was replaced.
+ * Every `--image` target must be a service this command starts. On a running dependency
+ * or an unselected service the flag would change nothing, and the old image keeps running.
  */
 export function validateImageOverrideTargets(
   images: Readonly<Record<string, string>>,

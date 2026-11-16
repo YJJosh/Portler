@@ -1,7 +1,6 @@
 import { PACKAGE_NAME, VERSION } from '../constants.ts';
 
 export function printHelp(): void {
-  // REVIEW: Include the transport restriction in CLI help as well as the guides.
   process.stdout.write(`${PACKAGE_NAME} ${VERSION}
 
 Usage:

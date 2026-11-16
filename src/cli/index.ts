@@ -19,12 +19,9 @@ import { commandVolumes } from './commands/volumes.ts';
 import { printHelp } from './help.ts';
 
 /**
- * Portler's lifecycle is built on POSIX process groups: services are spawned
- * detached so `down` can signal `-pid` and reach the whole tree (a `shell:
- * true` wrapper's grandchildren hold the ports), and stale-pid detection reads
- * the OS process start time. Windows has neither, so a "supported" Windows
- * build would silently leak processes and ports on every `down`. Failing
- * honestly beats pretending — see the Supported platforms section in README.
+ * `down` signals the POSIX process group `-pid` to reach a shell's grandchildren
+ * (they hold the ports), and stale-pid detection reads the OS process start time.
+ * Windows has neither, so `down` would leak processes. See "Supported platforms" in README.
  */
 function ensureSupportedPlatform(): void {
   if (process.platform === 'linux' || process.platform === 'darwin') return;
@@ -88,8 +85,7 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
 
   const command = rawArgs[0]!;
 
-  // Hidden internal command: the per-service port-forward supervisor spawned
-  // by `up k8s` (see src/k8s/forward-supervisor.ts). Not part of the CLI API.
+  // Hidden: the port-forward supervisor `up k8s` spawns (src/k8s/forward-supervisor.ts).
   if (command === '__k8s-forward') {
     const spec: unknown = JSON.parse(rawArgs[1] ?? 'null');
     if (!isForwardSpec(spec)) throw new Error('__k8s-forward expects a forward spec JSON argument');
@@ -108,8 +104,8 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
-  // After --help/--version (which must work anywhere, e.g. `npm run smoke`),
-  // before anything touches processes or state.
+  // After --help/--version, which must work anywhere (`npm run smoke`), and before
+  // anything touches processes or state.
   ensureSupportedPlatform();
   validateCommandFlags(command, args);
 

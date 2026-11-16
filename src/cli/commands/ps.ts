@@ -26,7 +26,7 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : [])];
   const rows = entries.map(([serviceName, info], index) => {
     const mode = modeLabel(info);
-    // REVIEW: show the transport like `portler ports` does; a k8s port-forward carries TCP only.
+    // kubectl port-forward carries TCP only.
     const transport = mode.startsWith('k8s') ? undefined : config.services[serviceName]?.transport;
     return [
       serviceName,
@@ -54,9 +54,8 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
 }
 
 /**
- * How the service runs: `k8s` for an `up k8s` port-forward (recorded as such, or
- * known by the forward's command in entries written before the run mode was
- * recorded), otherwise `docker` while it has a container and `local` without.
+ * `k8s` for an `up k8s` port-forward (by runMode, or by the forward's command in
+ * entries without a runMode), otherwise `docker` with a container, `local` without.
  */
 function modeLabel(info: PidServiceInfo): string {
   const k8s = info.runMode === 'k8s' || info.command.startsWith(`${K8S_FORWARD_COMMAND} `);

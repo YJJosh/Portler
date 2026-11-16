@@ -10,16 +10,9 @@ import type { ParsedArgs } from '../args.ts';
 import type { PidsFile } from '../../types/index.ts';
 
 /**
- * Read pids.json for `clean`.
- *
- * Without --force, a corrupt file raises CorruptStateFileError, whose message
- * tells the user to run `clean --force` — so the error is actionable rather
- * than a bare SyntaxError.
- *
- * With --force it is treated as empty: `clean --force` is precisely the command
- * used to recover a broken `.portler/`, and it must not be blocked by the very
- * file it is about to delete. We cannot know which pids were recorded in an
- * unparseable file, so we say plainly that processes may be left behind.
+ * Without --force a corrupt pids.json throws CorruptStateFileError, which points
+ * to `clean --force`. With --force it counts as empty, since that command must
+ * recover a broken `.portler/`, and the user is warned that processes may be left.
  */
 async function readPidsForClean(projectDir: string, force: boolean): Promise<PidsFile | null> {
   if (!force) return readPids(projectDir);
@@ -39,15 +32,9 @@ async function readPidsForClean(projectDir: string, force: boolean): Promise<Pid
 }
 
 /**
- * Clean up Portler state:
- * - default: remove the local `.portler/` runtime files and release this
- *   project's ports from the global registry
- * - --ports: only release this project's ports, keep `.portler/`
- * - --global: prune stale entries (crashed or deleted projects) from the
- *   global registry, without touching this project
- *
- * Refuses to touch a project with live services unless --force is given, in
- * which case the running services are stopped first.
+ * Default: remove `.portler/` and release this project's ports. --ports: only
+ * release the ports. --global: prune stale registry entries, not this project.
+ * Refuses while services run, unless --force, which stops them first.
  */
 export async function commandClean(args: ParsedArgs): Promise<number> {
   if (args.positionals.length > 0) throw new Error('clean does not accept service names');
@@ -63,9 +50,8 @@ export async function commandClean(args: ParsedArgs): Promise<number> {
 
   const config = await loadConfig(process.cwd(), args.file);
 
-  // Same lifecycle lock as up/down/restart: `clean` reads the running set and
-  // then deletes the state it just read, which must not interleave with an `up`
-  // recording a pid into that same state.
+  // `clean` reads the running set, then deletes that state: an `up` must not
+  // record a pid in between.
   return withLifecycleLock(config.projectDir, () => cleanProject(config.projectDir, args));
 }
 
@@ -77,9 +63,8 @@ async function cleanProject(projectDir: string, args: ParsedArgs): Promise<numbe
     throw new Error(`services are still running: ${running.join(', ')}. Run "portler down" first or pass --force to stop them.`);
   }
 
-  // A dead supervisor does not prove its Docker container died with it. Always
-  // process every surviving PID entry before deleting the only file that names
-  // those resources, even when the service is no longer running.
+  // A dead supervisor does not prove its Docker container died with it. Stop every
+  // entry, running or not, before deleting the only file that names those resources.
   if (pids && Object.keys(pids.services).length > 0) {
     const result = await stopServices(projectDir, undefined, { force: args.force });
     if (result.stopped.length > 0) process.stdout.write(`[portler] stopped: ${result.stopped.join(', ')}\n`);

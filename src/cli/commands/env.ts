@@ -17,13 +17,10 @@ import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNam
 import { k8sForwardConfig, validateK8sForwards, validateK8sMode } from './up-k8s.ts';
 
 /**
- * A cached assignment as a fresh allocation for this config would give it: only the port
- * comes from state.json, the container fields from this config. state.json keeps whichever
- * run mode last allocated (an `env docker` view, or an `up docker` that has since stopped):
- * the local view must not name that container, and a service with both a top-level `image`
- * and a `docker.image` keeps one container name in both modes, so the cache check below
- * passes with the other mode's image. A partial `up` also rewrites state.json with only its
- * own `--image` pins; a caller that shows a running container's pin applies it to `config`.
+ * A cached assignment as a fresh allocation would give it: the port from state.json, the
+ * container fields from `config`. state.json keeps the last allocating run mode's container
+ * and image, which the cache check misses when both modes share a container name. A caller
+ * that shows a running container's `--image` pin applies it to `config`.
  */
 function asAllocatedFor(config: PortlerConfig, name: string, assignment: ServiceAssignment): ServiceAssignment {
   const service = config.services[name];
@@ -36,9 +33,8 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 }
 
 /**
- * Return the current port assignments plus their generated env, allocating
- * (and persisting) them as a deliberate side effect when state is missing,
- * incomplete, or has stale Docker/transport metadata.
+ * The current port assignments and their generated env. Side effect: allocates and
+ * writes state.json when it is missing, incomplete, or has stale Docker/transport data.
  */
 export async function ensureAssignments(config: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
   const state = await readState(config.projectDir);
@@ -50,17 +46,15 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
     if (!service.docker || service.port === undefined) return true;
     return state?.services?.[service.name]?.containerName === service.docker.containerName;
   });
-  // REVIEW: A cached TCP allocation says nothing about UDP availability after a
-  // transport edit. Reallocate stopped services, preserving live ports below.
+  // A cached TCP port says nothing about UDP after a transport edit, so reallocate;
+  // live services keep their ports (below).
   const hasFreshTransportMetadata = Object.values(config.services).every((service) =>
     service.port === undefined || (state?.services[service.name]?.transport ?? 'tcp') === serviceTransport(service),
   );
   if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata) {
-    // state.json can hold more than this config runs: a development run's assignments seen
-    // through --prod (services prod.services leaves out), or a service since removed. Return
-    // what a fresh allocation would, one assignment per configured service, so `env --prod`
-    // prints no values for an external service and `setup --prod` cannot resolve `${db.url}`
-    // where `up --prod` rejects it. state.json itself is left as it is.
+    // state.json can hold more than this config runs (services prod.services leaves out, or
+    // removed ones). Return one assignment per configured service, so `env --prod` shows no
+    // external service and `setup --prod` cannot resolve `${db.url}` where `up --prod` rejects it.
     const configured = new Set(configuredWithPorts);
     const cached = Object.entries(state.services).filter(([name]) => configured.has(name));
     const assignments: Assignments = Object.assign(
@@ -82,16 +76,11 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 }
 
 /**
- * The `--image` pins of the containers that still run in `mode` (a Docker container's entry,
- * or a Kubernetes service's port-forward; only a service with a port has an image to show).
- * state.json normally
- * carries the pinned image from that `up`, but when it is missing or incomplete the
- * assignments are rebuilt from the config, and without the pins `PORTLER_<SERVICE>_IMAGE`
- * and `${service.image}` would name the image in portler.yml instead of the one the
- * container runs. A pin from a launch in another run mode, or of a service that is no
- * longer a container in this view, describes nothing shown here and is left out. A
- * stopped entry's pin is kept only for `lastLaunch`, the service whose last launch this
- * view shows: its image is part of what that launch got.
+ * The `--image` pins of the containers still running in `mode` (a Docker entry or a k8s
+ * port-forward). When state.json is rebuilt from the config, these keep
+ * `PORTLER_<SERVICE>_IMAGE` and `${service.image}` naming the image that runs. Pins from
+ * another run mode or of a service that is no container here are left out; a stopped
+ * entry's pin is kept only for `lastLaunch`, the launch this view shows.
  */
 async function runningImagePins(
   loadedConfig: PortlerConfig,
@@ -111,20 +100,15 @@ async function runningImagePins(
   return pins;
 }
 
-/** The `up` command line for a launch, as the env notices name it. */
 function upCommand(mode: RunMode, prod: boolean): string {
   return `portler up${mode === 'local' ? '' : ` ${mode}`}${prod ? ' --prod' : ''}`;
 }
 
 /**
- * Whether the cluster runs a service that pids.json does not show as running. `up k8s`
- * records a service only through its port-forward, so one without a port leaves no
- * entry, and an older entry that has stopped (a local launch that exited) says nothing
- * about a later `up k8s`: the cluster is the only witness. That is the cluster `up k8s`
- * deployed to, not whichever context is active now. kubectl is only asked when this
- * checkout has rendered Kubernetes manifests (every render writes the namespace file),
- * so a project that never used k8s mode never waits on it. Undefined when the cluster
- * could not be asked, including when its recorded context no longer exists.
+ * Whether the cluster `up k8s` deployed to (not the current context) runs a service that
+ * pids.json does not show running: `up k8s` records only port-forwards, so a service without
+ * a port has no entry. kubectl is asked only when manifests were rendered (every render
+ * writes the namespace file). Undefined when the cluster could not be asked.
  */
 async function deployedInCluster(config: PortlerConfig, serviceName: string): Promise<boolean | undefined> {
   if (!existsSync(path.join(k8sManifestDir(config.projectDir), NAMESPACE_MANIFEST_FILE))) return false;
@@ -143,7 +127,6 @@ async function deployedInCluster(config: PortlerConfig, serviceName: string): Pr
   }
 }
 
-/** Hide the keys in `secrets`, leaving every other value as it is. */
 function maskConfigSecrets(env: EnvMap, secrets: ReadonlyMap<string, boolean>): EnvMap {
   return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, secrets.get(key) && value !== '' ? '***' : value]));
 }
@@ -158,9 +141,8 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
   if (serviceName && !loadedConfig.services[serviceName]) throw new Error(`unknown service "${serviceName}"`);
 
   return withLifecycleLock(loadedConfig.projectDir, async () => {
-    // A service with a pids.json entry, live or stale, is shown as it was started: in its
-    // run mode and, if it was started with --prod, in production. A typed mode token or
-    // --prod wins over the record, as it does for restart, and a notice says so.
+    // A recorded service, live or stale, is shown in the run mode and --prod it was started
+    // with. A typed mode token or --prod wins, as for restart, with a notice.
     const recordedServices = (await readPids(loadedConfig.projectDir))?.services ?? {};
     const recorded = serviceName ? recordedServices[serviceName] : undefined;
     let recordedMode = recorded && recordedRunMode(configForRunMode(loadedConfig, 'local'), serviceName!, recorded);
@@ -202,27 +184,21 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
     const config = applyProduction(applyImageOverrides(modeConfig, pins), prod);
     const service: ServiceConfig | null = serviceName ? config.services[serviceName] ?? null : null;
     if (serviceName && !service) throw new Error(`unknown service "${serviceName}"`);
-    // A typed mode token must describe a launch that could happen: refuse what `up docker`
-    // or `up k8s` would refuse instead of printing an environment no launch could get. Like
-    // `up`, check the service together with everything it depends on, and every service
-    // when none is named.
+    // A typed mode token must describe a possible launch: refuse what `up docker` or `up k8s`
+    // would, for the service and its dependencies, or every service when none is named.
     if (modeExplicit && mode !== 'local') {
       const launched = expandAndOrderServices(config, selectServiceNames(config, service ? [service.name] : []));
       if (mode === 'docker') validateDockerMode(config, launched);
       else {
         validateK8sMode(config, launched);
-        // REVIEW: An explicit env k8s view must reject the same unforwardable
-        // UDP services (including dependencies) that up k8s refuses.
         validateK8sForwards(config, launched);
       }
     }
 
-    // `config` already carries the running containers' pins, so the assignments name the
-    // images they run.
-    // A Kubernetes launch forwards only TCP to this machine, as `up k8s` allocates it.
+    // `config` carries the running containers' pins, so the assignments name their images.
+    // A k8s launch forwards only TCP to this machine, as `up k8s` allocates it.
     const { assignments, generatedEnv } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
-    // Always refresh runtime.env, even when cached state was reused, so a
-    // manually deleted file comes back.
+    // Also from cached state, so a deleted runtime.env comes back.
     await writeRuntimeEnv(config.projectDir, generatedEnv);
 
     // A missing required value is reported, not fatal: this view is how one finds out.

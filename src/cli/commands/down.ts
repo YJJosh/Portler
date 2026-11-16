@@ -12,7 +12,6 @@ import type { ParsedArgs } from '../args.ts';
 import { expandAndOrderServices, parseRunMode, selectServiceTargets, servicesWithPorts } from '../services.ts';
 import { legacyMountCandidates, restartAccepts, type RestartRequest } from './restart.ts';
 
-/** The selected targets that hold a port reservation worth releasing. */
 function releaseTargets(config: PortlerConfig, selectedNames: string[]): string[] {
   const serviceNames = servicesWithPorts(
     config,
@@ -23,10 +22,9 @@ function releaseTargets(config: PortlerConfig, selectedNames: string[]): string[
 }
 
 /**
- * Reservations are released only for teardown targets that are not still
- * recorded as incomplete. Include completed stale PID entries even when the
- * service was removed from the current config, so a normal full `down` still
- * cleans old registry entries without giving back a live service's port.
+ * Releases only targets not still recorded as incomplete, plus completed stale entries of
+ * services gone from the config, so a full `down` cleans old registry entries without
+ * giving back a live service's port.
  */
 function releasableTargets(config: PortlerConfig, selectedNames: string[] | undefined, result: StopResult): string[] {
   const configured = releaseTargets(
@@ -38,10 +36,9 @@ function releasableTargets(config: PortlerConfig, selectedNames: string[] | unde
 }
 
 /**
- * The volume set a stopped service's `@` volumes were on, as far as its entry says: the
- * set (`''` for the base volumes) when it recorded one, undefined when it mounts no `@`
- * volume in the mode it ran in, and null when it does but its entry (written by an older
- * Portler) does not say which set.
+ * The volume set a stopped service's `@` volumes were on: the recorded set (`''` for the
+ * base volumes), undefined when it mounts no `@` volume in its mode, null when it does but
+ * its entry does not say which set.
  */
 export function recordedVolumeSet(service: ServiceConfig | undefined, launch: PidServiceInfo | undefined): string | null | undefined {
   if (launch === undefined) return undefined;
@@ -60,13 +57,10 @@ interface RecordedLaunch {
 }
 
 /**
- * The single way the stopped services were started: the mode, `--prod`, `--no-setup`,
- * image pins and volume set their PID entries recorded (Kubernetes mode when this down
- * deleted them from the cluster). Undefined when there is no single way: they were started
- * differently, an entry does not say which volume set it was on, they were on the base
- * volumes while PORTLER_VOLUME_SET would make a plain command pick another set, or they ran
- * in Kubernetes, whose port-forward entries record no `--image` pin (and a service without a
- * port has no entry at all), so a command could quietly deploy another image.
+ * The single way the stopped services were started, from their PID entries. Undefined when
+ * they were started differently, an entry lacks its volume set, PORTLER_VOLUME_SET would move
+ * a plain command off the base volumes, or they ran in Kubernetes: its entries record no
+ * `--image` pin, so a command could quietly deploy another image.
  */
 function recordedLaunch(
   serviceNames: readonly string[],
@@ -159,13 +153,10 @@ function recovery(
 }
 
 /**
- * The command that brings the stopped services back. `up` refuses when something the
- * services depend on is still running (it would start that too), so while a prerequisite
- * runs this is a `restart`, which starts what is stopped and leaves what runs alone.
- * Undefined when no command would do it: no single recorded launch (see recordedLaunch,
- * which also covers Kubernetes), or a running prerequisite started in another mode or with
- * another `--prod`, which restart refuses. A `restart` is still only offered once restart's
- * own plan accepts it (warnAboutDependents).
+ * The command that brings the stopped services back: a `restart` while a prerequisite runs,
+ * since `up` refuses then. Undefined with no single recorded launch (see recordedLaunch) or a
+ * running prerequisite in another mode or `--prod`, which restart refuses.
+ * warnAboutDependents offers a `restart` only once restart's own plan accepts it.
  */
 export function recoveryCommand(
   serviceNames: readonly string[],
@@ -180,10 +171,8 @@ export function recoveryCommand(
 }
 
 /**
- * Whether `restart`, run as suggested, would plan and pass its checks without replaying
- * anything the command does not say. Its plan reads every entry recorded for what the
- * services depend on, a retained one whose process is gone included, so a mode or `--prod`
- * recorded there can make it refuse what the running prerequisites alone allow.
+ * Whether the suggested `restart`, as written, would pass its checks. Its plan also reads
+ * retained entries of dead prerequisites, whose mode or `--prod` can make it refuse.
  */
 async function restartWouldAccept(
   config: PortlerConfig,
@@ -210,12 +199,10 @@ async function restartWouldAccept(
 }
 
 /**
- * `down redis` stops only redis. Services that depend on it keep running and start failing
- * against it, so name them: the user can stop them too, or bring the dependency back.
- * A running service's dependencies are the ones it recorded when it started, because an
- * edited portler.yml says nothing about what is already running; entries that record none
- * (older ones, Kubernetes port-forwards) and services without one (`alsoRunning`: deployed in
- * the cluster without a port-forward) use the config.
+ * `down redis` leaves redis's dependents running and failing, so name them. A running
+ * service's dependencies are the ones its entry recorded, since an edited portler.yml says
+ * nothing about what runs. Entries without them (k8s port-forwards) and `alsoRunning`
+ * (deployed in the cluster without a port-forward) use the config.
  */
 async function warnAboutDependents(
   config: PortlerConfig,
@@ -286,25 +273,18 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
 
   const selectedNames = requested.length > 0 ? selectServiceTargets(config, requested) : undefined;
 
-  // The lifecycle lock makes this whole decision exclusive against a concurrent
-  // up/restart in the same project: without it, `up` can read "api is not
-  // running", and `down` can stop the api it is in the middle of starting.
+  // Without the lock, `up` can read "api is not running" while `down` stops the api it is starting.
   return withLifecycleLock(config.projectDir, async () => {
-    // Stop the local processes first. This never touches a cluster, so it must
-    // not be blocked by cluster problems: if kubectl is missing or the context
-    // is unusable, the user's port-forwards are still stopped before they hear
-    // about the cluster. Reservations remain until cluster deletion succeeds.
-    // How the selected services were started, read before they stop: their entries go with them.
+    // Stop local processes first: kubectl problems must not keep port-forwards running.
+    // Reservations remain until cluster deletion succeeds. Entries are read before they
+    // go with the stopped services.
     const before = selectedNames ? await readPids(config.projectDir) : null;
     const result = await stopServices(config.projectDir, selectedNames, { force: args.force });
 
-    // Deleting cluster resources DOES touch a cluster, so it is gated on the
-    // context being a recognized local one, and every kubectl call is pinned
-    // to it. That is the context `up k8s` recorded, not whichever one is active
-    // now. PVCs (and the namespace) survive unless --volumes was passed, so
-    // a database's data outlives an ordinary down/up cycle. If this fails, keep
-    // every reservation: releasing ports while the requested teardown is only
-    // half complete is the false all-clear the registry is meant to prevent.
+    // Cluster deletes need a recognized local context: the one `up k8s` recorded, not the
+    // active one, pinned on every kubectl call. PVCs and the namespace survive unless
+    // --volumes. If this fails, keep every reservation: releasing ports after a half-done
+    // teardown is the false all-clear the registry exists to prevent.
     let deletedFromCluster: K8sDeleteResult = { deleted: false, services: [] };
     let cluster: ClusterInfo | undefined;
     if (mode === 'k8s') {
@@ -339,11 +319,9 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
     } else if (!incomplete && !deletedFromCluster.deleted) {
       process.stdout.write('[portler] no running services found\n');
     }
-    // A Kubernetes service without a port has no port-forward for stopServices to stop, but
-    // deleting its Deployment takes it away from its dependents all the same (one that was not
-    // deployed is taken from no one).
-    // So does removing a Docker service's running container, even when its entry is kept
-    // because a leftover `docker run` client still holds the group.
+    // Dependents also lose a port-less k8s service whose Deployment was deleted, and a Docker
+    // service whose container was removed while its entry is kept (a leftover `docker run`
+    // client still holds the group).
     const takenAway = [
       ...new Set([
         ...result.stopped,
@@ -358,10 +336,8 @@ export async function commandDown(args: ParsedArgs): Promise<number> {
       await warnAboutDependents(config, takenAway, before, mode, args.file, new Set(result.remaining), deployed);
     }
 
-    // Exit non-zero when down did NOT finish the job: a service is only
-    // "stopped" once its process group is confirmed gone, so what is left here
-    // is still running (or a Docker resource is still there). Reporting success
-    // would tell a script the project is down when it is not.
+    // A service is "stopped" only once its process group is confirmed gone, so what is left
+    // still runs (or a Docker resource remains): exit non-zero so a script does not assume down.
     if (result.unverified.length > 0) {
       process.stderr.write(
         `[portler] down did not stop: ${result.unverified.join(', ')} (identity not verified — see the warnings above). ` +
