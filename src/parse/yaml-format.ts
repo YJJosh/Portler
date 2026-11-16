@@ -57,7 +57,6 @@ function writeValue(value: unknown, indent: number, lines: string[]): void {
   }
 }
 
-/** Serialize one document (a plain object) to block-style YAML. */
 export function formatYaml(document: unknown): string {
   if (isScalar(document)) return `${formatScalar(document)}\n`;
 
@@ -66,7 +65,6 @@ export function formatYaml(document: unknown): string {
   return `${lines.join('\n')}\n`;
 }
 
-/** Serialize multiple documents into one `---`-separated YAML stream. */
 export function formatYamlDocuments(documents: unknown[]): string {
   return documents.map((document) => `---\n${formatYaml(document)}`).join('');
 }

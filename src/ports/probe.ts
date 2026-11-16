@@ -43,7 +43,6 @@ async function isUdpPortFree(port: number, host: string): Promise<boolean> {
   });
 }
 
-/** A `tcp+udp` port must be free on both protocols. */
 export async function isPortFree(port: number, host = '127.0.0.1', transport: PortTransport = 'tcp'): Promise<boolean> {
   const checkHost = normalizeCheckHost(host);
   for (const protocol of transportProtocols(transport)) {

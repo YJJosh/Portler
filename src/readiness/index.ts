@@ -9,11 +9,8 @@ import { resolveEnvValue, type ResolveOptions } from '../env/index.ts';
 import { usesTcp } from '../ports/transport.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-/**
- * Docker's port proxy accepts and then closes connections while nothing listens in
- * the container, so a connection counts once it stays open this long or the peer
- * sends data (the proxy never does).
- */
+/** Docker's port proxy accepts, then closes, connections while nothing listens in the container, so a connection
+ * counts once it stays open this long or the peer sends data (the proxy never does). */
 export const DOCKER_TCP_HOLD_MS = 200;
 
 export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0, signal?: AbortSignal): Promise<boolean> {
@@ -180,11 +177,8 @@ const MAX_LOG_REASON_LENGTH = 500;
 const LOG_READ_CHUNK = 64 * 1024;
 const LOG_TAIL_BYTES = 1024 * 1024;
 
-/**
- * The last few `[portler] error:` lines of a detached service's log, which is
- * truncated on every start. Reads only the last MiB present when the scan starts,
- * so a long build or a process still appending cannot make it slow or endless.
- */
+/** The last few `[portler] error:` lines of a detached service's log (truncated on every start). Reads only the last MiB
+ * present when the scan starts, so a long build or a still-appending process cannot make it slow or endless. */
 export function portlerErrorsInLog(logFile: string): string[] {
   let fd: number;
   try {

@@ -10,11 +10,8 @@ import { isObject } from '../util/guards.ts';
 import { readValidatedJsonFile, writeJsonFile } from '../util/json-file.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig, SetupStep } from '../types/index.ts';
 
-/**
- * Receipts of succeeded plain steps, keyed by mode and owner (`local:prod:service:api`).
- * A receipt is the step's fingerprint, plus `:` and its watch digest for a `watch` step.
- * A version 1 file (one fingerprint per owner) is accepted and treated as empty.
- */
+// Receipts of succeeded plain steps by mode and owner (`local:prod:service:api`): the fingerprint, plus `:` and the
+// watch digest for a `watch` step. A version 1 file (one fingerprint per owner) is read as empty.
 interface SetupState {
   version: 1 | 2;
   project: string;
@@ -30,29 +27,22 @@ function isSetupState(value: unknown): value is SetupState {
   return false;
 }
 
-/**
- * Includes the volume set when the project has managed volumes: a migration that
- * ran against one set's database has not run against another's.
- */
+/** Includes the volume set when the project has managed volumes: a migration that ran against one set's
+ * database has not run against another's. */
 export function setupModeKey(config: PortlerConfig, mode: string, prod?: boolean): string {
   const set = config.volumeSet && config.volumes.length > 0 ? `@${config.volumeSet}` : '';
   return `${mode}:${prod ? 'prod' : 'dev'}${set}`;
 }
 
-/**
- * `occurrence` is the entry's rank among the `total` entries of its list that run
- * the same command. With the total included, adding or removing a duplicate
- * invalidates every receipt of that command, so none moves to a new entry.
- */
+/** `occurrence` ranks the entry among the `total` entries of its list with the same command. With the total included,
+ * adding or removing a duplicate invalidates every receipt of that command, so none moves to a new entry. */
 export function setupFingerprint(command: string, cwd: string, mode: string, occurrence = 0, total = 1, watch?: string): string {
   const identity = watch === undefined ? { command, cwd, mode, occurrence, total } : { command, cwd, mode, occurrence, total, watch };
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
 
-/**
- * Null when nothing exists at the path. Symlinks in a folder count by their
- * target path and are not followed, so a link loop cannot hang the walk.
- */
+// Null when nothing exists at the path. Symlinks in a folder count by their target path and are not
+// followed, so a link loop cannot hang the walk.
 function pathDigest(filePath: string, label: string): string | null {
   let isDirectory: boolean;
   try {
@@ -90,31 +80,24 @@ function folderDigest(root: string): string {
   return `dir:${hash.digest('hex')}`;
 }
 
-/**
- * One [path, digest-or-null] record per watch path, so no content can pass for
- * absence or for another path's entry. Throws when a path cannot be read.
- */
+// One [path, digest-or-null] record per watch path, so no content can pass for absence or another path's entry.
 function watchDigest(step: SetupStep, cwd: string): string | undefined {
   if (!step.watch) return undefined;
   const records = step.watch.map((file) => [file, pathDigest(path.resolve(cwd, file), file)]);
   return createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 
-/** A step that keeps a receipt: neither guarded by a path nor marked `always`. */
+/** A step that keeps a receipt. */
 export function isPlainSetupStep(step: SetupStep): boolean {
   return step.ifMissing === undefined && step.always !== true;
 }
 
-/** Everything before the watch digest. */
 function receiptIdentity(receipt: string): string {
   return receipt.split(':', 1)[0];
 }
 
-/**
- * In list order, `undefined` for guarded and `always` entries. Ranks count
- * entries of any kind, so a receipt stays with its entry when a neighbour
- * changes kind. The watch digest is taken later, when the step is reached.
- */
+// In list order, `undefined` for guarded and `always` entries. Ranks count every entry, so a receipt stays
+// with its entry when a neighbour changes kind. Watch digests are taken when the step is reached.
 function plainIdentities(steps: SetupStep[], cwd: string, mode: string): (string | undefined)[] {
   const totals = new Map<string, number>();
   for (const step of steps) totals.set(step.run, (totals.get(step.run) ?? 0) + 1);
@@ -126,11 +109,8 @@ function plainIdentities(steps: SetupStep[], cwd: string, mode: string): (string
   });
 }
 
-/**
- * Drops `mode` receipts of steps the whole config no longer declares, including
- * unselected owners, so a removed and re-added step runs again. Other modes are
- * untouched. Writes only when something was dropped. Caller holds the lifecycle lock.
- */
+/** Drops `mode` receipts of steps the whole config (unselected owners too) no longer declares, so a removed and
+ * re-added step runs again. Writes only when something was dropped. Caller holds the lifecycle lock. */
 export async function pruneSetupReceipts(config: PortlerConfig, mode: string): Promise<void> {
   const filePath = path.join(portlerDir(config.projectDir), 'setup.json');
   const previous = await readValidatedJsonFile<SetupState>(filePath, 'Portler setup state', isSetupState);
@@ -162,10 +142,8 @@ export async function pruneSetupReceipts(config: PortlerConfig, mode: string): P
   if (changed) await writeJsonFile(filePath, previous);
 }
 
-/**
- * Drops receipts for the active volume set, for when a managed volume is about to
- * be created empty. Returns whether anything was dropped. Caller holds the lifecycle lock.
- */
+/** Drops the active volume set's receipts before a managed volume is created empty; returns whether any were dropped.
+ * Caller holds the lifecycle lock. */
 export async function forgetVolumeSetupReceipts(config: PortlerConfig): Promise<boolean> {
   // Without name:, dev and prod share volumes, so both lose their receipts; with it, only the current one.
   const productions = config.name ? [config.production === true] : [false, true];
@@ -183,26 +161,14 @@ export async function forgetVolumeSetupReceipts(config: PortlerConfig): Promise<
   return changed;
 }
 
-/**
- * Environment for top-level setup steps: `default:` entries, the process env, base
- * `.env` files, then root config env. In production the deployment wins instead: root
- * config env, base `.env` files, then the process env, and a key the deployment
- * supplies is not resolved from config at all (see buildServiceEnv).
- */
+/** Env for top-level setup steps: `default:` entries, process env, base `.env` files, then root config env. In production
+ * the deployment wins: config env, `.env` files, then process env, and keys it supplies skip config (see buildServiceEnv). */
 export function buildProjectEnv(config: PortlerConfig, baseEnv: EnvMap, assignments: Assignments, generatedEnv: EnvMap = {}): EnvMap {
   return composeProjectEnv(config, baseEnv, assignments, generatedEnv).env;
 }
 
-/**
- * Runs the project's (service null) or one service's steps in order:
- * - `if_missing`: skipped while the path exists; `force` does not override it.
- * - `always`: runs every time.
- * - plain: runs again when its command, cwd or `watch` files changed, or with
- *   `force`. Watch files are read when the step is reached and recorded after it
- *   succeeds. Each success is written to `.portler/setup.json` at once.
- *
- * The first failure stops the run. Caller holds the lifecycle lock.
- */
+/** Runs the project's (service null) or one service's steps in order until one fails (step kinds: docs/reference/configuration.md).
+ * `force` reruns plain steps, not `if_missing`. Each success is written to `.portler/setup.json` at once. Caller holds the lifecycle lock. */
 export async function runSetupStep(
   config: PortlerConfig,
   service: ServiceConfig | null,
@@ -232,8 +198,7 @@ export async function runSetupStep(
       ? (previous as SetupState & { version: 2; steps: Record<string, string[]> })
       : { version: 2, project: config.projectDir, steps: {} };
 
-  // A forced run drops every receipt before anything runs, so a failed rerun
-  // cannot leave an old success standing.
+  // A forced run drops every receipt before anything runs, so a failed rerun cannot leave an old success standing.
   const identities = plainIdentities(steps, cwd, mode);
   const live = new Set(identities.filter((identity): identity is string => identity !== undefined));
   const recorded = force ? [] : (state.steps[key] ?? []).filter((receipt) => live.has(receiptIdentity(receipt)));
@@ -269,8 +234,7 @@ export async function runSetupStep(
     ran += 1;
     let interrupted = undefined as NodeJS.Signals | undefined;
     const code = await runShell(step.run, cwd, env, { signal, onSignal: (signal) => { interrupted = signal; } });
-    // A cancelled step is not done even if it handled SIGTERM and exited 0: no
-    // receipt, and no later step or service runs.
+    // A cancelled step is not done even if it handled SIGTERM and exited 0: no receipt, and no later step or service runs.
     signal?.throwIfAborted();
     if (interrupted !== undefined) {
       throw new Error(`setup ${name}: interrupted by ${interrupted} while running "${step.run}"; the step is not recorded as done`);

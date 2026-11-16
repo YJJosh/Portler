@@ -1,8 +1,5 @@
-/**
- * Ownership checks (Docker, kubectl) need exit code, stdout and stderr: a missing
- * container and an unreachable daemon both exit non-zero, and only the first means
- * "nothing to remove". Tests inject a CommandRunner instead of a real daemon.
- */
+/** Ownership checks (Docker, kubectl) need exit code, stdout and stderr: a missing container and an unreachable
+ * daemon both exit non-zero, and only the first means "nothing to remove". Tests inject a CommandRunner. */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { drainOwnedProcessGroup, signalOwnedProcessGroup } from '../process/shell.ts';
 
@@ -15,12 +12,9 @@ export interface CommandResult {
 
 export type CommandRunner = (command: string, args: string[], input?: string, signal?: AbortSignal) => Promise<CommandResult>;
 
-/**
- * On abort, signals the child's whole group, then SIGKILLs it after 2 s: a credential
- * helper can outlive kubectl, and a build helper must stop before rollback. The group
- * is ours: callers that pass a signal spawn the child as its leader and still hold it.
- * The returned cleanup keeps the SIGKILL armed until the group has drained.
- */
+/** On abort, signals the child's group, then SIGKILLs it after 2 s: a credential helper can outlive kubectl, and a
+ * build helper must stop before rollback. The group is ours: callers passing a signal spawn it as leader and hold it.
+ * The returned cleanup keeps the SIGKILL armed until the group has drained. */
 export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () => Promise<void> {
   if (!signal) return async () => {};
   const forward = (name: NodeJS.Signals): void => {
@@ -43,7 +37,7 @@ export function stopChildOnAbort(child: ChildProcess, signal?: AbortSignal): () 
   };
 }
 
-/** Run a command, capturing output. Failures are results; only cancellation rejects, after exit. */
+/** Failures are results; only cancellation rejects, and only after the child exits. */
 export const runCommand: CommandRunner = (command, args, input, signal) => {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {

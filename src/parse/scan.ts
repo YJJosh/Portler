@@ -1,9 +1,6 @@
 // Quote-aware scanning shared by the YAML and dotenv parsers.
 
-/**
- * A quote opens a span only after one of these; elsewhere it is literal, so the
- * apostrophe in `msg: it's fine # note` does not swallow the comment.
- */
+// A quote opens a span only after one of these, so the apostrophe in `msg: it's fine # note` stays literal.
 const QUOTE_OPENER_PREDECESSORS = /[\s:=,[{(-]/;
 
 function opensQuotedSpan(input: string, index: number): boolean {

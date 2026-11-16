@@ -14,7 +14,7 @@ export class CorruptStateFileError extends Error {
   }
 }
 
-/** Null when the file does not exist; CorruptStateFileError, not a raw SyntaxError, when malformed. */
+// Null when the file does not exist; CorruptStateFileError, not a raw SyntaxError, when malformed.
 async function readJsonFile(filePath: string, description: string, recoveryCommand?: string): Promise<unknown | null> {
   let text: string;
 
@@ -60,11 +60,8 @@ export async function readValidatedJsonFileOrNull<T>(
   }
 }
 
-/**
- * Atomic, creating parent dirs: a fsynced temp file in the same directory is
- * renamed over the target (rename(2) is atomic within one filesystem), so no
- * reader or crash sees a half-written file.
- */
+/** Atomic, creates parent dirs: a fsynced temp file in the same directory is renamed over the target
+ * (rename(2) is atomic within one filesystem), so no reader or crash sees a half-written file. */
 export async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
   const directory = path.dirname(filePath);
   await fs.mkdir(directory, { recursive: true });

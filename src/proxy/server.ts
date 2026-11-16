@@ -56,12 +56,8 @@ export function hostnameOf(hostHeader: string): string {
   return (colon === -1 ? value : value.slice(0, colon)).toLowerCase();
 }
 
-/**
- * DNS-rebinding guard. The proxy has no authentication, and a page that rebinds
- * attacker.com to 127.0.0.1 could read every service behind it. Browsers cannot
- * forge Host, so a rebound request arrives as `Host: attacker.com` and is refused.
- * `*.localhost` always resolves to loopback (RFC 6761); IP literals must be loopback.
- */
+/** DNS-rebinding guard (the proxy has no auth): browsers cannot forge Host, so a page that rebinds attacker.com to 127.0.0.1
+ * sends `Host: attacker.com` and is refused. `*.localhost` is always loopback (RFC 6761); IP literals must be loopback. */
 export function isAllowedHost(hostHeader: string | undefined, allowedHosts: readonly string[]): boolean {
   // HTTP/1.0 clients send no Host; a browser, and so a rebinding attack, always does.
   if (hostHeader === undefined || hostHeader === '') return true;
@@ -79,10 +75,7 @@ export function isAllowedHost(hostHeader: string | undefined, allowedHosts: read
   return false;
 }
 
-/**
- * Refuses duplicate Host headers: Node checks only the first, but an upstream
- * with another parser may route on a later, unchecked one.
- */
+// Refuses duplicate Host headers: Node checks only the first, but an upstream with another parser may route on a later one.
 function hasAllowedRequestHost(req: IncomingMessage, allowedHosts: readonly string[]): boolean {
   let count = 0;
   for (let index = 0; index < req.rawHeaders.length; index += 2) {
@@ -112,7 +105,6 @@ export function matchRoute(routes: ProxyTarget[], url: string): ProxyTarget | un
   return undefined;
 }
 
-/** Headers that describe the client connection and must not be forwarded. */
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -125,7 +117,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ]);
 
-/** Header names listed in the Connection header are hop-by-hop too. */
+// Header names listed in the Connection header are hop-by-hop too.
 function connectionListedHeaders(connectionHeader: string | string[] | undefined): Set<string> {
   const names = new Set<string>();
   const raw = Array.isArray(connectionHeader) ? connectionHeader.join(',') : (connectionHeader ?? '');
@@ -138,15 +130,13 @@ function connectionListedHeaders(connectionHeader: string | string[] | undefined
   return names;
 }
 
-/** Dropped from client requests: the proxy sets X-Forwarded-For/Proto/Host itself. */
+// Dropped from client requests: the proxy sets X-Forwarded-For/Proto/Host itself.
 function isForwardingHeader(name: string): boolean {
   return name === 'forwarded' || name === 'x-real-ip' || name.startsWith('x-forwarded-');
 }
 
-/**
- * A single authority, not a URL, list, userinfo or scoped IP. Underscores are
- * allowed: not valid in public DNS, but container names such as `my_app` use them.
- */
+// A single authority, not a URL, list, userinfo or scoped IP. Underscores pass: invalid in public DNS, but
+// container names such as `my_app` use them.
 function isValidAuthority(value: string): boolean {
   const match = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9._-]+)(?::([0-9]+))?$/.exec(value);
   if (!match) return false;
@@ -158,7 +148,7 @@ function isValidAuthority(value: string): boolean {
   );
 }
 
-/** Shared by HTTP and upgrades: trust only a validated, explicitly allowlisted peer. */
+// Shared by HTTP and upgrades: trust only a validated, explicitly allowlisted peer.
 function forwardingHeaders(req: IncomingMessage, options: ProxyServerOptions): Record<string, string> {
   const remoteAddress = req.socket.remoteAddress ?? 'unknown';
   const peer = normalizeIpAddress(remoteAddress);
@@ -258,10 +248,8 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
   req.pipe(upstream);
 }
 
-/**
- * Strips the same headers as HTTP. The client's Connection list is not relayed:
- * it could nominate our forwarding headers as hop-by-hop upstream.
- */
+// Strips the same headers as HTTP. The client's Connection list is not relayed: it could nominate our
+// forwarding headers as hop-by-hop upstream.
 function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): string {
   const lines = [`${req.method} ${req.url ?? '/'} HTTP/${req.httpVersion}`];
   const connectionListed = connectionListedHeaders(req.headers.connection);
@@ -317,7 +305,7 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   socket.on('close', () => upstream.destroy());
 }
 
-/** Start the proxy server; resolves once it is listening. */
+/** Resolves once the server is listening. */
 export function startProxyServer(options: ProxyServerOptions): Promise<http.Server> {
   const server = http.createServer((req, res) => handleRequest(options, req, res));
   server.on('upgrade', (req, socket, head) => handleUpgrade(options, req, socket as net.Socket, head));

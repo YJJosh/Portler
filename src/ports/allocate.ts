@@ -33,7 +33,6 @@ function makeAssignment(service: ServiceConfig, port: number): ServiceAssignment
   };
 }
 
-/** Includes the synthetic proxy service when a `proxy:` block exists. */
 function servicesToAllocate(config: PortlerConfig): ServiceConfig[] {
   const services = Object.values(config.services).filter((service) => service.port !== undefined);
   if (config.proxy) services.push(proxyServiceConfig(config, config.proxy));
@@ -85,15 +84,8 @@ async function choosePort(
   throw new Error(`no free ports available in range ${start}-${end}`);
 }
 
-/**
- * Assigns a port to every service that declares one, and records registry
- * reservations for `reserveServices` only.
- *
- * `runningServiceNames` keep their port without a probe (it is busy because they
- * listen on it); callers must not also list them in `reserveServices`, which
- * re-probes. `options.recorded` (pids.json) is the last fallback for a running
- * service's port when the registry and state.json no longer have it.
- */
+/** Assigns every declared port; only `reserveServices` get registry entries and are re-probed, so never list
+ * `runningServiceNames` there (they keep their port unprobed). `options.recorded` (pids.json) is the last port fallback. */
 export async function allocateAssignments(
   config: PortlerConfig,
   state: StateFile | null,
@@ -128,8 +120,8 @@ export async function allocateAssignments(
     const assignments: Assignments = {};
     const allocatable = servicesToAllocate(config);
 
-    // Unselected services get an assignment too: others may reference ${other.port},
-    // and state.json must stay complete. Running services keep their port unprobed.
+    // Unselected running services get an assignment too: others may reference
+    // ${other.port}, and state.json must stay complete.
     for (const service of allocatable) {
       if (reserveSet.has(service.name) || !runningServiceNames.has(service.name)) continue;
 
@@ -173,10 +165,7 @@ export async function allocateAssignments(
   }, { signal: options.signal });
 }
 
-/**
- * Prunes every project's stale entries (see pruneRegistry); returns how many were
- * removed. With `force`, a corrupt registry is reset instead of throwing.
- */
+/** Prunes every project's stale entries; returns how many. With `force`, a corrupt registry is reset instead of throwing. */
 export async function pruneGlobalRegistry(force = false): Promise<number> {
   return withRegistryLock(async () => {
     let registry: RegistryFile;
@@ -200,7 +189,6 @@ export async function pruneGlobalRegistry(force = false): Promise<number> {
   });
 }
 
-/** Remove this project's registry reservations (optionally only some services). */
 export async function releasePorts(projectDir: string, serviceNames?: string[]): Promise<void> {
   await withRegistryLock(async () => {
     const registry = await readRegistry();

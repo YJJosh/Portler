@@ -1,14 +1,7 @@
-/**
- * Cross-process lock on `mkdir`, which is atomic: one process creates the directory.
- *
- * Age alone never justifies a takeover, since a slow but live holder would then
- * share the lock. A takeover needs a stale lock AND an owner provably dead on this
- * host; a lock from another host (NFS, a container) is never taken over.
- *
- * Each acquisition writes a token, and release removes the lock only while the
- * token matches, so a holder that stalled and was taken over cannot delete the
- * new holder's lock.
- */
+/** Cross-process lock on `mkdir`, which is atomic. Age alone never justifies a takeover (a slow live holder would then
+ * share it): it needs a stale lock AND an owner provably dead on this host, so another host's lock (NFS, a container)
+ * is never taken over. Release removes the lock only while its per-acquisition token matches, so a stalled holder
+ * that was taken over cannot delete the new holder's lock. */
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,11 +13,8 @@ const POLL_MS = 100;
 // coming from different clocks.
 const DEAD_OWNER_MARGIN_MS = 1_000;
 
-/**
- * Local, not imported from process/pids.ts: that would make the import cycle
- * util/lock -> process/pids -> state/lock -> util/lock.
- * EPERM means the pid exists under another user, so it is alive.
- */
+// Not imported from process/pids.ts, which would make the cycle util/lock -> process/pids -> state/lock -> util/lock.
+// EPERM means the pid exists under another user, so it is alive.
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
 
@@ -36,10 +26,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-/**
- * Distinguishes an acquisition timeout from an error thrown inside `fn`.
- * Foreground teardown fails closed when it cannot acquire the lifecycle lock.
- */
+/** An acquisition timeout, not an error from `fn`. Foreground teardown fails closed when it cannot get the lifecycle lock. */
 export class LockTimeoutError extends Error {
   readonly lockDir: string;
 
@@ -106,12 +93,8 @@ async function readOwner(lockDir: string): Promise<LockOwner | null> {
   }
 }
 
-/**
- * Needs a stale lock AND an owner provably dead on this host. A lock from
- * another host is never taken over, since its holder may be mid-write; it
- * times out and the user removes it by hand. A missing or unreadable owner file
- * (holder crashed between mkdir and writing it) is taken over on age alone.
- */
+/** Needs a stale lock AND an owner provably dead on this host. Another host's lock is never taken over (its holder may
+ * be mid-write; the user removes it by hand). A missing or unreadable owner file (crash after mkdir) goes on age alone. */
 export function isTakeoverAllowed(owner: LockOwner | null, ageMs: number, staleMs: number, thisHost: string): boolean {
   if (ageMs <= staleMs) return false;
   if (owner === null) return true;
@@ -128,12 +111,8 @@ function sameOwner(a: LockOwner, b: LockOwner): boolean {
   return a.pid === b.pid && a.host === b.host && a.at === b.at && a.token === b.token;
 }
 
-/**
- * The rename makes removal exclusive: if another process moved it first we get
- * ENOENT, never deleting a lock that was re-acquired meanwhile. Returns null
- * when the lock is gone (retry at once), else the error that kept it in place
- * (wait, then time out, instead of a tight loop).
- */
+// The rename makes removal exclusive: losing the race gives ENOENT, never deleting a re-acquired lock.
+// Returns null when the lock is gone (retry now), else the error that kept it (wait, then time out).
 async function takeOverStaleLock(lockDir: string): Promise<NodeJS.ErrnoException | null> {
   const abandoned = `${lockDir}.stale.${process.pid}.${randomToken()}`;
 
@@ -148,11 +127,8 @@ async function takeOverStaleLock(lockDir: string): Promise<NodeJS.ErrnoException
   return null;
 }
 
-/**
- * A changed token means another process took the lock over and is inside the
- * critical section; deleting it would let a third one in. Owner files without a
- * token (from an older Portler) are released on a pid and host match.
- */
+// A changed token means another process took the lock over and is in the critical section; deleting it
+// would let a third one in. Owner files without a token (older Portler) are released on a pid and host match.
 async function releaseIfOurs(lockDir: string, token: string, description: string): Promise<void> {
   const owner = await readOwner(lockDir);
 
@@ -183,11 +159,8 @@ async function pathMissing(target: string): Promise<boolean> {
   }
 }
 
-/**
- * Reads mtime and owner from one lock generation. A takeover between the reads
- * would pair the old mtime with the new owner, so the directory is read again
- * after the owner file and any change returns 'changed'.
- */
+// A takeover between the reads would pair the old mtime with the new owner, so the directory is
+// stat'ed again after the owner file and any change returns 'changed'.
 async function readLockSnapshot(
   lockDir: string,
   stat: (target: string) => Promise<LockDirStat>,
@@ -260,9 +233,8 @@ async function acquire(lockDir: string, options: LockOptions): Promise<() => Pro
           seenOwner = lastOwner;
           seenAt = now;
         }
-        // The lock's clock may run ahead of ours. A future mtime must not push the
-        // deadline out, so cap it at when we first saw this owner (fixed, so the
-        // deadline cannot slide on every poll).
+        // The lock's clock may run ahead of ours: cap the mtime at when we first saw this owner (fixed, so
+        // a future mtime cannot push the deadline out or slide it on every poll).
         const mtime = Math.min(snapshot.mtimeMs, lastOwner === null ? now : seenAt);
 
         if (isTakeoverAllowed(lastOwner, now - snapshot.mtimeMs, options.staleMs, host)) {

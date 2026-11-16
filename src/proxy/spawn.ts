@@ -7,7 +7,7 @@ import { prefixStream } from '../process/logs.ts';
 import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment } from '../types/index.ts';
 import type { ProxyServerOptions } from './server.ts';
 
-/** Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited. */
+// Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited.
 function typeStrippingArgs(): string[] {
   return process.execArgv.filter((arg) => arg.includes('strip-types') || arg.includes('transform-types'));
 }

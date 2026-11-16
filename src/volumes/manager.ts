@@ -15,11 +15,8 @@ import type { PortlerConfig } from '../types/index.ts';
 
 const COPY_IMAGE = 'alpine:3';
 
-/**
- * A random token per fork attempt. The project label cannot tell concurrent forks
- * apart, and `docker volume create` succeeds for an existing name, so only this
- * proves the attempt created the target it copies into and may roll back.
- */
+// Random per fork attempt: the project label cannot tell concurrent forks apart, and `docker volume create`
+// succeeds for an existing name, so only this proves the attempt created the target and may roll it back.
 const FORK_ATTEMPT_LABEL = 'portler.fork-attempt';
 
 export interface ProjectVolume {
@@ -60,12 +57,8 @@ export function parseProjectVolumeName(
   };
 }
 
-/**
- * Resolve a user-supplied volume argument to a full Docker volume name.
- * Accepts the full name, the short name from portler.yml (`postgres-data`,
- * with or without the `@`), or a short name with an explicit set
- * (`postgres-data--migration`). Bare short names follow the active volume set.
- */
+/** Accepts the full name, the portler.yml short name (`postgres-data`, `@` optional) or one with a set
+ * (`postgres-data--migration`). Bare short names follow the active volume set. */
 export function resolveVolumeName(config: PortlerConfig, volumeArg: string): string {
   const prefix = volumeScope(config).prefix;
   if (volumeArg.startsWith(prefix)) return volumeArg;
@@ -110,11 +103,8 @@ async function volumeSizes(): Promise<Map<string, string>> {
   return sizes;
 }
 
-/**
- * Names of running containers mounting the volume. A failed query throws: it is not
- * proof that nothing uses the volume, so fork and remove refuse. `bestEffort` (the
- * `volumes` listing) shows nobody instead.
- */
+// A failed query throws: it is no proof that nothing uses the volume, so fork and remove refuse.
+// `bestEffort` (the `volumes` listing) shows nobody instead.
 async function containersUsing(fullName: string, bestEffort = false): Promise<string[]> {
   const query = ['ps', '--filter', `volume=${fullName}`, '--format', '{{.Names}}'];
   let output: string;
@@ -183,10 +173,8 @@ async function volumeExists(fullName: string): Promise<boolean> {
   return result.code === 0;
 }
 
-/**
- * Copies a volume into a new `--<set>` variant. Refuses a source a running
- * container mounts unless `force`. Rolls back the target if the copy fails.
- */
+/** Copies a volume into a new `--<set>` variant. Refuses a source a running container mounts unless `force`;
+ * rolls back the target if the copy fails. */
 export async function forkVolume(config: PortlerConfig, volumeArg: string, rawNewSet: string, force = false): Promise<ForkResult> {
   await ensureDockerRunning();
 
@@ -290,7 +278,7 @@ export async function volumeOwnership(fullName: string, volumeRoot: string): Pro
   return labels === null ? 'absent' : ownershipVerdict(labels, volumeRoot);
 }
 
-/** A volume's labels (empty when unlabelled), or null when it does not exist. */
+// Empty when unlabelled, null when the volume does not exist.
 async function volumeLabels(fullName: string): Promise<Record<string, string> | null> {
   const result = await runDocker(['volume', 'inspect', '--format', '{{json .Labels}}', fullName]);
   if (result.code !== 0) {
@@ -304,7 +292,7 @@ async function volumeLabels(fullName: string): Promise<Record<string, string> | 
   return parseInspectLabels(result.stdout);
 }
 
-/** Remove a project volume, refusing while a running container mounts it unless forced. */
+/** Refuses while a running container mounts the volume, unless `force`. */
 export async function removeVolume(config: PortlerConfig, volumeArg: string, force: boolean): Promise<string> {
   await ensureDockerRunning();
 
@@ -373,7 +361,6 @@ function didYouMean(input: string, candidates: readonly string[]): string | unde
   return best;
 }
 
-/** Managed `@name` volumes the given services would create, per the active run mode. */
 function managedVolumesFor(config: PortlerConfig, serviceNames: readonly string[]): string[] {
   const names = new Set<string>();
 
@@ -397,11 +384,8 @@ export async function missingManagedVolumes(config: PortlerConfig, serviceNames:
   return managed.filter((name) => !existing.has(volumeFullName(volumeScope(config).prefix, name, config.volumeSet)));
 }
 
-/**
- * A mistyped `--volume-set` creates an empty variant, which looks like data loss.
- * Warns when the variant is missing but the base or other sets exist; never throws
- * on Docker errors, which surface when the services start.
- */
+/** A mistyped `--volume-set` creates an empty variant, which looks like data loss: warns when the variant is missing
+ * but the base or other sets exist. Never throws on Docker errors; they surface when the services start. */
 export async function warnMissingVolumeSetVariants(config: PortlerConfig, serviceNames: readonly string[]): Promise<void> {
   if (!config.volumeSet) return;
 
