@@ -9,7 +9,7 @@ export interface ShellOptions {
   signal?: AbortSignal;
   /** Called with every signal that is forwarded to the command's process group. */
   onSignal?: (signal: NodeJS.Signals) => void;
-  /** Ms to wait after the shell exits for the rest of its group, then kill it. Unset: no wait. */
+  /** Ms to wait, at most, after the shell exits for the rest of its group, then kill what is left. Unset: no wait. */
   drainMs?: number;
 }
 
@@ -98,7 +98,7 @@ export async function drainOwnedProcessGroup(pgid: number, deadlineMs: number): 
 
 /**
  * In Portler's own group, so an interactive tool (psql, a REPL) gets Ctrl-C directly; Portler
- * ignores SIGINT and forwards SIGTERM/SIGHUP. Returns the exit status (128 + signal number).
+ * ignores SIGINT and forwards SIGTERM/SIGHUP. Returns the exit status (128 + signal number when a signal ended it).
  */
 export async function runForeground(command: string, cwd: string, env: EnvMap): Promise<number> {
   // Handlers go in before spawn, for the same reason as in runShell.

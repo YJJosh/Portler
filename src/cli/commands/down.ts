@@ -51,8 +51,8 @@ interface RecordedLaunch {
 }
 
 // Undefined if they were started differently, an entry lacks its volume set, PORTLER_VOLUME_SET would
-// move a plain command off the base volumes, or they ran in k8s (no `--image` pin is recorded there,
-// so the command could deploy another image).
+// move a plain command off the base volumes, or they ran in k8s: a portless service has no entry, so
+// its `--image` pin is unknowable and a bare `up k8s` could deploy another image than the one that ran.
 function recordedLaunch(
   serviceNames: readonly string[],
   launches: ReadonlyArray<PidServiceInfo | undefined>,
@@ -110,9 +110,9 @@ export function upSuggestion(
   return parts.join(' ');
 }
 
-// `restart` is the launch the command repeats when it is a `restart`.
 interface Recovery {
   command: string;
+  // The launch `command` repeats when it is a `restart`; undefined for an `up`.
   restart: RecordedLaunch | undefined;
 }
 
@@ -142,7 +142,8 @@ function recovery(
 }
 
 /** A `restart` while a prerequisite runs (`up` refuses then), else an `up`. Undefined without one
- * recorded launch, or with a running prerequisite in another mode or `--prod`, which restart refuses. */
+ * recorded launch, or with a running prerequisite in another mode or `--prod`, which restart refuses.
+ * Offer a returned `restart` only once restart's own plan accepts it (see restartWouldAccept). */
 export function recoveryCommand(
   serviceNames: readonly string[],
   launches: ReadonlyArray<PidServiceInfo | undefined>,

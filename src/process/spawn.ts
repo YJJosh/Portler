@@ -46,7 +46,7 @@ export function spawnService(
     cwd,
     env,
     shell: true,
-    // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren.
+    // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren; foreground mode needs it too.
     detached: true,
     stdio: attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
   });

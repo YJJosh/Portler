@@ -152,7 +152,7 @@ export function applyDockerMode(config: PortlerConfig): PortlerConfig {
   };
 }
 
-/** `--image <service>=<ref>`: replaces `image`, drops `build`. Apply after the run mode; throws unless the service runs in Docker. */
+/** `--image <service>=<ref>`: replaces `image`, drops `build`; the rest comes from the config. Apply after the run mode; throws for an unknown service or one not running in Docker. */
 export function applyImageOverrides(config: PortlerConfig, images: Readonly<Record<string, string>>): PortlerConfig {
   const entries = Object.entries(images);
   if (entries.length === 0) return config;

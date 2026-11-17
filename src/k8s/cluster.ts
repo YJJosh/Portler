@@ -224,7 +224,7 @@ export async function contextExists(context: string, run: CommandRunner = runCom
   return listed.stdout.split('\n').some((line) => line.trim() === context);
 }
 
-/** kind, k3d and minikube run their own container runtime, so a local image is loaded in; the others share the host daemon. */
+/** kind, k3d and minikube run their own container runtime, so a local image is loaded in; Docker Desktop, Rancher Desktop, OrbStack and colima share the host daemon. */
 export async function loadImageIntoCluster(cluster: ClusterInfo, image: string, signal?: AbortSignal): Promise<void> {
   switch (cluster.type) {
     case 'kind': {

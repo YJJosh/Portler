@@ -45,7 +45,7 @@ const KNOWN_FLAGS = [
 // The longest delay a Node timer accepts.
 const MAX_DRAIN_MS = 2_147_483_647;
 
-// As in `docker logs -f` and `kubectl logs -f`; `-f` is `--file` elsewhere.
+// `-f` is `--follow` for `logs` (as in `docker logs -f`), `--file` elsewhere.
 function shortFMeansFollow(command: string): boolean {
   return command === 'logs';
 }
