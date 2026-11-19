@@ -28,9 +28,6 @@ describe('port validation', () => {
   });
 
   it('rejects port 0, which would mean "any port" to the OS', async () => {
-    // Port 0 makes the kernel pick a random port, quietly defeating the entire
-    // point of Portler's assignment and leaving state.json describing a port
-    // nothing is on.
     await assert.rejects(
       loadConfig(await writeConfig('services:\n  api:\n    command: x\n    port: 0\n')),
       /services\.api\.port must be a port between 1 and 65535, got 0/,
@@ -58,8 +55,6 @@ describe('port range validation', () => {
   });
 
   it('rejects an out-of-range bound given via the top-level keys', async () => {
-    // The old code only range-checked when a `port_range:` object was present,
-    // so `port_start: 0` sailed straight through.
     await assert.rejects(
       loadConfig(await writeConfig('port_start: 0\nport_end: 100\nservices:\n  api:\n    command: x\n')),
       /port_start must be a port between 1 and 65535/,

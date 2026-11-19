@@ -17,8 +17,7 @@ const runners = {
   runStreaming: (args: string[], signal: AbortSignal) => runStreaming(process.execPath, args, 'test', undefined, signal),
 };
 
-// A kubectl credential helper or a build helper may inherit the pipes, or close them and
-// keep running. Cancelling must stop it either way, even when its leader exits first.
+// A kubectl credential helper or a build helper may inherit the pipes, or close them and keep running.
 for (const [name, run] of Object.entries(runners)) {
   for (const pipes of ['inherit', 'ignore']) {
     it(`${name} cancellation drains a stubborn helper with ${pipes} stdio`, { timeout: 15_000 }, async () => {
@@ -70,7 +69,7 @@ for (const [name, run] of Object.entries(runners)) {
 }
 
 // macOS answers kill(-pgid) with EPERM once every member of the group is a zombie, as a
-// just-killed helper is until its reaper gets to it. Draining such a group must not throw.
+// just-killed helper is until its reaper gets to it.
 it('drains an owned group left holding only an unreaped zombie', { timeout: 15_000 }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'portler-exec-zombie-'));
   const marker = path.join(dir, 'reaper.pid');

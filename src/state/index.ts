@@ -36,7 +36,6 @@ function isStateFile(value: unknown): value is StateFile {
   );
 }
 
-/** The per-project `.portler/` directory holding runtime state. */
 export function portlerDir(projectDir: string): string {
   return path.join(projectDir, '.portler');
 }
@@ -50,8 +49,7 @@ export function runtimeEnvPath(projectDir: string): string {
 }
 
 export async function readState(projectDir: string): Promise<StateFile | null> {
-  // A copied checkout may carry the source project's `.portler/` directory.
-  // Never reuse that project's assignments under a different identity.
+  // A copied checkout can carry another project's `.portler/`: never reuse its assignments.
   return readValidatedJsonFile(
     statePath(projectDir),
     'Portler state file',

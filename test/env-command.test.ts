@@ -1,8 +1,6 @@
 /**
- * `portler env <service>` for a service that is running: it prints the
- * environment of the launch pids.json records (run mode and --prod), not the
- * plain development view. These drive the real CLI against a temp project with
- * a hand-written pids.json; nothing is started.
+ * `portler env <service>` for a running service prints the env of the launch pids.json
+ * records. Drives the real CLI with a hand-written pids.json; nothing is started.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -85,8 +83,6 @@ describe('env for a running service', () => {
   });
 
   it('rebuilds missing state with the --image pin the running container was started from', async () => {
-    // No state.json: env allocates the assignments again, and the pin recorded in
-    // pids.json, not the image in portler.yml, is what the container runs.
     await record({ runMode: 'docker', dockerContainer: 'c-backend', image: 'example/backend@sha256:pinned' });
     const result = run('backend');
     assert.equal(result.status, 0, result.stderr);
@@ -116,9 +112,8 @@ describe('env for a running service', () => {
   });
 
   it('keeps the --image pin of a stopped launch it shows as the last one', async () => {
-    // The containers have exited: a fake docker reports them gone, so this does not
-    // depend on a real daemon. backend's entry is the launch env shows, so its pin stays;
-    // postgres's stopped entry is not shown, so its image comes from portler.yml.
+    // A fake docker reports the containers gone. backend's entry is the launch env shows;
+    // postgres's is not, so its image comes from portler.yml.
     const bin = path.join(projectDir, 'bin');
     await fs.mkdir(bin);
     await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\necho "Error: No such object: $3" >&2\nexit 1\n', { mode: 0o755 });
@@ -192,8 +187,7 @@ describe('env for a running service', () => {
   });
 
   it('leaves no container name or image from a typed Docker view in the plain one', async () => {
-    // `env docker` allocates (and persists) the Docker view's container metadata; the plain
-    // view of a command-backed service must not name that container afterwards.
+    // `env docker` persists the Docker view's container metadata in state.json.
     const docker = run('docker', 'backend');
     assert.equal(docker.status, 0, docker.stderr);
     assert.ok(value(docker.stdout, 'PORTLER_BACKEND_CONTAINER'), 'the Docker view names the container');
@@ -206,8 +200,7 @@ describe('env for a running service', () => {
   });
 
   it('shows each view\'s own image for a container service with a docker.image override', async () => {
-    // Both views name the same container, so the cached state passes the container-name
-    // check; the image cached by `env docker` must not leak into the plain view.
+    // Both views name the same container, so the cached state passes the container-name check.
     await fs.writeFile(path.join(projectDir, 'portler.yml'), `${CONFIG}  api:
     image: example/api-base
     port: 5000
@@ -300,7 +293,6 @@ describe('env for a running service', () => {
     assert.equal(k8s.status, 1);
     assert.match(k8s.stderr, /service "cache" has no container config for Kubernetes/);
     assert.equal(k8s.stdout, '');
-    // Without a typed mode, the development view of backend is still available.
     assert.equal(run('backend').status, 0);
   });
 
@@ -317,7 +309,6 @@ describe('env for a running service', () => {
     assert.equal(k8s.status, 1);
     assert.match(k8s.stderr, /service "api" has no container config for Kubernetes/);
     assert.equal(k8s.stdout, '');
-    // The development view of the whole project is still available.
     assert.equal(run().status, 0);
   });
 

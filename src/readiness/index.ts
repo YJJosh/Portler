@@ -9,12 +9,8 @@ import { resolveEnvValue, type ResolveOptions } from '../env/index.ts';
 import { usesTcp } from '../ports/transport.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-/**
- * Docker's port proxy accepts every connection on a published port, then
- * closes it straight away while nothing listens inside the container yet.
- * A container port only counts as ready once a connection stays open for
- * this long, or once the peer sends something: the proxy never sends data.
- */
+/** Docker's port proxy accepts, then closes, connections while nothing listens in the container, so a connection
+ * counts once it stays open this long or the peer sends data (the proxy never does). */
 export const DOCKER_TCP_HOLD_MS = 200;
 
 export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs = 0, signal?: AbortSignal): Promise<boolean> {
@@ -38,21 +34,14 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
     socket.on('connect', () => {
       if (holdMs <= 0) return finish(true);
       socket.setTimeout(0);
-      // Bytes from the peer prove a real listener even if it hangs up right
-      // after (a banner, a protocol that answers and closes): Docker's proxy
-      // never sends application data. Attaching the listener also drains the
-      // socket, so a silent peer close is noticed rather than buffered.
+      // Data proves a real listener even if it then hangs up. The listener also
+      // drains the socket, so a silent close is noticed rather than buffered.
       socket.once('data', () => finish(true));
-      // A silent peer has to stay open for the whole hold, and the hold must
-      // end inside this attempt's deadline. A connect that lands with less than
-      // the hold left still gets the time that is left for the peer to answer;
-      // if it stays silent until then it is not ready yet, and the caller
-      // decides whether its overall timeout leaves room for another attempt.
+      // A silent peer must stay open for the whole hold, inside this attempt's
+      // deadline; with less time left it only gets the rest to send data.
       const remaining = deadline - Date.now();
       const fullHoldFits = remaining > holdMs;
-      // Checked again when the timer fires: a blocked event loop can delay
-      // it past the deadline, and a hold that ended late has proved nothing
-      // in time.
+      // Re-check the deadline on fire: a blocked event loop can delay the timer.
       holdTimer = setTimeout(() => finish(fullHoldFits && Date.now() <= deadline), Math.min(holdMs, Math.max(1, remaining)));
     });
     socket.on('end', () => finish(false));
@@ -64,13 +53,8 @@ export function isTcpReady(host: string, port: number, timeoutMs = 1_000, holdMs
 
 async function isHttpReady(url: string, timeoutMs: number, accept?: number[], signal?: AbortSignal): Promise<boolean> {
   try {
-    // A 2xx or 3xx response proves the app answered the request. redirect:
-    // 'manual' returns 3xx responses directly (passing the check) instead of
-    // following them to another host. A 401 or 404 means the server is up but
-    // the route or the credentials are not, so it does not count unless the
-    // config lists it in `accept`. A server that accepts and never responds
-    // must not defeat the overall healthcheck timeout, so every fetch has an
-    // explicit remaining-time signal.
+    // redirect: 'manual' passes a 3xx instead of following it to another host.
+    // The timeout keeps a server that never responds from outlasting the healthcheck.
     const response = await fetch(url, {
       method: 'GET',
       redirect: 'manual',
@@ -90,8 +74,7 @@ function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: nu
       env,
       shell: true,
       stdio: 'ignore',
-      // A healthcheck may spawn children of its own. Put it in a separate group
-      // so timing out can clean the whole probe rather than leak grandchildren.
+      // Its own process group, so a timeout kills the probe's children too.
       detached: true,
     });
 
@@ -161,7 +144,6 @@ async function checkReady(
   }
 }
 
-/** Human-readable summary of what a healthcheck actually probes, for timeout errors. */
 function describeHealthcheck(
   healthcheck: HealthcheckConfig,
   assignment: ServiceAssignment | undefined,
@@ -182,10 +164,7 @@ function describeHealthcheck(
   }
 }
 
-/**
- * Where a service's output went, for error messages: on this terminal when
- * `logFile` is undefined, otherwise in the detached log file.
- */
+/** `logFile` undefined means the output went to this terminal. */
 export function logLocationHint(serviceName: string, logFile: string | undefined): string {
   return logFile === undefined
     ? `Check the "[${serviceName}]" log lines above for the cause`
@@ -198,19 +177,8 @@ const MAX_LOG_REASON_LENGTH = 500;
 const LOG_READ_CHUNK = 64 * 1024;
 const LOG_TAIL_BYTES = 1024 * 1024;
 
-/**
- * Portler's own refusals from a detached service's log. The launch shell
- * builds the image first and then checks the network, volumes and container
- * name, exiting at the first one that is not this project's, so a refusal is
- * the last thing it writes, after any build output. The log is truncated on
- * every start, so these lines belong to this run. A foreground run already
- * shows them above.
- *
- * Only the last MiB the log held when the scan started is read, 64 KiB at a
- * time: a long build costs nothing beyond that, and a process left behind
- * that keeps appending cannot keep the scan going. At most the start of one
- * line and the last three refusals are held.
- */
+/** The last few `[portler] error:` lines of a detached service's log (truncated on every start). Reads only the last MiB
+ * present when the scan starts, so a long build or a still-appending process cannot make it slow or endless. */
 export function portlerErrorsInLog(logFile: string): string[] {
   let fd: number;
   try {
@@ -242,9 +210,7 @@ export function portlerErrorsInLog(logFile: string): string[] {
   };
   try {
     const end = fstatSync(fd).size;
-    // A window that starts inside a line drops that line: read from one byte
-    // earlier and discard through the first newline, which is that byte when
-    // the window starts on a line of its own.
+    // Start one byte early and drop through the first newline, so a partial first line is skipped.
     let position = end > LOG_TAIL_BYTES ? end - LOG_TAIL_BYTES - 1 : 0;
     let skipping = position > 0;
     const decoder = new StringDecoder('utf8');
@@ -283,8 +249,7 @@ export function portlerErrorsInLog(logFile: string): string[] {
 function exitedError(service: ServiceConfig, logFile: string | undefined): Error {
   const buildHint = service.docker?.build ? ' (this includes "docker build" failures)' : '';
   const reasons = logFile === undefined ? [] : portlerErrorsInLog(logFile);
-  // "The same command": a bare `up <name>` would drop the mode and flags the
-  // stack was started with.
+  // "The same command": a bare `up <name>` would drop the stack's mode and flags.
   if (reasons.length > 0) {
     return new Error(
       `service "${service.name}" exited before it became ready: ${reasons.join(' ')} ` +
@@ -296,10 +261,7 @@ function exitedError(service: ServiceConfig, logFile: string | undefined): Error
   );
 }
 
-/**
- * Poll a service's healthcheck until it passes, the configured timeout
- * elapses, or the child process exits early.
- */
+/** Polls the healthcheck. Throws on its timeout, when the child exits first, or on abort. */
 export async function waitForServiceReady(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -329,8 +291,7 @@ export async function waitForServiceReady(
 
     const remainingMs = Math.max(1, healthcheck.timeoutMs - (Date.now() - startedAt));
     const ready = await checkReady(config, service, env, assignments, assignment, healthcheck, remainingMs, tcpHoldMs, signal, resolve);
-    // The probe can pass against a port whose process died while it ran: Docker's
-    // proxy keeps accepting, a hold timer keeps ticking. The exit wins.
+    // A probe can pass after the process died (Docker's proxy keeps accepting), so the exit wins.
     signal?.throwIfAborted();
     if (childHasExited()) throw exitedError(service, logFile);
     if (ready) {

@@ -1,10 +1,5 @@
-/**
- * Standalone proxy entry point, spawned by `portler up` as its own process
- * (group) so the proxy follows the same lifecycle as services: tracked in
- * pids.json, killed by `portler down`, and able to outlive `up --detach`.
- *
- * argv[2] carries the JSON-encoded ProxyServerOptions.
- */
+// Proxy process spawned by `up`, tracked and stopped like a service. argv[2] is the
+// JSON-encoded ProxyServerOptions.
 import { isProxyServerOptions, startProxyServer } from './server.ts';
 
 function fail(message: string): never {

@@ -15,18 +15,16 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
   const config = applyProduction(configForRunMode(rawConfig, mode), args.prod);
   const names = expandAndOrderServices(config, requested);
   if (mode === 'docker') validateDockerMode(config, names);
-  // Every selected service's folder is checked before anything runs, including services
-  // with no setup steps: a missing cwd is reported before the project's own steps have
-  // had any side effects, the same as `up` does.
+  // Check every selected cwd, also of services without steps, so a missing one fails
+  // before any project step has side effects, as in `up`.
   for (const name of names) assertServiceCwd(config, config.services[name]!);
   return withLifecycleLock(config.projectDir, async () => {
     const { assignments, generatedEnv } = await ensureAssignments(config);
-    // A missing env file is skipped in every mode here: on a fresh checkout the file is
-    // often what setup (or the tool that ran it) creates, and its values are read before
-    // the steps run anyway. `up` in development still requires it.
+    // Setup often creates the env file on a fresh checkout, so a missing one is allowed
+    // here in every mode. `up` in development still requires it.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true });
     assertEnvRequirements(config, names, baseEnv);
-    // REVIEW: An unused project view must not reject shared service self.* env.
+    // Only build the project view for project steps: it rejects `self.*` in shared env.
     const projectEnv = config.setup?.length ? buildProjectEnv(config, baseEnv, assignments, generatedEnv) : {};
     // Setup steps run on this machine, also for a container service, so they get its env as
     // seen from here: `${db.address}` is the database's port on this machine, not its alias.
@@ -34,7 +32,7 @@ export async function commandSetup(args: ParsedArgs): Promise<number> {
     for (const name of names) {
       serviceEnvs.set(name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments, { viewer: 'host' }).env);
     }
-    // REVIEW: Validate resolved values too, before any setup command runs.
+    // Check the resolved values too, before any setup step runs.
     assertEnvRequirements(config, names, baseEnv, { projectEnv, envs: serviceEnvs });
     const setupMode = setupModeKey(config, mode, args.prod);
     await pruneSetupReceipts(config, setupMode);

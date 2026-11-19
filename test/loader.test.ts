@@ -165,8 +165,7 @@ describe('loadConfig', () => {
   it('rejects service names that collapse onto the same generated env prefix', async () => {
     for (const [left, right, prefix] of [
       ['api-main', 'api_main', 'API_MAIN'],
-      // buildGeneratedEnv strips trailing punctuation; validation must use the
-      // same normalization rather than let the second service overwrite api.
+      // buildGeneratedEnv strips trailing punctuation, so `api-` collides with `api`.
       ['api', 'api-', 'API'],
     ]) {
       const dir = await makeProject({

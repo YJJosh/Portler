@@ -66,20 +66,16 @@ describe('setup', () => {
 services: {db: {image: postgres, volumes: ['@data:/var/lib/postgresql']}}`);
     assert.equal(setupModeKey(withVolumes, 'local', false), 'local:dev');
     assert.equal(setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'docker', true), 'docker:prod@feature');
-    // A migration that ran against one set's database runs again for an empty one.
     await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
     await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
     await runSetupStep(withVolumes, null, {}, setupModeKey({ ...withVolumes, volumeSet: 'feature' }, 'local', false));
     await runSetupStep(withVolumes, null, {}, setupModeKey(withVolumes, 'local', false));
     assert.deepEqual(await lines(), ['migrate', 'migrate']);
-    // Pruning one set's receipts leaves the others alone.
     await pruneSetupReceipts({ ...withVolumes, setup: [] }, 'local:dev');
     const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
     assert.deepEqual(Object.keys(state.steps), ['local:dev@feature:project']);
   });
 
-  // REVIEW: Top-level env is also each service's env; do not resolve a
-  // nonexistent top-level setup's self-less view before using the service view.
   it('allows shared self references when no project setup reads them, or setup is skipped', async () => {
     const text = `env: { SERVICE_LABEL: '\${self.name}' }
 services:
@@ -120,8 +116,6 @@ services:
     assert.match((await lines())[0]!, /^localhost:\d+ localhost:\d+$/, 'not the container alias db:5432');
   });
 
-  // REVIEW: Both run modes and both production settings may share a volume;
-  // preserve other volume sets and the separate prod scope of a named project.
   it('forgets every receipt using the recreated volume scope and set', async () => {
     const cfg = await config(`setup: echo migrate >> steps
 services: {db: {image: redis, volumes: ['@data:/data']}}`);
@@ -161,14 +155,10 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await assert.rejects(runSetupStep(cfg, null, {}, 'local:dev'), /setup project: command "exit 7" failed \(exit code 7\)/);
     }
-    // The first step succeeded once and is not run again; the failed one and
-    // the one after it have no receipt.
     assert.deepEqual(await lines(), ['first']);
     const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
     assert.equal(state.version, 2);
     assert.deepEqual(state.steps, { 'local:dev:project': [setupFingerprint('echo first >> steps', dir, 'local:dev')] });
-    // A forced run drops the receipts before running, so the first step runs
-    // again; only its fresh success is recorded, nothing for the failed step.
     await assert.rejects(runSetupStep(cfg, null, {}, 'local:dev', true), /exit code 7/);
     assert.deepEqual(await lines(), ['first', 'first']);
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8')).steps, {
@@ -200,8 +190,6 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
     const statePath = path.join(dir, '.portler/setup.json');
     const second = setupFingerprint('echo same >> steps', dir, 'local:dev', 1, 2);
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')).steps, { 'local:dev:project': [second] });
-    // Dropping the guard enables the first entry: it runs as occurrence 0,
-    // while the second entry keeps its receipt instead of handing it over.
     cfg.setup = [{ run: 'echo same >> steps' }, { run: 'echo same >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['same', 'same']);
@@ -214,8 +202,7 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
     const api = cfg.services.api;
     await runSetupStep(cfg, api, {}, 'local:dev');
     assert.deepEqual(await lines(), ['A']);
-    // The step changes while only other owners run (`up web`), then changes
-    // back: the old success must not be inherited.
+    // The step changes while only other owners run (`up web`), then changes back.
     api.setup = [{ run: 'echo B >> steps' }];
     await pruneSetupReceipts(cfg, 'local:dev');
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8')).steps, { 'local:dev:service:api': [] });
@@ -230,9 +217,6 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
     cfg.setup = [{ run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['y', 'x']);
-    // A duplicate of x prepended: the old receipt must not go to the new first
-    // entry, which would skip it and run y before the other x. The count of x
-    // entries changed, so both run, in list order.
     cfg.setup = [{ run: 'echo x >> steps' }, { run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['y', 'x', 'x', 'y', 'x']);
@@ -240,7 +224,6 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
       setupFingerprint('echo x >> steps', dir, 'local:dev', 0, 2),
       setupFingerprint('echo x >> steps', dir, 'local:dev', 1, 2),
     ]);
-    // Removing a duplicate changes the count again: the remaining x runs once more.
     cfg.setup = [{ run: 'echo y >> steps', always: true }, { run: 'echo x >> steps' }];
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['y', 'x', 'x', 'y', 'x', 'y', 'x']);
@@ -275,7 +258,6 @@ services: {db: {image: redis, volumes: ['@data:/data']}}`);
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['a', 'a']);
 
-    // Without steps and without receipts nothing is written.
     await fs.rm(statePath);
     cfg.setup = undefined;
     await runSetupStep(cfg, null, {}, 'local:dev');
@@ -298,8 +280,6 @@ services:
     await runSetupStep(cfg, cfg.services.app!, {}, 'local:dev');
     assert.deepEqual(await lines(), ['install', 'plain', 'generate']);
 
-    // Once the paths exist the guarded steps are skipped; the plain step has
-    // its receipt. Force reruns the plain step but not the guarded ones.
     await fs.mkdir(path.join(dir, 'node_modules'));
     await fs.mkdir(path.join(dir, 'app', 'generated'));
     await fs.writeFile(path.join(dir, 'app', 'generated', 'client.ts'), '');
@@ -310,16 +290,12 @@ services:
     await runSetupStep(cfg, cfg.services.app!, {}, 'local:dev', true);
     assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain']);
 
-    // Deleting what a guarded step produced makes it run again; a file at the
-    // path counts as much as a directory.
     await fs.rm(path.join(dir, 'node_modules'), { recursive: true });
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain', 'install']);
     await fs.writeFile(path.join(dir, 'node_modules'), '');
     await runSetupStep(cfg, null, {}, 'local:dev');
     assert.deepEqual(await lines(), ['install', 'plain', 'generate', 'plain', 'install']);
-    // Guarded steps never get a receipt: the service, which has nothing else,
-    // has no entry at all.
     const state = JSON.parse(await fs.readFile(path.join(dir, '.portler/setup.json'), 'utf8'));
     assert.deepEqual(state.steps, { 'local:dev:project': [setupFingerprint('echo plain >> steps', dir, 'local:dev')] });
   });
@@ -383,7 +359,6 @@ services:
     const env = buildProjectEnv(cfg, { KEY: 'file', ONLY_FILE: 'value' }, {});
     assert.equal(env.KEY, 'root');
     assert.equal(env.ONLY_FILE, 'value');
-    // Production: the deployment wins over config, and the process env over the file.
     assert.equal(buildProjectEnv(applyProduction(cfg, true), { KEY: 'file' }, {}).KEY, 'file');
     const saved = process.env.KEY;
     process.env.KEY = 'shell';
@@ -423,17 +398,13 @@ services:
     const keys = async () => Object.keys(JSON.parse(await fs.readFile(statePath, 'utf8')).steps).sort();
     assert.deepEqual(await keys(), ['local:dev:project', 'local:dev:service:api', 'local:prod:service:api']);
 
-    // api left the config: explicit setup reconciles the dev receipts before it
-    // runs what is left; the prod receipt belongs to another mode and stays.
     await config('setup: echo root >> steps\nservices: {web: {command: echo}}');
     await commandSetup(parseArgs([], 'setup'));
     assert.deepEqual(await keys(), ['local:dev:project', 'local:prod:service:api']);
 
-    // Back with the same step, api runs again instead of looking done.
     await runSetupStep(cfg, cfg.services.api!, {}, 'local:dev');
     assert.deepEqual(await lines(), ['root', 'api', 'api', 'root', 'api']);
 
-    // An owner that merely lost its steps is pruned too; nothing to prune writes nothing.
     const bare = await config('services: {web: {command: echo}}');
     await pruneSetupReceipts(bare, 'local:dev');
     assert.deepEqual(await keys(), ['local:prod:service:api']);
@@ -521,7 +492,6 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       assert.deepEqual(await lines(), ['prod']);
       assert.equal((await readPids(dir))?.services.api?.prod, true, 'the run mode is recorded');
 
-      // A routine restart replays the recorded launch: the stack stays in production.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['prod', 'prod']);
       assert.equal((await readPids(dir))?.services.api?.prod, true, 'replayed and recorded again');
@@ -607,15 +577,12 @@ services:
       assert.ok(pid);
       assert.deepEqual(await lines(), ['prod']);
 
-      // No --prod on the command line: the replayed one still checks prod.require
-      // while api is up.
       delete process.env.DEPLOY_SECRET;
       await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service api requires DEPLOY_SECRET in production/);
       assert.equal((await readPids(dir))?.services.api?.pid, pid, 'api was not stopped');
       assert.doesNotThrow(() => process.kill(pid, 0), 'api is still running');
       assert.deepEqual(await lines(), ['prod'], 'nothing was restarted');
 
-      // And it narrows to prod.services like a typed --prod: db is neither checked nor started.
       process.env.DEPLOY_SECRET = 's';
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['prod', 'prod']);
@@ -623,8 +590,6 @@ services:
       assert.equal(after?.services.api?.prod, true, 'replayed and recorded again');
       assert.equal(after?.services.db, undefined, 'db stays the deployment\'s');
 
-      // Without names too: every service in the config would include db, which the
-      // replayed --prod leaves to the deployment.
       await commandRestart(parseArgs([], 'restart'));
       assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
       assert.deepEqual(Object.keys((await readPids(dir))?.services ?? {}), ['api']);
@@ -669,7 +634,6 @@ services:
       const dbPid = (await readPids(dir))?.services.db?.pid;
       assert.ok(dbPid);
 
-      // The same as `restart api --prod`: db has no say in the replayed mode.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'prod', 'prod']);
       const after = await readPids(dir);
@@ -677,11 +641,9 @@ services:
       assert.equal(after?.services.db?.pid, dbPid, 'db was left alone');
       assert.notEqual(after?.services.db?.prod, true);
 
-      // db itself still restarts as what it is.
       await commandRestart(parseArgs(['db'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'prod', 'prod', 'dev']);
 
-      // Restarting everything takes in both, and there is no one mode for that.
       const before = await readPids(dir);
       await assert.rejects(commandRestart(parseArgs([], 'restart')), /no one mode to replay/);
       assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
@@ -726,16 +688,12 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       await commandUp(parseArgs(['api', 'web', '-d', '--prod'], 'up'));
       assert.deepEqual(await lines(), ['prod', 'prod', 'prod']);
 
-      // api has since been dropped from prod.services: its record still says --prod, and a
-      // plain restart is refused the way `restart api --prod` is, with api still running.
       await config(`prod:\n  services: [db, web]\n${services}`);
       const before = await readPids(dir);
       await assert.rejects(commandRestart(parseArgs(['api'], 'restart')), /service "api" is not in prod\.services/);
       assert.deepEqual(await readPids(dir), before, 'nothing was stopped');
 
-      // web is not running and db, which it depends on, has died and been dropped too: the
-      // only record the restart sees is db's, which replays --prod, and web starts in
-      // production without db (the deployment's under --prod).
+      // db's record, the only one left, replays --prod, so web starts in production without db.
       await commandDown(parseArgs(['web'], 'down'));
       const dbPid = before?.services.db?.pid;
       assert.ok(dbPid);
@@ -782,16 +740,12 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
       assert.deepEqual(await lines(), ['dev', 'dev']);
       assert.equal((await readPids(dir))?.services.db?.prod, false, 'development is recorded explicitly');
 
-      // restart skips the running db, so db would stay in development while api
-      // came back in production: refused before anything is stopped.
       await assert.rejects(commandRestart(parseArgs(['api', '--prod'], 'restart')), /db is running in development mode/);
       assert.deepEqual(await lines(), ['dev', 'dev'], 'nothing was restarted');
 
-      // Same mode: api restarts and db is left running.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
 
-      // Restarting everything may switch the whole stack: nothing is left behind in the other mode.
       await commandRestart(parseArgs(['--prod'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev', 'prod', 'prod']);
       assert.equal((await readPids(dir))?.services.db?.prod, true);
@@ -820,13 +774,11 @@ services:
       await commandUp(parseArgs(['api', '-d', '--no-setup'], 'up'));
       assert.deepEqual(await lines(), ['dev']);
       assert.equal((await readPids(dir))?.services.api?.setup, false, '--no-setup is recorded');
-      // Without the flag, restart replays --no-setup.
       await commandRestart(parseArgs(['api'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev']);
       assert.equal((await readPids(dir))?.services.api?.setup, false, 'and records it again');
       await commandRestart(parseArgs(['api', '--no-setup'], 'restart'));
       assert.deepEqual(await lines(), ['dev', 'dev', 'dev']);
-      // --setup overrides the recorded policy: the failing step runs, after api was stopped.
       await assert.rejects(commandRestart(parseArgs(['api', '--setup'], 'restart')), /failed \(exit code 17\)/);
     } finally {
       await commandDown(parseArgs([], 'down')).catch(() => {});
@@ -873,9 +825,6 @@ services:
       assert.deepEqual(await lines(), ['db', 'api', 'db']);
       assert.equal(await setups(), 'x');
 
-      // api ran its setup and db skipped it. db dies during api's stop and would come back
-      // too, so its record takes part in the setup choice: the two disagree, and restart says
-      // so instead of starting db with api's setup steps.
       await assert.rejects(
         commandRestart(parseArgs(['api'], 'restart')),
         /db exited on its own while restart was stopping api, and starting again is refused: db was started with --no-setup and api with its setup steps.*Nothing was started, so api is stopped/s,
@@ -883,7 +832,6 @@ services:
       assert.deepEqual(await lines(), ['db', 'api', 'db'], 'nothing was started');
       assert.equal(await setups(), 'x', 'no setup ran');
 
-      // With both recorded --no-setup, db comes back with api, both without setup.
       await commandRestart(parseArgs(['--no-setup'], 'restart'));
       assert.deepEqual(await lines(), ['db', 'api', 'db', 'db', 'api']);
       const dbBefore = (await readPids(dir))?.services.db?.pid;
@@ -999,8 +947,6 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     const savedPath = process.env.PATH;
     process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ''}`;
     try {
-      // db is kept (its container runs), api starts; the check that a kept dependency is
-      // still alive after api's level must ask about the container, not the gone shell.
       await startPhase(loaded, 'local', ['api'], { detach: true, skipRunning: true, expectStart: ['api'] });
       const after = await readPids(loaded.projectDir);
       assert.deepEqual(after?.services.db, dbEntry, 'db was not touched');
@@ -1072,11 +1018,8 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
   });
 
   it('startPhase notices a kept pid-backed dependency that exits while another is still being inspected', async () => {
-    // api writes a marker as it starts, before it listens, so the marker exists before
-    // its readiness check can connect; from then on the fake docker below kills cache
-    // partway through its inspect of db. The only inspect of db before api starts is the
-    // one that selects what to start, and that one sees no marker. (Writing the marker in
-    // the server's connection handler raced the readiness check on slow runners.)
+    // api writes a marker before it listens (in the request handler it races readiness on
+    // slow runners); from then on the fake docker kills cache partway through inspecting db.
     const marker = path.join(dir, 'api-ready');
     await fs.writeFile(path.join(dir, 'server.mjs'), `
 import fs from 'node:fs';
@@ -1176,8 +1119,7 @@ http.createServer((req, res) => res.end('ok')).listen(Number(process.env.PORT), 
     port_env: PORT
     env: {MODE: dev}
 `);
-      // old is no longer in the config but is recorded in production mode: the stack was
-      // production, so the restart stops old and starts the current config in production.
+      // old is no longer in the config but is recorded in production mode.
       await commandRestart(parseArgs([], 'restart'));
       assert.deepEqual(await lines(), ['prod', 'dev'], 'new has no prod env, so its MODE stays dev');
       assert.equal((await readPids(dir))?.services.old, undefined, 'old is gone');

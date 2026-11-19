@@ -225,7 +225,6 @@ describe('allocateAssignments', () => {
       const config = makeConfig('/project-a', [makeService('api'), makeService('web', { port: 3000 })]);
       const assignments = await allocateAssignments(config, null, ['web'], new Set(['api']));
 
-      // api is running on its registered (busy) port and must keep it.
       assert.equal(assignments.api!.port, busyPort);
       assert.notEqual(assignments.web!.port, busyPort);
     } finally {
@@ -241,11 +240,9 @@ describe('allocateAssignments', () => {
       const recorded = { api: { port: busyPort } };
       const assignments = await allocateAssignments(config, null, ['web'], running, { recorded });
 
-      // api listens on busyPort; probing would move it and env would advertise the wrong port.
       assert.equal(assignments.api!.port, busyPort);
       assert.notEqual(assignments.web!.port, busyPort);
 
-      // Only running services take the recorded port; a stopped one is probed as before.
       const stopped = await allocateAssignments(config, null, ['api'], NO_RUNNING, { recorded });
       assert.notEqual(stopped.api!.port, busyPort);
     } finally {
@@ -310,9 +307,8 @@ describe('pruneRegistry', () => {
     const { port: busyPort, close } = await occupyPort();
     try {
       const staleTime = new Date(Date.now() - 10 * 60_000).toISOString();
-      // REVIEW: test files run in parallel, so another one can take the "free"
-      // port right after it is released and the entry is rightly kept. Try a new
-      // port then. A prune that never drops free ports still fails all attempts.
+      // Test files run in parallel, so another one can take the "free" port and the
+      // entry is rightly kept. Retry on a new port; a broken prune fails every attempt.
       let dropped = false;
       for (let attempt = 0; attempt < 5 && !dropped; attempt += 1) {
         const freePort = await findFreePort();
@@ -372,17 +368,8 @@ describe('readRegistry', () => {
 
 describe('own-port reclaim respects in-flight reservations', () => {
   it('does not hand one port to two services of the same project', async () => {
-    // The regression. Both services are being (re)started, so their registry
-    // entries are dropped up front to let each reclaim its previous port:
-    //
-    //   - "web" has a stale registry reservation on port P.
-    //   - "api"'s previous port (from state.json) is also P.
-    //
-    // Nothing is listening on P (both services are stopped), so P probes as
-    // free. "api" is allocated first and takes P. Then "web"'s own-port reclaim
-    // returned P as well — it only checked isPortFree and ignored reservedPorts,
-    // which by then already contained the port just handed to "api". Both
-    // services then raced to bind the same port.
+    // web has a stale registry reservation on P and api's state.json port is P.
+    // Both are stopped, so P probes free and api, allocated first, takes it.
     const port = await findFreePort();
     const projectDir = '/project-reclaim';
 
@@ -408,10 +395,8 @@ describe('own-port reclaim respects in-flight reservations', () => {
       assignments.web!.port,
       `both services were assigned port ${assignments.api!.port}`,
     );
-    // One of them still legitimately reclaims the free port.
     assert.ok([assignments.api!.port, assignments.web!.port].includes(port));
 
-    // And the registry must not collapse the two reservations onto one key.
     const registry = await readRegistry();
     const owned = Object.values(registry.ports).filter((entry) => entry.project === projectDir);
     assert.equal(owned.length, 2);

@@ -3,9 +3,8 @@ import type { PortRange } from './types/index.ts';
 
 const requireJson = createRequire(import.meta.url);
 
-// Read at runtime so `npm version` bumps cannot drift from what --version
-// reports. Two layouts: in dev this file is src/constants.ts (package.json
-// one level up); published it is dist/src/constants.js (two levels up).
+// Read at runtime so --version cannot drift from package.json, which is one level
+// up from src/ in dev and two from dist/src/ when published.
 function readPackageVersion(): string {
   try {
     return (requireJson('../package.json') as { version: string }).version;
@@ -22,9 +21,5 @@ export const DEFAULT_PORT_RANGE: PortRange = { start: 51000, end: 59999 };
 export const DEFAULT_HEALTHCHECK_TIMEOUT_MS = 60_000;
 export const DEFAULT_HEALTHCHECK_INTERVAL_MS = 500;
 
-/**
- * Name under which the reverse proxy appears in assignments, state.json,
- * pids.json, and the port registry. Reserved as a service name whenever a
- * `proxy:` block exists.
- */
+/** The proxy's name in assignments and state files; reserved as a service name when `proxy:` exists. */
 export const PROXY_SERVICE_NAME = 'proxy';

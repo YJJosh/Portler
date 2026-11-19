@@ -74,8 +74,6 @@ services:
     assert.equal(env.FROM_ROOT, 'root');
     assert.equal(env.FROM_FILE, 'file');
     assert.equal(env.PORT, '4000');
-    // File values are used as written, like in up and setup: a hostname that merely looks like a
-    // reference is not resolved, and a config reference the file overrides is not resolved either.
     const literal = await buildStartEnv(cfg, api, { SHARED: 'missing.url', LITERAL: '${db.port}' }, {});
     assert.equal(literal.SHARED, 'missing.url');
     assert.equal(literal.LITERAL, '${db.port}');
@@ -85,9 +83,7 @@ services:
     delete api.env.BROKEN;
   });
 
-  // REVIEW: start is deployment-first even without --prod; exports must not
-  // re-read the exporting service using up's development precedence.
-  it('resolves exports from the same deployment-first env that start hands the service', async () => {
+  it('resolves exports from the same deployment-first env that start hands the service, with or without --prod', async () => {
     const raw = await config(`services:
   api:
     command: echo
@@ -119,8 +115,7 @@ services:
   });
 
   it('treats toString and constructor as ordinary variable names', async () => {
-    // Object.prototype members are valid variable names. A plain `in` or index lookup on the
-    // platform or file map found the inherited member and silently dropped the config value.
+    // An `in` or index lookup on a plain object finds these on Object.prototype.
     const cfg = await config(`env: {toString: root-string}
 services:
   api:
@@ -132,7 +127,6 @@ services:
     const env = await buildStartEnv(cfg, api, {}, {});
     assert.equal(env.toString, 'root-string');
     assert.equal(env.constructor, 'service-ctor');
-    // The usual order still holds for such a name: file over config, platform over file.
     assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, {})).constructor, 'file');
     assert.equal((await buildStartEnv(cfg, api, { constructor: 'file' }, { constructor: 'platform' })).constructor, 'platform');
   });
@@ -152,8 +146,8 @@ services:
     const env = await buildStartEnv(cfg, api, {}, {
       PORT: '5123', API_PORT: '1', PORTLER_API_URL: 'stale', PORTLER_WEB_URL: 'stale', PORTLER_SERVICE_NAME: 'web', KEEP: 'platform',
     });
-    assert.equal(env.PORT, '5123'); // the platform's PORT selects the port...
-    assert.equal(env.API_PORT, '5123'); // ...and every port_env name follows that choice
+    assert.equal(env.PORT, '5123');
+    assert.equal(env.API_PORT, '5123');
     assert.match(env.PORTLER_API_URL!, /:5123$/);
     assert.match(env.PORTLER_WEB_URL!, /:3000$/);
     assert.equal(env.PORTLER_SERVICE_NAME, 'api');
@@ -218,12 +212,10 @@ services:
       else gone = true;
     }
     assert.ok(gone, 'the leftover was killed at the deadline');
-    // A group that empties on its own ends the wait early.
     startedAt = Date.now();
     assert.equal(await runShell('sleep 0.2 & exit 0', cfg.projectDir, {}, { drainMs: 5000 }), 0);
     const early = Date.now() - startedAt;
     assert.ok(early >= 150 && early < 3000, `returned after ${early} ms, when the group emptied`);
-    // Without drainMs the call returns with the shell, whatever it left running.
     startedAt = Date.now();
     assert.equal(await runShell('sleep 30 & echo $! > bg2.pid; exit 0', cfg.projectDir, {}), 0);
     assert.ok(Date.now() - startedAt < 1000);
@@ -301,8 +293,7 @@ services:
     assert.equal(await fs.readFile(path.join(cfg.projectDir, 'port'), 'utf8'), '4567');
   });
 
-  // REVIEW: One diagnostic must include platform PORT and every other missing key.
-  it('aggregates start port requirements with production and required:true keys', async () => {
+  it('reports a missing platform PORT with every other missing production and required: true key in one error', async () => {
     const cfg = await config(`services:
   api:
     command: echo started > started

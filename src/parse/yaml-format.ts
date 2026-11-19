@@ -1,8 +1,4 @@
-/**
- * Minimal block-style YAML writer for the plain objects Portler generates
- * (Kubernetes manifests). Supports nested maps, arrays, strings, numbers,
- * booleans, and null; strings that could be misread are quoted.
- */
+// Block-style YAML writer for the plain objects Portler generates (Kubernetes manifests).
 
 const SAFE_PLAIN = /^[A-Za-z0-9_./@-][A-Za-z0-9_./@:+-]*$/;
 const LOOKS_TYPED = /^(?:true|false|null|~|yes|no|on|off|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/i;
@@ -13,8 +9,7 @@ function formatScalar(value: unknown): string {
   if (typeof value !== 'string') throw new Error(`cannot serialize ${typeof value} to YAML`);
 
   if (SAFE_PLAIN.test(value) && !LOOKS_TYPED.test(value) && !value.endsWith(':')) return value;
-  // Double-quoted (JSON) style covers newlines, tabs, and other control
-  // characters that single-quoted YAML cannot express.
+  // Single-quoted YAML cannot express control characters; JSON style can.
   if (/[\x00-\x1f"\\]/.test(value)) return JSON.stringify(value);
   return `'${value.replaceAll("'", "''")}'`;
 }
@@ -33,8 +28,7 @@ function writeValue(value: unknown, indent: number, lines: string[]): void {
         continue;
       }
 
-      // Render the item indented one level, then fold "- " into its first
-      // line — the standard compact block-sequence layout.
+      // Compact layout: "- " goes on the item's first line.
       const itemLines: string[] = [];
       writeValue(item, indent + 2, itemLines);
       if (itemLines.length === 0) {
@@ -63,7 +57,6 @@ function writeValue(value: unknown, indent: number, lines: string[]): void {
   }
 }
 
-/** Serialize one document (a plain object) to block-style YAML. */
 export function formatYaml(document: unknown): string {
   if (isScalar(document)) return `${formatScalar(document)}\n`;
 
@@ -72,7 +65,6 @@ export function formatYaml(document: unknown): string {
   return `${lines.join('\n')}\n`;
 }
 
-/** Serialize multiple documents into one `---`-separated YAML stream. */
 export function formatYamlDocuments(documents: unknown[]): string {
   return documents.map((document) => `---\n${formatYaml(document)}`).join('');
 }

@@ -1,19 +1,3 @@
-/**
- * Hand-rolled indentation-based parser for the practical YAML subset that
- * portler.yml and Docker-Compose-style files use.
- *
- * Supported: nested mappings and block sequences (including mappings and
- * nested sequences inside `- ` items), inline [] / {} flow collections
- * (which may span multiple lines), single/double-quoted strings with escapes,
- * literal (|) and folded (>) block scalars with chomping indicators, quoted
- * keys, `#` comments, true/false/null/~, integer/float literals, and a
- * leading `---` document marker. Parse failures throw YamlParseError carrying
- * the source name and 1-based line (and column, where known).
- *
- * Deliberately not supported (throws a clear error instead of mis-parsing):
- * anchors/aliases (& and *), tags (!), multiple documents, complex (`? `)
- * keys, and tab indentation.
- */
 import { YamlParseError } from './errors.ts';
 import { findUnquoted, stripComment } from './scan.ts';
 import { isObject } from '../util/guards.ts';
@@ -43,11 +27,7 @@ function isSequenceItem(text: string): boolean {
   return text === '-' || text.startsWith('- ');
 }
 
-/**
- * Find the `:` that separates a mapping key from its value: the first
- * unquoted colon followed by whitespace or end-of-line. Colons inside quotes
- * or URLs (`http://...`) do not match.
- */
+// The first unquoted colon followed by whitespace or end of line, so `http://...` does not match.
 function findKeySeparator(text: string): number {
   return findUnquoted(text, (char, index) => {
     if (char !== ':') return false;
@@ -69,11 +49,7 @@ const DOUBLE_QUOTE_ESCAPES: Record<string, string> = {
   '/': '/',
 };
 
-/**
- * Read a quoted string starting at `start` (which must be a quote character).
- * Double quotes support backslash escapes (including \uXXXX); single quotes
- * support the doubled `''` escape. Returns null when the string never closes.
- */
+// `start` is the opening quote; null when the string never closes.
 function readQuotedString(text: string, start: number): QuotedString | null {
   const quote = text[start]!;
   let value = '';
@@ -122,7 +98,6 @@ function readQuotedString(text: string, start: number): QuotedString | null {
   return null;
 }
 
-/** Apply YAML 1.2 core typing rules to a plain (unquoted) scalar. */
 function typedScalar(text: string): unknown {
   if (text === '') return null;
   if (text === 'true' || text === 'True' || text === 'TRUE') return true;
@@ -135,7 +110,6 @@ function typedScalar(text: string): unknown {
   return text;
 }
 
-/** Net `[`/`{` vs `]`/`}` bracket balance outside quotes, for multi-line flow. */
 function flowDepthDelta(text: string): number {
   let depth = 0;
   let quote: '"' | "'" | null = null;
@@ -166,19 +140,12 @@ function flowDepthDelta(text: string): number {
   return depth;
 }
 
-/**
- * Assign without ever writing to the prototype chain, so hostile keys like
- * `__proto__` cannot pollute the parsed object.
- */
+// Never writes to the prototype chain, so hostile keys like `__proto__` cannot pollute the parsed object.
 function defineKey(target: UnknownMap, key: string, value: unknown): void {
   Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
-/**
- * Fold the content lines of a `>` block scalar: consecutive content lines
- * join with a space, blank lines become newlines, and more-indented lines
- * keep their literal line breaks.
- */
+// YAML `>` folding: content lines join with a space, blank lines become newlines, more-indented lines keep their breaks.
 function foldLines(lines: string[]): string {
   let output = '';
   let previousIsContent = false;
@@ -201,7 +168,6 @@ function foldLines(lines: string[]): string {
   return output;
 }
 
-/** Recursive-descent parser for inline `[...]` and `{...}` flow collections. */
 class FlowParser {
   private readonly text: string;
   private readonly source: string;
@@ -231,8 +197,7 @@ class FlowParser {
   }
 
   private fail(message: string): never {
-    // The column is only meaningful when the flow value sat on a single line;
-    // multi-line flow collections are joined before parsing.
+    // Multi-line flow collections are joined before parsing, so their column means nothing.
     const column = this.singleLine ? this.position + 1 : undefined;
     throw new YamlParseError(this.source, this.lineNumber, message, column);
   }
@@ -354,13 +319,11 @@ class FlowParser {
 
     if (raw.startsWith('&') || raw.startsWith('*')) this.fail('YAML anchors and aliases (& / *) are not supported');
     if (raw.startsWith('!')) this.fail('YAML tags (!...) are not supported');
-    // REVIEW: flow mapping keys (the stopAtColon call) keep their written form like block
-    // keys do, so a versions key written 8.0 stays "8.0" instead of becoming the number 8.
+    // Flow mapping keys stay as written, like block keys: a versions key 8.0 stays "8.0".
     return stopAtColon ? raw : typedScalar(raw);
   }
 }
 
-/** Indentation-based parser over the document's lines. */
 class YamlParser {
   private readonly lines: string[];
   private readonly source: string;
@@ -428,7 +391,6 @@ class YamlParser {
     return null;
   }
 
-  /** Parse the node starting at the next content line (mapping, sequence, or scalar). */
   private parseNode(): unknown {
     const line = this.peek();
     if (!line) return null;
@@ -518,7 +480,6 @@ class YamlParser {
     return this.parseInlineValue(rest, keyIndent, keyLineNumber);
   }
 
-  /** Parse a value that starts on the current line (after `key:` or `- `). */
   private parseInlineValue(text: string, parentIndent: number, lineNumber: number): unknown {
     const first = text[0]!;
 
@@ -538,7 +499,6 @@ class YamlParser {
     return typedScalar(text);
   }
 
-  /** Parse a `|` or `>` block scalar whose header sits on `headerLineNumber`. */
   private parseBlockScalar(header: string, parentIndent: number, headerLineNumber: number): string {
     const style = header[0] as '|' | '>';
     let chomp: 'clip' | 'strip' | 'keep' = 'clip';
@@ -628,11 +588,8 @@ class YamlParser {
       const content = body.trimStart();
       const contentIndent = indent + 1 + (body.length - content.length);
 
-      // "- key: value" and "- - item" start a nested node on the same line.
-      // Rewrite the line as if the content began at its own column and
-      // re-parse, so continuation lines at that indent join the same node.
-      // A flow collection ("- {run: x, always: true}") is an inline value:
-      // the ": " inside its braces must not turn it into a block mapping.
+      // "- key: value" and "- - item" are re-parsed from the content's own column, so continuation lines join
+      // the same node. A flow collection ("- {run: x}") is an inline value, not a block mapping.
       const flow = content.startsWith('[') || content.startsWith('{');
       if (!flow && (isSequenceItem(content) || findKeySeparator(content) !== -1)) {
         this.lines[this.index] = ' '.repeat(contentIndent) + content;
@@ -648,6 +605,9 @@ class YamlParser {
   }
 }
 
+/** Parses the YAML subset portler.yml and Compose-style files use: block and flow collections, quoted strings, `|` and `>`
+ * block scalars, true/false/null/~, decimal numbers and a leading `---`. Throws YamlParseError, also for what is not
+ * supported: anchors, aliases, tags, multiple documents, `? ` keys and tab indentation. */
 export function parseYaml(text: string, sourceName = 'YAML'): UnknownMap {
   return new YamlParser(text, sourceName).parse();
 }

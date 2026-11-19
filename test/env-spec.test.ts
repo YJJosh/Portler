@@ -35,7 +35,6 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
-/** Assignments as `up` would make them, with fixed ports. */
 function assign(cfg: PortlerConfig, ports: Record<string, number>): Assignments {
   const assignments: Assignments = {};
   for (const [name, port] of Object.entries(ports)) {
@@ -54,7 +53,6 @@ function assign(cfg: PortlerConfig, ports: Record<string, number>): Assignments 
   return assignments;
 }
 
-/** Run `body` with these process env values set, restoring the old ones after. */
 function withProcessEnv<T>(values: Record<string, string | undefined>, body: () => T): T {
   const old = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
   const apply = (next: Record<string, string | undefined>) => {
@@ -129,7 +127,6 @@ services:
     assert.equal(overridden.env.LEVEL, 'debug', 'the shell wins over a default');
     assert.equal(overridden.env.ONLY_DEFAULT, 'file', 'a use_env file wins over a default');
     assert.equal(overridden.env.FIXED, 'pinned', 'a plain config value still wins in development');
-    // In production the deployment wins over both.
     const prod = applyProduction(cfg, true);
     const deployed = withProcessEnv({ FIXED: 'platform' }, () => buildServiceEnv(prod, prod.services.api!, {}, {}, {}));
     assert.equal(deployed.env.FIXED, 'platform');
@@ -150,7 +147,6 @@ services:
     assert.deepEqual({ ...(mergeEnvEntry(new EnvSpec({ value: 'a', required: true }), new EnvSpec({ default: 'b' })) as EnvSpec) }, { default: 'b', required: true });
     assert.deepEqual({ ...(mergeEnvEntry(new EnvSpec({ value: 'a', secret: true }), new EnvSpec({ secret: false })) as EnvSpec) }, { value: 'a', secret: false });
     assert.equal(mergeEnvEntry('plain', new EnvSpec({ default: 'x' })) instanceof EnvSpec, true);
-    // docker.env, k8s.env and prod.env merge the same way.
     const cfg = await config(`services:
   api:
     command: x
@@ -207,7 +203,6 @@ services:
       return true;
     });
     assert.doesNotThrow(() => assertEnvRequirements(cfg, ['api', 'worker'], { STRIPE_KEY: 'sk', RESEND_KEY: 're' }));
-    // A value or a default satisfies it; an empty one does not.
     const filled = await config(`services:\n  api: { command: x, env: { A: { required: true, default: x }, B: { required: true, value: '' } } }\n`);
     assert.deepEqual(envRequirementProblems(filled, ['api'], {}).length, 1);
     assert.match(envRequirementProblems(filled, ['api'], {})[0]!, /B \(service api\)/);
@@ -220,7 +215,6 @@ services:
     assert.equal(env.env.SECRET, undefined, 'the development value is not used in production');
     assert.throws(() => assertEnvRequirements(cfg, ['api'], { STRIPE_KEY: 'sk' }), /service api requires SECRET in production \(required: prod\)/);
     assert.doesNotThrow(() => assertEnvRequirements(cfg, ['api'], { STRIPE_KEY: 'sk', SECRET: 's' }));
-    // Development uses the config value and does not ask for it.
     const dev = await config(STACK);
     assert.doesNotThrow(() => assertEnvRequirements(dev, ['api'], { STRIPE_KEY: 'sk' }));
   });
@@ -359,9 +353,7 @@ describe('mode-aware addresses and exports', () => {
   });
 });
 
-// REVIEW: Regression coverage for metadata-only scalar overrides and checking
-// the winning value, not merely the existence of some non-empty input layer.
-describe('env review regressions', () => {
+describe('metadata-only overrides and the winning env value', () => {
   it('preserves scalar values when an override only adds metadata', () => {
     assert.deepEqual({ ...(mergeEnvEntry('root', new EnvSpec({ secret: true })) as EnvSpec) }, { value: 'root', secret: true });
   });

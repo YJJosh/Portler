@@ -2,10 +2,8 @@ import fs from 'node:fs/promises';
 import { withDirLock } from '../util/lock.ts';
 import { globalPortlerDir, registryLockDir } from './locations.ts';
 
-// Takeover threshold for a lock left behind by a crashed process. It also
-// sets an invariant: critical sections under withRegistryLock must complete
-// well under 30s — which matters because allocateAssignments probes ports
-// (potentially a full range scan) while holding the lock.
+// Staleness threshold for crashed holders; live owners are never taken over.
+// Keep registry work short (allocation probes ports here) to limit contention.
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 10_000;
 
@@ -13,11 +11,7 @@ export async function ensureGlobalDir(): Promise<void> {
   await fs.mkdir(globalPortlerDir(), { recursive: true });
 }
 
-/**
- * Run `fn` while holding the global registry lock, releasing it afterwards.
- * `signal` ends the WAIT for the lock (see LockOptions.signal); once held, `fn`
- * runs to completion.
- */
+/** `signal` ends only the wait for the lock; once held, `fn` runs to completion. */
 export async function withRegistryLock<T>(fn: () => Promise<T>, options: { signal?: AbortSignal } = {}): Promise<T> {
   await ensureGlobalDir();
 

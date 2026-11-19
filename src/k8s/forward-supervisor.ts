@@ -2,10 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { sleep } from '../util/sleep.ts';
 
-/**
- * Everything one supervised `kubectl port-forward` needs, serialized as JSON
- * and handed to the hidden `portler __k8s-forward` command.
- */
+/** Passed as JSON to the hidden `portler __k8s-forward` command. */
 export interface ForwardSpec {
   serviceName: string;
   /** Sanitized Kubernetes Service name to forward to. */
@@ -18,9 +15,9 @@ export interface ForwardSpec {
   context: string;
 }
 
-/** Give up after this many consecutive quick failures. */
+// Give up after this many consecutive quick failures.
 const MAX_RESTARTS = 5;
-/** A forward that survived this long resets the restart budget. */
+// A forward that survived this long resets the restart budget.
 const STABLE_RUN_MS = 10_000;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 8_000;
@@ -55,9 +52,7 @@ export function portForwardArgs(spec: ForwardSpec): string[] {
 }
 
 function runForwardOnce(spec: ForwardSpec): { child: ChildProcess; exited: Promise<number> } {
-  // stdio inherit: kubectl's output flows through the supervisor's own stdio,
-  // which the parent `portler up k8s` either pipes with a [service] prefix
-  // (foreground) or ignores (detached).
+  // The parent `up k8s` prefixes the supervisor's stdio in the foreground and ignores it when detached.
   const child = spawn('kubectl', portForwardArgs(spec), { stdio: 'inherit' });
 
   const exited = new Promise<number>((resolve) => {
@@ -72,11 +67,8 @@ function runForwardOnce(spec: ForwardSpec): { child: ChildProcess; exited: Promi
 }
 
 /**
- * Supervise a `kubectl port-forward`, re-spawning it when it dies unexpectedly
- * (pod restarts kill the forward) with capped exponential backoff. Runs as its
- * own process (`portler __k8s-forward <json>`) so detached stacks keep their
- * forwards alive after `up k8s -d` exits; its pid is the one tracked in
- * pids.json, so `portler down` signals the whole supervisor+kubectl group.
+ * Rerun `kubectl port-forward` with capped exponential backoff when a pod restart kills it. Runs as its own process so
+ * forwards outlive `up k8s -d`; its pid is the one in pids.json, so `portler down` signals it and kubectl as one group.
  */
 export async function runForwardSupervisor(spec: ForwardSpec): Promise<number> {
   let shuttingDown = false;
@@ -92,8 +84,7 @@ export async function runForwardSupervisor(spec: ForwardSpec): Promise<number> {
   let attempts = 0;
 
   for (;;) {
-    // A signal can arrive during exponential backoff, when there is no current
-    // kubectl child to terminate. Do not start a brand-new forward afterwards.
+    // A signal during backoff has no kubectl child to stop; do not start a new one.
     if (shuttingDown) return 0;
 
     const startedAt = Date.now();

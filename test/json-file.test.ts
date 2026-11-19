@@ -45,10 +45,6 @@ describe('writeJsonFile', () => {
   });
 
   it('replaces the file atomically, so a reader never sees a partial write', async () => {
-    // The old implementation truncated the target and streamed into it: a reader
-    // (or a crash) mid-write could observe an empty/half file. With a temp file +
-    // rename, the target only ever holds a complete document — so a read
-    // interleaved with a write always validates.
     await writeJsonFile(file, { version: 1, value: 'first' });
 
     const writes = Array.from({ length: 20 }, (_unused, index) =>
@@ -74,7 +70,6 @@ describe('readValidatedJsonFile', () => {
 
     await assert.rejects(readValidatedJsonFile(file, 'Portler state file', isShape), (error: unknown) => {
       assert.ok(error instanceof CorruptStateFileError);
-      // The message must tell the user how to recover, not just "Unexpected token".
       assert.match((error as Error).message, /portler clean --force/);
       return true;
     });
@@ -100,9 +95,7 @@ describe('readValidatedJsonFileOrNull', () => {
 
 describe('atomic writes leave no temp files behind', () => {
   it('cleans up the temp file when the rename fails', async () => {
-    // The target is a non-empty DIRECTORY, so rename(temp, target) fails. Every
-    // failure path after the temp file exists must remove it — otherwise a
-    // .portler/ accumulates one `.pids.json.<pid>.<rand>.tmp` per failed write.
+    // rename(2) onto a non-empty directory fails.
     const target = path.join(dir, 'occupied');
     await fs.mkdir(target, { recursive: true });
     await fs.writeFile(path.join(target, 'child'), 'x', 'utf8');
@@ -114,8 +107,7 @@ describe('atomic writes leave no temp files behind', () => {
   });
 
   it('leaves nothing behind when the value cannot even be serialized', async () => {
-    // A BigInt throws in JSON.stringify — before any temp file is opened. The
-    // target must be untouched and no temp file may appear.
+    // JSON.stringify throws on a BigInt.
     const target = path.join(dir, 'never-written.json');
 
     await assert.rejects(writeJsonFile(target, { bad: 1n }));

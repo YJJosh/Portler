@@ -51,8 +51,7 @@ esac
     };
     await start('AAA\n');
     const first = await fs.stat(logPath);
-    // Keep the old inode alive: this also verifies existing writer descriptors
-    // cannot accidentally append to the new run's log.
+    // A writer still holding the old inode must not append to the new run's log.
     const old = await fs.open(logPath, 'a');
     try {
       await start('BBB\n');
@@ -77,9 +76,8 @@ it('follows equal-length and larger replacements made entirely between polls, an
     return true;
   });
 
-  // Each registration means all file I/O for that poll has finished. Hold the
-  // sleep unresolved while replacing the log, then explicitly run the next
-  // poll. No wall-clock race can expose an intermediate truncation to it.
+  // Each setTimeout call means that poll's file I/O is done. The test replaces
+  // the log while the sleep is held, then runs the next poll itself: no clock race.
   let release: () => void;
   let polled: () => void;
   let pollFinished = new Promise<void>((resolve) => { polled = resolve; });

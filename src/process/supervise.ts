@@ -7,55 +7,24 @@ function childExitCode(code: number | null, signal: NodeJS.Signals | null): numb
   return 1;
 }
 
-/** What the supervisor asks of a foreground teardown. */
 export interface ForegroundTeardownOptions {
-  /**
-   * Leave this run's services running while a service another run started
-   * depends on them (the default). The stop that follows, once the user has been
-   * told which services stayed up, passes false: Ctrl-C then stops them too.
-   */
+  /** Default true: keep this run's services up while another run's service depends on them. */
   keepAdopted?: boolean;
 }
 
-/**
- * Stop the run's services. Returns the names of this run's own services it left
- * running because another run depends on them; a teardown with nothing to
- * report may return nothing.
- */
+/** Returns this run's services it left running because another run depends on them. */
 export type ForegroundTeardown = (options?: ForegroundTeardownOptions) => Promise<string[] | void>;
 
 export interface ForegroundWaitOptions {
-  /**
-   * Whether every service of another run that the last teardown kept something
-   * for is still alive. They are not this process's children, so nothing
-   * reports their exit; while attached the supervisor asks this every
-   * `recheckMs` and runs the teardown again as soon as it says no.
-   */
+  /** True while the other runs' services ours were kept for are alive; polled every `recheckMs` (default 2000). */
   dependentsAlive?: () => Promise<boolean>;
   recheckMs?: number;
 }
 
 /**
- * Supervise foreground services: on SIGINT/SIGTERM or the first child exit,
- * run `teardown` once and resolve with the resulting exit code.
- *
- * A teardown that throws (it now takes the project lifecycle lock, and it can
- * fail to stop something) must not leave this promise pending forever — the
- * process would hang with no output. Report it and exit non-zero instead.
- *
- * A teardown can leave some of this run's own children running because a
- * service another run started depends on them (`portler restart api` keeps the
- * db this run started). Their output is piped through this process, so it
- * cannot exit without cutting them off: it says so, keeps relaying until they
- * exit (`portler down` from elsewhere), and a Ctrl-C then stops them too. Each
- * time one of them exits on its own, the teardown runs again, staying attached
- * to the ones still running: their entries still name this run, and only a
- * teardown prunes a dead one and gives its port back. The services of other
- * runs it kept them for are not children of this process, so it also polls
- * `dependentsAlive`, and runs the teardown again as soon as one of them is
- * gone: whatever nothing depends on any more is then stopped. While a teardown is in
- * progress the signal handlers are off, so a second Ctrl-C still quits at once,
- * as it always has.
+ * On SIGINT/SIGTERM or the first child exit, runs `teardown` and resolves with the exit code (non-zero
+ * if it throws). Children kept for another run stay attached; each exit or a `dependentsAlive` false
+ * re-runs the teardown (only it frees ports). Handlers are off during one, so a second Ctrl-C quits.
  */
 export function waitForForegroundServices(
   children: Map<string, ChildProcess>,
@@ -123,8 +92,8 @@ export function waitForForegroundServices(
     const isRunning = (child: ChildProcess | undefined): boolean =>
       child !== undefined && child.exitCode === null && child.signalCode === null;
 
-    // A kept service that exits while a pass runs was seen alive by that pass,
-    // so its entry is still there: run again. Each repeat needs a new exit.
+    // A kept service that exits mid-pass was seen alive, so its entry stays: run again.
+    // Each repeat needs a new exit.
     const keepingPasses = async (): Promise<string[] | undefined> => {
       for (;;) {
         const before = new Set(exited);
@@ -168,8 +137,7 @@ export function waitForForegroundServices(
       attachOrFinish(await keepingPasses());
     };
 
-    // A kept service exited on its own, or what it was kept for is gone: run the
-    // teardown again and stay with whatever it still keeps.
+    // A kept service exited, or what it was kept for is gone: tear down again.
     const settle = async (): Promise<void> => {
       phase = 'stopping';
       unlisten();

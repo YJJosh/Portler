@@ -7,7 +7,6 @@ import { portlerDir } from '../state/index.ts';
 import { containerEnvEntries, k8sServiceNames, namespaceManifest, serviceManifests } from './manifests.ts';
 import type { Assignments, EnvMap, PortlerConfig } from '../types/index.ts';
 
-/** The `.portler/k8s/` directory holding the generated manifests. */
 export function k8sManifestDir(projectDir: string): string {
   return path.join(portlerDir(projectDir), 'k8s');
 }
@@ -16,7 +15,7 @@ export function k8sManifestDir(projectDir: string): string {
 export const NAMESPACE_MANIFEST_FILE = '00-namespace.yml';
 
 export interface RenderedManifests {
-  /** One YAML file per resource group; the namespace file sorts first so `kubectl apply -f dir` creates it before namespaced resources. */
+  /** One YAML file per resource group, NAMESPACE_MANIFEST_FILE first. */
   files: Array<{ fileName: string; text: string }>;
   /** Portler service name -> sanitized Kubernetes resource name. */
   names: Map<string, string>;
@@ -24,10 +23,7 @@ export interface RenderedManifests {
   baseEnv: EnvMap;
 }
 
-/**
- * Render the Kubernetes YAML for the selected services (a k8s-mode config)
- * using the given port assignments for env/reference resolution.
- */
+/** `config` is a k8s-mode config. Writes nothing (see writeManifestFiles); throws on missing required env. */
 export async function renderManifests(
   config: PortlerConfig,
   selectedNames: string[],
@@ -36,8 +32,7 @@ export async function renderManifests(
   const names = k8sServiceNames(selectedNames);
   const generatedEnv = buildGeneratedEnv(assignments);
   const baseEnv = await loadBaseEnv(config);
-  // REVIEW: Kubernetes must enforce required:true too, before writing or
-  // applying manifests. Top-level setup never runs in Kubernetes mode.
+  // Top-level setup never runs in Kubernetes mode.
   assertEnvRequirements(config, selectedNames, baseEnv, { projectSetup: false });
   const environments = new Map(selectedNames.map((name) => [name, buildServiceEnv(config, config.services[name]!, baseEnv, generatedEnv, assignments)]));
   assertEnvRequirements(config, selectedNames, baseEnv, {

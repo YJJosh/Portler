@@ -22,8 +22,7 @@ function isTcpPortFree(port: number, host: string): Promise<boolean> {
 }
 
 async function isUdpPortFree(port: number, host: string): Promise<boolean> {
-  // REVIEW: Pick the socket family from DNS, not the hostname's spelling; an
-  // IPv6-only hostname otherwise gets an IPv4 socket and every port looks busy.
+  // The socket family comes from DNS: an IPv6-only hostname on a udp4 socket makes every port look busy.
   let resolved;
   try {
     resolved = await dns.lookup(host);
@@ -44,10 +43,6 @@ async function isUdpPortFree(port: number, host: string): Promise<boolean> {
   });
 }
 
-/**
- * Resolve to true when nothing is currently bound to the given host:port on
- * every protocol of `transport`. A `tcp+udp` port has to be free on both.
- */
 export async function isPortFree(port: number, host = '127.0.0.1', transport: PortTransport = 'tcp'): Promise<boolean> {
   const checkHost = normalizeCheckHost(host);
   for (const protocol of transportProtocols(transport)) {

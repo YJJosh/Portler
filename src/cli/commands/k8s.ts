@@ -6,10 +6,7 @@ import { expandAndOrderServices, selectServiceNames } from '../services.ts';
 import { ensureAssignments } from './env.ts';
 import { validateK8sMode } from './up-k8s.ts';
 
-/**
- * `portler k8s render [service...]`: generate the Kubernetes YAML into
- * `.portler/k8s/` and print it, without building images or applying anything.
- */
+/** Writes the Kubernetes YAML to `.portler/k8s/` and prints it; builds and applies nothing. */
 export async function commandK8s(args: ParsedArgs): Promise<number> {
   const [subcommand, ...requested] = args.positionals;
   if (subcommand !== 'render') {

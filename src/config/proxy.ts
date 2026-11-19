@@ -5,25 +5,19 @@ import { normalizeIpAddress } from '../util/ip.ts';
 import { isObject, normalizeStringArray, optionalString } from './scalars.ts';
 import type { PortlerConfig, ProxyConfig, ProxyRoute, ServiceConfig, UnknownMap } from '../types/index.ts';
 
-/** `port: auto` (or omitting the key) asks Portler to pick a free port. */
 function normalizeProxyPort(value: unknown): number | undefined {
   if (value === undefined || value === null || value === 'auto') return undefined;
   if (!isPort(value)) throw new Error('proxy.port must be "auto" or a port number');
   return value;
 }
 
-/** Trim a trailing slash so '/api' and '/api/' route identically ('/' stays). */
 function normalizeRoutePrefix(rawPrefix: string): string {
   if (!rawPrefix.startsWith('/')) throw new Error(`proxy route "${rawPrefix}" must start with "/"`);
   if (rawPrefix !== '/' && rawPrefix.endsWith('/')) return rawPrefix.slice(0, -1);
   return rawPrefix;
 }
 
-/**
- * Normalize the top-level `proxy:` block into route entries sorted
- * longest-prefix-first, validating that every route targets a known service
- * that declares a port (otherwise there is nothing to forward to).
- */
+/** Routes sorted longest prefix first. Throws for a route to an unknown service or one without a port. */
 export function normalizeProxyConfig(root: UnknownMap, services: Record<string, ServiceConfig>): ProxyConfig | undefined {
   const rawProxy = root.proxy;
   if (rawProxy === undefined || rawProxy === null) return undefined;
@@ -81,10 +75,7 @@ export function normalizeProxyConfig(root: UnknownMap, services: Record<string, 
   };
 }
 
-/**
- * Synthetic ServiceConfig representing the proxy, so port allocation treats
- * it exactly like any other service that declares a port.
- */
+/** The proxy as a service, so port allocation treats it like any other. */
 export function proxyServiceConfig(config: PortlerConfig, proxy: ProxyConfig): ServiceConfig {
   return {
     name: PROXY_SERVICE_NAME,
@@ -97,8 +88,7 @@ export function proxyServiceConfig(config: PortlerConfig, proxy: ProxyConfig): S
     protocol: config.protocol,
     preferDeclaredPort: proxy.port !== undefined,
     dependsOn: [],
-    // Explicit, because the default healthcheck keys off the DECLARED port,
-    // which is undefined for `port: auto` — the proxy always listens.
+    // Explicit: the default healthcheck needs a declared port, which `port: auto` lacks.
     healthcheck: {
       type: 'tcp',
       timeoutMs: DEFAULT_HEALTHCHECK_TIMEOUT_MS,

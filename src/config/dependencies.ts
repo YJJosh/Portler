@@ -44,11 +44,7 @@ export function normalizeDependsOn(value: unknown, serviceName: string): Depende
   });
 }
 
-/**
- * Find a depends_on cycle among the services, returned as the path of
- * service names with the starting service repeated at the end (a -> b -> a),
- * or null when the dependency graph is acyclic.
- */
+/** A depends_on cycle as a path ending where it starts (a -> b -> a), or null. */
 export function findDependencyCycle(services: Record<string, ServiceConfig>): string[] | null {
   const settled = new Set<string>();
 

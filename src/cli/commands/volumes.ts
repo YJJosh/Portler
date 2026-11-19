@@ -31,11 +31,8 @@ async function listVolumes(config: PortlerConfig): Promise<number> {
   return 0;
 }
 
-/**
- * The `up` command that runs the stack against a fork. It repeats the fork's
- * --file and --prod, because both decide the volume scope: without them `up`
- * would mount another project's or the development variant, which may be empty.
- */
+/** Repeats --file and --prod: both decide the volume scope, so without them `up` would
+ * mount another project's or the development variant. */
 export function forkUpCommand(volumeSet: string, args: Pick<ParsedArgs, 'file' | 'prod'>): string {
   const parts = ['portler', 'up'];
   if (args.file) parts.push('--file', shellQuote(args.file));

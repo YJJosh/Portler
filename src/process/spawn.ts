@@ -6,7 +6,6 @@ import { dockerShellCommand } from './docker.ts';
 import { openServiceLog, prefixStream } from './logs.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
-/** Resolve the concrete shell command used to start a service. */
 function serviceCommandFor(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -21,11 +20,7 @@ function serviceCommandFor(
   return service.command;
 }
 
-/**
- * Spawn a service in its own process group, either streaming prefixed logs to
- * our terminal (foreground) or capturing stdout/stderr into `logFilePath`
- * (detached), so `portler logs` can inspect it later.
- */
+/** Spawns in its own process group; streams prefixed logs (`attachLogs`) or writes `logFilePath`. */
 export function spawnService(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -35,15 +30,13 @@ export function spawnService(
   assignments: Assignments,
   attachLogs: boolean,
   logFilePath?: string,
-  // REVIEW: Preserve use_env values when resolving exports in build args.
+  // Lets build-arg exports keep use_env values.
   baseEnv: EnvMap = {},
 ): ChildProcess {
   const command = serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
   const cwd = resolveServiceCwd(config, service);
 
-  // The child inherits the file descriptor directly, so log capture keeps
-  // working after this process exits and unrefs the detached child. Each
-  // start replaces the previous run's log with a detectable new generation.
+  // The child inherits the fd, so capture keeps working after Portler exits.
   let logFd: number | undefined;
   if (!attachLogs && logFilePath) {
     logFd = openServiceLog(logFilePath);
@@ -53,9 +46,7 @@ export function spawnService(
     cwd,
     env,
     shell: true,
-    // detached gives the service its own process group so stopServices can
-    // signal -pid and take down grandchildren of the shell wrapper — required
-    // even in foreground mode, where the child is never unref'd.
+    // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren; foreground mode needs it too.
     detached: true,
     stdio: attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
   });

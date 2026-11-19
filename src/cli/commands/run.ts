@@ -13,7 +13,6 @@ import { parseRunMode, recordedRunMode } from '../services.ts';
 import { ensureAssignments } from './env.ts';
 import { k8sForwardConfig } from './up-k8s.ts';
 
-/** `portler run` with no name: the tasks the config defines. */
 function listTasks(config: PortlerConfig): number {
   const tasks = Object.entries(config.tasks ?? {});
   if (tasks.length === 0) {
@@ -28,14 +27,8 @@ function listTasks(config: PortlerConfig): number {
   return 0;
 }
 
-/**
- * `portler run [docker|k8s] <task|service> [-- <command>...]`: a command on this
- * machine with a service's env (or the project's, with the PORTLER_* values),
- * as that service gets it in the run mode it was last started in, seen from
- * this machine: `${db.address}` is the database's port here. A task runs its
- * own command, whose references resolve first, with the words after `--`
- * appended; a service runs the words after `--`.
- */
+/** Runs on this machine with a service's (or the project's) env, in the mode it last started
+ * in. A task gets the words after `--` appended; a service runs just those words. */
 export async function commandRun(args: ParsedArgs): Promise<number> {
   // The words after `--` are the command, not names.
   const named = args.passthrough ? args.positionals.slice(0, args.positionals.length - args.passthrough.length) : args.positionals;
@@ -85,11 +78,8 @@ export async function commandRun(args: ParsedArgs): Promise<number> {
     }
     return { env: runEnv, cwd: service ? resolveServiceCwd(runConfig, service) : runConfig.projectDir, command: line };
   });
-  // The lock is held only while the env is worked out, not while the command runs: a psql
-  // session must not block `up` or `down` for this project.
-  // With a terminal the command stays in Portler's process group so it can read from the
-  // terminal (psql, a REPL); a signal sent to Portler alone then reaches only its shell.
-  // Without one (scripts, CI, a supervisor) nothing needs the terminal, so it gets a group
-  // of its own and every signal reaches the whole tree, background children included.
+  // The lock covers only working out the env, so a psql session does not block `up` or `down`.
+  // With a TTY the command stays in Portler's process group to read the terminal (a signal to
+  // Portler reaches only its shell); without one it gets its own group, so signals reach the tree.
   return process.stdin.isTTY ? runForeground(command, cwd, env) : runShell(command, cwd, env);
 }

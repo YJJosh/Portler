@@ -1,7 +1,4 @@
-/**
- * `portler run`: a command on this machine with a service's (or the project's)
- * env. These drive the real CLI against a temp project; nothing is started.
- */
+/** `portler run` through the real CLI against a temp project; nothing is started. */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -105,7 +102,6 @@ describe('portler run', () => {
     const [cwd, url] = result.stdout.trim().split('\n');
     assert.equal(cwd, path.join(projectDir, 'api'));
     assert.match(url!, /^postgres:\/\/postgres:postgres@localhost:\d+\/app$/);
-    // Even the Docker view of the service reaches the database from here through its port.
     const docker = run('docker', 'api', '--', 'sh', '-c', 'echo "$DATABASE_URL"');
     assert.equal(docker.status, 0, docker.stderr);
     assert.match(docker.stdout, /@localhost:\d+\/app$/m);

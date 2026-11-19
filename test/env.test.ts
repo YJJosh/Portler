@@ -119,7 +119,6 @@ describe('buildGeneratedEnv', () => {
     assert.equal(env.PORTLER_API_URL_HOST, 'localhost');
     assert.equal(env.PORTLER_API_PROTOCOL, 'http');
     assert.equal(env.PORTLER_API_DESIRED_PORT, '4000');
-    // Dashed service names become upper snake case.
     assert.equal(env.PORTLER_DB_MAIN_PORT, '52002');
     assert.equal(env.PORTLER_DB_MAIN_CONTAINER, 'portler-proj-abc-db-main');
     assert.equal(env.PORTLER_DB_MAIN_IMAGE, 'postgres:16-alpine');
@@ -184,7 +183,6 @@ describe('buildServiceEnv', () => {
     assert.equal(env.SHARED, 'service-wins');
     assert.equal(env.PORTLER_SERVICE_NAME, 'api');
     assert.equal(env.PORTLER_API_URL, 'http://localhost:52001');
-    // port_env keys get the assigned host port for local services.
     assert.equal(env.PORT, '52001');
 
     for (const key of ['FROM_BASE', 'FROM_ROOT', 'FROM_SERVICE', 'SHARED', 'PORT', 'PORTLER_SERVICE_NAME']) {
@@ -240,7 +238,6 @@ describe('buildServiceEnv', () => {
       assert.equal(prod.env.PORTLER_API_PORT, '52001', 'generated values stay Portler\'s');
       assert.equal(prod.env.PORT, '52001', 'port_env stays Portler\'s');
       assert.equal(prod.env.PORTLER_SERVICE_NAME, 'api');
-      // Containers get the named keys in both modes; the env files' keys only in development.
       assert.ok(dev.explicitKeys.has('FROM_FILE'), 'development forwards the env files');
       assert.deepEqual([...prod.explicitKeys].sort(), [...dev.explicitKeys].filter((key) => key !== 'FROM_FILE').sort(), 'production forwards only named keys');
     } finally {
@@ -256,10 +253,8 @@ describe('buildServiceEnv', () => {
     const config = makeConfig({ api: service }, { ROOT_URL: 'missing.url' });
     const assignments = makeAssignments();
     const generated = buildGeneratedEnv(assignments);
-    // Development: config wins, so the dangling reference is a config error even with a file value.
     assert.throws(() => buildServiceEnv(config, service, { DB_URL: 'file', ROOT_URL: 'file' }, generated, assignments), /cannot resolve|no assigned port/);
     const prod = { ...config, production: true };
-    // Production without anything overriding it: still a config error.
     assert.throws(() => buildServiceEnv(prod, service, {}, generated, assignments), /cannot resolve|no assigned port/);
     const saved = process.env.ROOT_URL;
     process.env.ROOT_URL = 'shell';
@@ -276,9 +271,7 @@ describe('buildServiceEnv', () => {
   });
 
   it('does not resolve a root value the service replaces, in either mode', () => {
-    // Root URL is a dangling reference; api's own env (what prod.env becomes after
-    // applyProduction) replaces URL, so the root value is never used for api and must not
-    // throw. A service that does not replace it still hits the config error.
+    // The root URL is a dangling reference that api's own env (prod.env after applyProduction) replaces.
     const service = makeService({ env: { URL: 'https://api.example' } });
     const config = makeConfig({ api: service }, { URL: 'missing.url', OTHER: 'api.url' });
     const assignments = makeAssignments();
@@ -308,8 +301,6 @@ describe('buildServiceEnv', () => {
   });
 
   it('takes a required key from the deployment only, and reports the missing ones', () => {
-    // A required key with a config value: the value is not used (nor resolved), the
-    // deployment supplies it, and the check names what is missing.
     const service = makeService({ env: { DB: 'missing.url' }, prod: { env: {}, require: ['DB', 'DEPLOY_SECRET'] } });
     const config = { ...makeConfig({ api: service }), production: true };
     const assignments = makeAssignments();
@@ -324,15 +315,12 @@ describe('buildServiceEnv', () => {
   });
 
   it('counts a blank prod.env entry as required, like prod.require', () => {
-    // `prod.env: {KEY: ''}` (or a bare `KEY:`) says the deployment supplies the key, so a
-    // deployment that omits it fails the check instead of starting with an empty value.
+    // `prod.env: {KEY: ''}` or a bare `KEY:` (null) means the deployment supplies the key.
     const service = makeService({ env: { DATABASE_URL: 'postgres://dev' }, prod: { env: { DATABASE_URL: '', TOKEN: null, NODE_ENV: 'production' }, require: [] } });
     const config = { ...makeConfig({ api: service }), production: true };
     assert.deepEqual(requiredEnvKeys(config, service).sort(), ['DATABASE_URL', 'TOKEN']);
     assert.throws(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { NODE_ENV: 'production' }), /service api requires DATABASE_URL, TOKEN in production/);
     assert.doesNotThrow(() => assertRequiredEnv('service api', requiredEnvKeys(config, service), { DATABASE_URL: 'postgres://prod', TOKEN: 't' }));
-    // A blank top-level entry is required of the project and of a service with no value of
-    // its own for the key, not of one whose own env replaces it.
     const plain = makeService({ name: 'plain' });
     const own = makeService({ name: 'own', env: { PUBLIC_URL: 'https://own.example' } });
     const root = { ...makeConfig({ plain, own }), production: true, prod: { env: { PUBLIC_URL: '' }, require: [] } };
@@ -345,14 +333,11 @@ describe('buildServiceEnv', () => {
     const own = makeService({ name: 'own', env: { PUBLIC_URL: 'https://own.example' } });
     const plain = makeService({ name: 'plain' });
     const blank = { ...makeConfig({ own, plain }), production: true, prod: { env: { PUBLIC_URL: '' }, require: [] } };
-    // own sets the key itself, and a project without top-level setup steps has nothing that reads it.
     assert.doesNotThrow(() => assertProductionRequirements(blank, ['own'], {}));
     assert.throws(() => assertProductionRequirements(blank, ['own', 'plain'], {}), /service plain requires PUBLIC_URL/);
-    // Top-level setup steps see the root env, so they need it while they run.
     const withSetup = { ...blank, setup: [{ run: 'echo' }] };
     assert.throws(() => assertProductionRequirements(withSetup, ['own'], {}), /the project requires PUBLIC_URL/);
     assert.doesNotThrow(() => assertProductionRequirements(withSetup, ['own'], {}, { projectSetup: false }));
-    // An explicit top-level prod.require holds always.
     const explicit = { ...blank, prod: { env: {}, require: ['PUBLIC_URL'] } };
     assert.throws(() => assertProductionRequirements(explicit, ['own'], {}, { projectSetup: false }), /the project requires PUBLIC_URL/);
   });

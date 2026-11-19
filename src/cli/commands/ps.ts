@@ -26,7 +26,7 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : [])];
   const rows = entries.map(([serviceName, info], index) => {
     const mode = modeLabel(info);
-    // REVIEW: show the transport like `portler ports` does; a k8s port-forward carries TCP only.
+    // kubectl port-forward carries TCP only.
     const transport = mode.startsWith('k8s') ? undefined : config.services[serviceName]?.transport;
     return [
       serviceName,
@@ -53,21 +53,14 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
-/**
- * How the service runs: `k8s` for an `up k8s` port-forward (recorded as such, or
- * known by the forward's command in entries written before the run mode was
- * recorded), otherwise `docker` while it has a container and `local` without.
- */
+// Entries without a runMode are k8s if their command is the port-forward supervisor.
 function modeLabel(info: PidServiceInfo): string {
   const k8s = info.runMode === 'k8s' || info.command.startsWith(`${K8S_FORWARD_COMMAND} `);
   const mode = k8s ? 'k8s' : info.dockerContainer ? 'docker' : 'local';
   return `${mode}${info.prod ? ' (prod)' : ''}`;
 }
 
-/**
- * A Docker service whose supervising shell is gone but whose container runs on
- * is still serving: "running (container)", not dead.
- */
+// A Docker service whose shell is gone but whose container runs on is still serving.
 function statusLabel(liveness: ServiceLiveness): string {
   if (liveness.status === 'running') return liveness.via === 'pid' ? 'running' : `running (${liveness.via})`;
   if (liveness.status === 'unknown') return 'unknown';

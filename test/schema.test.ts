@@ -1,7 +1,6 @@
 /**
- * schema/portler.schema.json is written by hand. These checks keep it in step
- * with the loader: every key the loader reads is in the schema, and the
- * built-in presets use only service keys.
+ * schema/portler.schema.json is written by hand. These checks keep it in step with the
+ * loader and keep the built-in presets to service keys.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';

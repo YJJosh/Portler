@@ -50,10 +50,7 @@ function parseAssignedAt(value: string | undefined): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-/**
- * Drop registry entries that are old and whose port is now free, plus any
- * malformed entries. Mutates the passed-in registry.
- */
+/** Mutates `registry`: drops malformed entries, and ones whose port is free and too old for an `up` to still be binding it. */
 export async function pruneRegistry(registry: RegistryFile): Promise<void> {
   const now = Date.now();
 
@@ -65,9 +62,8 @@ export async function pruneRegistry(registry: RegistryFile): Promise<void> {
     }
 
     const age = now - parseAssignedAt(entry.assignedAt);
-    // Older registries did not store host and were always probed on loopback.
-    // Probing only 127.0.0.1 for a reservation bound to ::1/a LAN interface can
-    // incorrectly declare a live service stale and hand its port out again.
+    // Probe the entry's own host: a live service on ::1 or a LAN address looks free on
+    // 127.0.0.1. Entries without a host are probed on loopback.
     if (age > REGISTRY_FREE_STALE_MS && (await isPortFree(port, entry.host ?? '127.0.0.1', entry.transport))) {
       delete registry.ports[portText];
     }

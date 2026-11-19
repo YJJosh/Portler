@@ -1,15 +1,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 
-/**
- * A process group that outlives its leader as a zombie, the way a service's
- * group does under a PID 1 that does not reap orphans.
- *
- * A helper starts `command` in a new group of its own (detached) and then stops
- * itself with SIGSTOP. A stopped parent cannot reap, so once the group's leader
- * exits it stays a zombie until `release` resumes the helper. `pgid` is the
- * leader's pid, which is also the group id.
- */
+/** A group whose leader stays a zombie, as under a PID 1 that does not reap, until `release`; `pgid` is the leader's pid. */
 export interface ZombieGroup {
   pgid: number;
   /** Resume the helper and wait for it to reap the leader and exit. */
@@ -30,9 +22,8 @@ export async function startZombieGroup(command: string, args: string[]): Promise
     pgid,
     release: async () => {
       if (helper.exitCode !== null || helper.signalCode !== null) return;
-      // Let the helper reap its child and exit on its own. A kill right after
-      // the SIGCONT could land before it reaps, and the zombie would go to
-      // PID 1, which may never reap it.
+      // Let the helper reap its child and exit: a kill right after SIGCONT could land before
+      // it reaps, leaving the zombie to a PID 1 that may never reap it.
       helper.kill('SIGCONT');
       const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
       await once(helper, 'exit');

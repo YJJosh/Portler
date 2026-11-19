@@ -24,7 +24,6 @@ export interface ParsedArgs {
   passthrough?: string[];
 }
 
-/** Every flag the CLI accepts, for unknown-flag rejection and suggestions. */
 const KNOWN_FLAGS = [
   '--prod',
   '--setup',
@@ -43,26 +42,15 @@ const KNOWN_FLAGS = [
   '--image',
 ];
 
-/** The longest delay a Node timer accepts; any larger --drain-ms is refused. */
+// The longest delay a Node timer accepts.
 const MAX_DRAIN_MS = 2_147_483_647;
 
-/**
- * `-f` is overloaded across the CLI, so it is resolved per command rather than
- * globally: for `logs` it means `--follow` (what `docker logs -f` / `kubectl
- * logs -f` train users to expect, and `portler logs -f api` previously parsed
- * "api" as a config FILE path and then reported no logs), everywhere else it
- * keeps its `--file` meaning. `--file`/`--follow` in long form are unambiguous
- * everywhere.
- */
+// `-f` is `--follow` for `logs` (as in `docker logs -f`), `--file` elsewhere.
 function shortFMeansFollow(command: string): boolean {
   return command === 'logs';
 }
 
-/**
- * `--image api=ghcr.io/org/api@sha256:...` pins the image a Docker service runs
- * from. The split is at the first "=": a service name never contains one, and
- * neither does an image reference (registry/name:tag@digest).
- */
+// Split at the first "=": neither a service name nor an image reference contains one.
 function addImageOverride(parsed: ParsedArgs, spec: string): void {
   const separator = spec.indexOf('=');
   const service = separator > 0 ? spec.slice(0, separator) : '';
@@ -75,7 +63,7 @@ function addImageOverride(parsed: ParsedArgs, spec: string): void {
   parsed.images[service] = image;
 }
 
-/** Parse the argv tail (everything after the command) into structured flags. */
+/** `args` is the argv after the command. */
 export function parseArgs(args: string[], command = ''): ParsedArgs {
   const positionals: string[] = [];
   const parsed: ParsedArgs = {
@@ -134,9 +122,8 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
     if (arg === '--drain-ms' || arg.startsWith('--drain-ms=')) {
       const value = arg === '--drain-ms' ? args[index + 1] : arg.slice('--drain-ms='.length);
       if (value === undefined || !/^\d+$/.test(value)) throw new Error('--drain-ms requires a number of milliseconds');
-      // Enough digits make Number() Infinity, and an infinite deadline is never
-      // reached, so start would never kill what the shell left behind. Cap it at
-      // the longest delay a Node timer accepts.
+      // Enough digits make Number() Infinity, a deadline never reached, so start
+      // would never kill what the shell leaves behind.
       const drainMs = Number(value);
       if (drainMs > MAX_DRAIN_MS) throw new Error(`--drain-ms must be at most ${MAX_DRAIN_MS} (about 24.8 days)`);
       parsed.drainMs = drainMs;
@@ -209,9 +196,7 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
       continue;
     }
 
-    // Anything else that looks like a flag is a typo or a flag from another
-    // tool. Passing it through as a positional used to surface as a confusing
-    // "unknown service \"--detatch\"" (or, worse, be silently ignored).
+    // A typo or another tool's flag would otherwise read as a service name.
     if (arg.startsWith('-') && arg !== '-') {
       const name = arg.split('=')[0]!;
       throw new Error(`unknown flag "${name}"${didYouMean(name, KNOWN_FLAGS)}. Run "portler --help" to see the available flags.`);

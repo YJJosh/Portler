@@ -78,8 +78,6 @@ services:
 `);
     const local = applyProduction(dev, true);
     const docker = applyProduction(applyDockerMode(dev), true);
-    // The always-Docker container runs `command`, so prod replaces it; the
-    // `docker:` block describes its own container and keeps its command.
     assert.equal(local.services.api?.docker?.command, 'node server.js');
     assert.equal(docker.services.api?.docker?.command, 'docker-dev');
     for (const prod of [local, docker]) assert.equal(prod.services.api?.env.LOG_LEVEL, 'info');
@@ -114,8 +112,7 @@ services:
     assert.equal(prod.services.api?.command, 'node server.js');
     assert.equal(prod.services.api?.docker?.command, 'npm run dev');
 
-    // `docker: true` points at the always-Docker config, whose container
-    // runs `command`, so there prod replaces it.
+    // `docker: true` points at the always-Docker config, whose container runs `command`.
     const inherited = await config(`services:
   api:
     command: npm run dev
@@ -267,7 +264,6 @@ services:
     assert.equal(missing.status, 0, missing.stderr);
     assert.match(missing.stderr, /service api requires API_TOKEN in production/);
     assert.doesNotMatch(missing.stdout, /^API_TOKEN=/m);
-    // The development view takes --reveal too: it shows what the config marks secret.
     const dev = spawnSync(process.execPath, ['--experimental-strip-types', cli, 'env', 'api', '--reveal'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
     assert.equal(dev.status, 0, dev.stderr);
   });
@@ -308,17 +304,15 @@ services:
     const env: Record<string, string> = { ...(process.env as Record<string, string>), PORTLER_GLOBAL_DIR: path.join(cfg.projectDir, 'global') };
     delete env.PUBLIC_URL;
     const run = () => spawnSync(process.execPath, ['--experimental-strip-types', cli, 'setup', 'api', '--prod'], { cwd: cfg.projectDir, env, encoding: 'utf8' });
-    // api sets PUBLIC_URL itself and there are no top-level steps: nothing needs the deployment's value.
+    // api sets PUBLIC_URL itself and there are no top-level steps.
     await write("prod: {env: {PUBLIC_URL: ''}}");
     const overridden = run();
     assert.equal(overridden.status, 0, overridden.stderr);
-    // Top-level steps see the root env, so with them the blank is the project's requirement.
     await write("prod: {env: {PUBLIC_URL: ''}, setup: ['echo ran >> steps']}");
     const withSteps = run();
     assert.equal(withSteps.status, 1, withSteps.stderr);
     assert.match(withSteps.stderr, /the project requires PUBLIC_URL in production/);
     await assert.rejects(fs.readFile(path.join(cfg.projectDir, 'steps'), 'utf8'), 'nothing ran');
-    // An explicit top-level require holds always.
     await write('prod: {require: [PUBLIC_URL]}');
     const explicit = run();
     assert.equal(explicit.status, 1, explicit.stderr);

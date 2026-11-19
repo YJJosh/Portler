@@ -14,9 +14,8 @@ import { projectHash } from '../src/util/hash.ts';
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Remembers the Deployments applied, and logs every call. FAKE_KUBECTL_HANG picks the
-// step that never finishes: `rollout status` (optionally ignoring signals, so only
-// SIGKILL ends it) or the port-forward, which then never accepts connections.
+// Remembers applied Deployments and logs every call. FAKE_KUBECTL_HANG picks the step that
+// never ends: `rollout status` (optionally ignoring signals) or a port-forward that never accepts.
 const kubectl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const net = require('node:net');
@@ -267,7 +266,6 @@ setInterval(() => {}, 1000);
   }
 });
 
-// A hung API read must not swallow the signal.
 for (const scenario of ['namespace-check', 'namespace-phase', 'namespace-poll'] as const) {
   it(`foreground up k8s cancels a hung ${scenario}`, { timeout: 20_000 }, async () => {
     const { dir, projectDir, fakeDir, env, calls } = await fixture('portler-k8s-interrupt-read-');
@@ -338,8 +336,8 @@ fs.rename = async function(from, to) {
       run.child.kill('SIGKILL');
       await run.exited;
     }
-    // If a regression kills the CLI before the second pid entry is renamed,
-    // the marker holds that pending entry. Only signal a still-matching leader.
+    // If the CLI dies before the second pid entry is renamed, the marker holds
+    // that pending entry. Only signal a leader whose start token still matches.
     const pending = JSON.parse(await fs.readFile(marker, 'utf8').catch(() => '{"services":{}}')) as {
       services: Record<string, { pid: number; startToken?: string }>;
     };

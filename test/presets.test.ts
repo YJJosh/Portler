@@ -176,7 +176,6 @@ versions:
     await assert.rejects(loadConfig(await project({ 'v.yml': 'image: x\nversions:\n  "1": nope\n', 'portler.yml': 'services: {db: {use: ./v.yml@1}}' })), /version "1" of preset .* must be a mapping/);
   });
 
-  // REVIEW: the three cases below passed silently with a wrong or literal value before the fix.
   it('rejects a preset that uses ${version} without listing versions', async () => {
     await assert.rejects(
       loadConfig(await project({ 'p.yml': 'image: acme/db:${version}\n', 'portler.yml': 'services: {db: {use: ./p.yml}}' })),

@@ -18,10 +18,8 @@ import { runShell } from '../../process/shell.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 
-// REVIEW: the change added UDP and tcp+udp ephemeral-port picking here, but the
-// loader rejects `transport` without `port`, and a service with a port uses it
-// as is, so that code could never run. Reverted to the TCP-only original; a
-// transport-less service is TCP.
+// TCP only: the loader rejects `transport` without `port`, so a service that needs a
+// free port is TCP.
 async function freePort(host: string): Promise<number> {
   const server = net.createServer();
   return new Promise((resolve, reject) => {
@@ -71,11 +69,8 @@ export async function buildStartEnv(
       containerName: entry.docker?.containerName, image: entry.docker?.image,
     };
   }
-  // The deployment wins over portler.yml: the platform env (applied below), then the use_env
-  // file, then config. Only config values are Portler expressions; a file value is used as
-  // written, exactly as `up` and `setup` treat it, and a config key the file or the platform
-  // supplies is not resolved at all.
-  // A `default:` entry and a plain value mean the same here: the deployment wins over both.
+  // Deployment wins: platform env, then the use_env file, then config. Only config values resolve, and
+  // not for a key the file or platform supplies; a file value is used as written, as in `up` and `setup`.
   const configured = mergeEnvMaps(config.env, service.env);
   // A required key is the deployment's to supply; its config value is not used or resolved.
   const required = new Set(config.production ? requiredEnvKeys(config, service) : []);
@@ -83,8 +78,7 @@ export async function buildStartEnv(
     config,
     viewer: 'host' as const,
     self: service.name,
-    // REVIEW: Even without --prod, an export must see start's platform/file
-    // precedence, including the explicit platform env used by library callers.
+    // Exports see start's precedence also without --prod, and the platformEnv a library caller passes.
     exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments, {
       deploymentPrecedence: true,
       platformEnv: Object.fromEntries(Object.entries(platformEnv).filter((entry): entry is [string, string] => entry[1] !== undefined)),
@@ -92,8 +86,7 @@ export async function buildStartEnv(
   };
   const env: EnvMap = {};
   for (const [key, value] of Object.entries(configured)) {
-    // Own-property checks: `toString` or `constructor` are valid variable names, and a
-    // plain `in` or index lookup would find the inherited Object.prototype member instead.
+    // Own-property checks: a plain `in` would find Object.prototype's `toString` or `constructor`.
     if ((Object.hasOwn(platformEnv, key) && platformEnv[key] !== undefined) || Object.hasOwn(baseEnv, key) || required.has(key)) continue;
     try {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('invalid env key');
@@ -111,20 +104,15 @@ export async function buildStartEnv(
   for (const [key, value] of Object.entries(platformEnv)) {
     if (value !== undefined) env[key] = value;
   }
-  // Portler's own values go on top of the platform's: generated PORTLER_* values,
-  // PORTLER_SERVICE_NAME and the port_env names are derived from the chosen port (which the
-  // platform's PORT selected above), so a stale PORTLER_* value in the shell cannot replace them.
+  // Portler's values go on top of the platform's: they derive from the chosen port, so a
+  // stale PORTLER_* value in the shell cannot replace them.
   Object.assign(env, buildGeneratedEnv(assignments), { PORTLER_SERVICE_NAME: service.name });
   for (const key of service.portEnv) env[key] = String(port);
   return env;
 }
 
-/**
- * prod.require for `start`. The port_env names are start's own: they always carry the port it
- * listens on, and only the platform's PORT chooses that port. So a required port_env name is met
- * when the platform sets PORT, and not by the same name in the use_env file or the shell, which
- * start would overwrite; every other key is met by what the deployment supplies.
- */
+/** prod.require for `start`. A required port_env name is met only when the platform sets PORT,
+ * since start fills port_env with its own port; other keys must come from the deployment. */
 export function assertStartRequirements(
   config: PortlerConfig,
   service: ServiceConfig,
@@ -133,7 +121,7 @@ export function assertStartRequirements(
 ): void {
   const required = requiredEnvKeys(config, service);
   const portKeys = required.filter((key) => service.portEnv.includes(key));
-  // REVIEW: A missing platform PORT must not hide other missing production keys.
+  // A missing PORT must not hide other missing keys.
   const messages: string[] = [];
   if (portKeys.length > 0 && (platformEnv.PORT === undefined || platformEnv.PORT === '')) {
     messages.push(
@@ -162,11 +150,8 @@ export async function commandStart(args: ParsedArgs): Promise<number> {
   const service = selectStartService(config, args.positionals);
   assertServiceCwd(config, service);
   const baseEnv = await loadBaseEnv(config, { allowMissing: true });
-  // Checked against what the platform and the use_env file supply, before buildStartEnv picks
-  // a port: `require: [PORT]` with `port_env: PORT` must fail when the platform sets no PORT,
-  // not pass on a free port the platform does not route to.
-  // REVIEW: Aggregate start's production errors and required:true errors, and
-  // use start's deployment-first precedence even when --prod was not typed.
+  // Before buildStartEnv picks a port: `require: [PORT]` with `port_env: PORT` must fail when the
+  // platform sets no PORT, not pass on a port it does not route to. Deployment-first even without --prod.
   const missing = envRequirementProblems(config, [service.name], baseEnv, { project: false, deployment: false, deploymentPrecedence: true });
   if (args.prod) {
     try { assertStartRequirements(config, service, baseEnv); }

@@ -11,27 +11,18 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-/**
- * Select which env vars get -e flags. The full composed env must NOT be
- * forwarded — it contains the whole inherited host env (PATH, HOME, ...),
- * which would break the container — so only the keys Portler itself composed
- * (env files, root/service env, generated PORTLER_* values, port_env) are
- * passed through, minus Portler's host-process-only internal defaults.
- */
+// Only keys Portler composed (env files, root/service env, generated PORTLER_*, port_env)
+// get `-e`: the inherited host env (PATH, HOME, ...) would break the container.
 function dockerEnvEntries(env: EnvMap, explicitEnvKeys: ReadonlySet<string>): [string, string][] {
   const entries: [string, string][] = [];
 
   for (const [key, value] of Object.entries(env)) {
-    // Host-process defaults exist only to make Portler's local child processes
-    // non-interactive. A container owns its own package-manager policy, even if
-    // one of these keys was added to the composed-key set internally.
+    // Defaults that keep local child processes non-interactive; a container owns
+    // its own package-manager policy.
     if (PORTLER_INTERNAL_ENV_KEYS.has(key)) continue;
 
-    // Generated PORTLER_* values and project-declared env are already explicit.
-    // The prefix alone must not authorize forwarding: inherited host controls
-    // (PORTLER_GLOBAL_DIR, PORTLER_HOME, Kubernetes safety overrides) and any
-    // arbitrary host PORTLER_* secrets belong to the Portler process, not the
-    // service container.
+    // The PORTLER_ prefix alone never forwards a key: host controls (PORTLER_HOME, Kubernetes
+    // safety overrides, ...) and host secrets belong to the Portler process, not the container.
     if (explicitEnvKeys.has(key)) entries.push([key, value]);
   }
 
@@ -54,12 +45,8 @@ function normalizeVolume(config: PortlerConfig, volume: string): string {
   return parts.join(':');
 }
 
-/**
- * Commands that pre-create the service's Portler-managed `@name` volumes with
- * portler.* labels so `portler volumes` can find them later. `docker run -v`
- * would create them implicitly, but without labels; the leading inspect keeps
- * the create idempotent for volumes that already exist (labeled or not).
- */
+// Pre-creates `@name` volumes with portler.* labels so `portler volumes` finds them:
+// `docker run -v` would create them unlabelled.
 function ensureVolumeCommands(config: PortlerConfig, docker: DockerConfig): string[] {
   const commands: string[] = [];
   const template = shellQuote(`{{if .Labels}}{{index .Labels "${PROJECT_LABEL}"}}{{end}}`);
@@ -76,10 +63,8 @@ function ensureVolumeCommands(config: PortlerConfig, docker: DockerConfig): stri
       `[portler] error: Docker volume "${fullNameValue}" exists but is not managed by this project; refusing to mount it`,
     );
 
-    // `docker volume create <existing>` is idempotent, so an absent-check followed
-    // by create can lose a race to a foreign creator and still exit zero. Always
-    // re-inspect and verify the project label before docker run gets a chance to
-    // mount (and modify) the volume.
+    // `docker volume create <existing>` exits zero, so a create can lose a race to
+    // a foreign creator unnoticed. Re-inspect and check the label before mounting.
     commands.push(
       `if ! volume_owner=$(docker volume inspect --format ${template} ${fullName} 2>/dev/null); then ` +
         `docker volume create ${labels} ${fullName} >/dev/null || exit 1; ` +
@@ -106,9 +91,8 @@ function dockerBuildCommand(config: PortlerConfig, service: ServiceConfig, assig
   }
   if (build.target) args.push('--target', build.target);
 
-  // Build args resolve as the image will run: `${db.address}` is the alias on the project network.
-  // REVIEW: Build-argument exports must read the exporter's effective env, not
-  // the config-only fallback (which ignores shell/.env and mode overrides).
+  // Build args resolve as the image runs (`${db.address}` is the project-network alias). Exports
+  // read the exporter's effective env, not the config alone (no shell, .env or mode overrides).
   const resolveOptions = { config, viewer: serviceViewer(config, service), self: service.name,
     exportEnv: exportEnvReader(config, baseEnv, buildGeneratedEnv(assignments), assignments) };
   for (const [key, value] of Object.entries(build.args)) {
@@ -141,8 +125,7 @@ function dockerRunCommand(
     config.dockerNetwork,
     '--network-alias',
     service.name,
-    // REVIEW: Native Linux Docker does not define Desktop's host gateway DNS
-    // name automatically; mode-aware addresses must be resolvable there too.
+    // Docker on Linux has no host.docker.internal unless added (Docker Desktop defines it).
     ...(process.platform === 'linux' ? ['--add-host', 'host.docker.internal:host-gateway'] : []),
   ];
 
@@ -170,31 +153,22 @@ function dockerRunCommand(
   return args.map(shellQuote).join(' ');
 }
 
-/**
- * Go template printing a container's immutable ID and its owning-project label
- * (empty when unlabelled), separated by a space. Both come from ONE inspect, so
- * the ID we remove and the label we authorized it on cannot drift apart: the
- * NAME can be re-pointed at a different container between the two commands, the
- * ID cannot.
- */
+// "<id> <owner label>" from one inspect, so the removed ID is the one whose label was
+// checked: a name can be re-pointed between two commands, an ID cannot.
 function containerIdentityTemplate(): string {
   return `{{.Id}} {{if .Config.Labels}}{{index .Config.Labels "${PROJECT_LABEL}"}}{{end}}`;
 }
 
-/** Same idea for a network (labels sit at the top level there). */
+// Network labels sit at the top level, not under .Config.
 function networkOwnerTemplate(): string {
   return `{{if .Labels}}{{index .Labels "${PROJECT_LABEL}"}}{{end}}`;
 }
 
-/** Split "<id> <owner>" from the template above; owner may be empty. */
+// Splits containerIdentityTemplate's output; owner may be empty.
 const SPLIT_IDENTITY = 'cid=${info%% *}; owner=${info#* }';
 
-/**
- * Remove a leftover container with our name, but ONLY if it is labelled as
- * ours, and then BY ID. `docker rm -f <name>` on a name collision would destroy
- * an unrelated container (and its data), so a foreign owner aborts the start.
- * `-v` takes our container's anonymous volumes along, as `--rm` would have.
- */
+// Removes a leftover container of our name by ID, only if labelled ours; a foreign one aborts
+// the start. `-v` drops its anonymous volumes, as `--rm` would.
 function preflightRemoveContainer(config: PortlerConfig, containerName: string): string {
   const name = shellQuote(containerName);
   const project = shellQuote(config.projectDir);
@@ -213,7 +187,7 @@ function preflightRemoveContainer(config: PortlerConfig, containerName: string):
   );
 }
 
-/** Exit-trap cleanup: remove our own container by ID, never a foreign one. */
+// Exit trap: removes our own container by ID, never a foreign one.
 function trapRemoveContainer(config: PortlerConfig, containerName: string): string {
   const name = shellQuote(containerName);
   const project = shellQuote(config.projectDir);
@@ -226,21 +200,8 @@ function trapRemoveContainer(config: PortlerConfig, containerName: string): stri
   );
 }
 
-/**
- * Ensure the project network exists AND belongs to this project.
- *
- * Three distinct situations, all of which used to end in "the network exists,
- * carry on":
- * - it exists and is ours            -> use it
- * - it exists and is NOT ours        -> refuse to start (we would attach the
- *   service to a stranger's network, and a later `down` would try to remove it)
- * - it does not exist                -> create it, then re-inspect, because a
- *   parallel `docker network create` may have won the race — and the winner
- *   might not be another Portler service of this project.
- *
- * A failing final inspect (daemon down, no permission) exits non-zero with
- * docker's own error on stderr instead of silently continuing.
- */
+// A foreign network aborts the start. Re-inspect after a create: a parallel `docker network
+// create` may have won the race; a failing final inspect exits with docker's error.
 function ensureNetwork(config: PortlerConfig): string {
   const network = shellQuote(config.dockerNetwork);
   const project = shellQuote(config.projectDir);
@@ -261,11 +222,7 @@ function ensureNetwork(config: PortlerConfig): string {
   );
 }
 
-/**
- * Build the shell command that (optionally builds, then) ensures the network,
- * cleans up any stale container of ours, and runs the service container with
- * cleanup traps wired to EXIT/INT/TERM.
- */
+/** Build (if set), owned network and volumes, stale-container removal, then the run with a cleanup trap. */
 export function dockerShellCommand(
   config: PortlerConfig,
   service: ServiceConfig,

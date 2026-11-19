@@ -39,10 +39,8 @@ export interface DockerConfig {
   env: UnknownMap;
   command?: string;
   /**
-   * The container runs the service's `command` (a service with top-level
-   * `image`/`build`), so `prod.command` reaches it. Absent for a `docker:`
-   * block, which sets its own command or leaves the image CMD, even when the
-   * text it sets happens to match `command`.
+   * The container runs the service's `command` (top-level `image`/`build`), so `prod.command`
+   * reaches it. Absent for a `docker:` block, even when its command text matches.
    */
   commandFromService?: true;
 }
@@ -62,15 +60,14 @@ export interface K8sConfig {
 }
 
 /**
- * One setup command. A plain string in portler.yml is the same as `{ run }`:
- * it runs once per checkout and again when its command or cwd changes (the
- * receipt lives in `.portler/setup.json`). `if_missing` runs it only while
- * nothing exists at that path, relative to the step's cwd; `always` runs it on
- * every `up` and `setup`. Neither of those two keeps a receipt.
+ * A plain string is `{ run }`: runs once, and again when its command or cwd changes (receipt in
+ * `.portler/setup.json`).
  */
 export interface SetupStep {
   run: string;
+  /** Runs only while this path (relative to the step's cwd) is absent; keeps no receipt. */
   ifMissing?: string;
+  /** Runs on every `up` and `setup`; keeps no receipt. */
   always?: boolean;
   /** Plain steps only: files whose content is part of the receipt, relative to the step's cwd. */
   watch?: string[];
@@ -93,10 +90,7 @@ export interface ServiceConfig {
   command?: string;
   cwd: string;
   port?: number;
-  /**
-   * Transports the port is published and checked on. Absent means `tcp`, so
-   * library callers that build a ServiceConfig by hand keep today's behavior.
-   */
+  /** Transports the port is published and checked on. Default: `tcp`. */
   transport?: PortTransport;
   portEnv: string[];
   env: UnknownMap;
@@ -108,25 +102,15 @@ export interface ServiceConfig {
   preferDeclaredPort: boolean;
   dependsOn: DependencyConfig[];
   healthcheck?: HealthcheckConfig;
-  /**
-   * Set when the service always runs in Docker (top-level image/build/
-   * dockerfile/volumes/type: docker keys).
-   */
+  /** Set when the service always runs in Docker (top-level image/build/dockerfile/volumes/type: docker). */
   docker?: DockerConfig;
-  /**
-   * Docker config from the service's `docker:` key, used only when running
-   * `portler up docker`; plain `up` ignores it. See applyDockerMode.
-   */
+  /** The service's `docker:` key, used only by `portler up docker` (applyDockerMode). */
   dockerModeOverride?: DockerConfig;
-  /**
-   * Kubernetes config from the service's `k8s:` key, used only when running
-   * `portler up k8s` / `portler k8s render`. See applyK8sMode.
-   */
+  /** The service's `k8s:` key, used only by `portler up k8s` / `portler k8s render` (applyK8sMode). */
   k8s?: K8sConfig;
   /**
-   * Values the service offers to others as `${service.<name>}`, e.g. a
-   * connection URL. Templates that may use `self.*` and `env.KEY` (the
-   * service's own env); they resolve for whoever reads them.
+   * Values offered as `${service.<name>}`, e.g. a connection URL. Templates may use `self.*` and
+   * `env.KEY` (the service's own env) and resolve for whoever reads them.
    */
   exports?: Record<string, string>;
 }
@@ -159,11 +143,7 @@ export interface ProxyConfig {
   port?: number;
   /** Routes sorted longest-prefix-first, ready for first-match routing. */
   routes: ProxyRoute[];
-  /**
-   * Extra hostnames the proxy answers for, beyond the always-allowed loopback
-   * names. Requests with any other Host header are refused (DNS-rebinding
-   * protection).
-   */
+  /** Hostnames allowed besides loopback; any other Host header is refused (DNS-rebinding protection). */
   allowedHosts: string[];
 }
 
@@ -179,11 +159,8 @@ export interface PortlerConfig {
   setup?: SetupStep[];
   prod?: ProductionConfig;
   /**
-   * Stable project name (`name:` in portler.yml). Under --prod it names the
-   * Docker network, the containers and the managed volumes in place of the
-   * directory hash, so a release that unpacks into a new folder keeps its
-   * volumes, and a release that starts while the previous one is still up is
-   * refused by Docker on the container name. Development runs ignore it.
+   * Under --prod, replaces the directory hash in network, container and volume names, so a new
+   * release folder keeps its volumes and Docker refuses a second release by container name. Ignored in development.
    */
   name?: string;
   /** `docker_network:` was set in the config; `name` does not rename it. */
@@ -202,16 +179,9 @@ export interface PortlerConfig {
   portRange: PortRange;
   preferDeclaredPort: boolean;
   dockerNetwork: string;
-  /**
-   * Directory whose identity scopes Portler-managed volume names. The main
-   * repository root when projectDir is a linked git worktree (so worktrees
-   * resolve `@name` volumes to the same project volumes), projectDir otherwise.
-   */
+  /** Scopes managed volume names: the main repo root for a linked git worktree (shared `@name`), else projectDir. */
   volumeRoot: string;
-  /**
-   * Active volume set (from --volume-set or PORTLER_VOLUME_SET). When set,
-   * `@name` volumes resolve to the `<name>--<set>` variant.
-   */
+  /** From --volume-set or PORTLER_VOLUME_SET: `@name` volumes resolve to `<name>--<set>`. */
   volumeSet?: string;
   /** Portler-managed volumes (`@name` sources) declared across all services. */
   volumes: DeclaredVolume[];

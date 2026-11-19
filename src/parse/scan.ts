@@ -1,15 +1,6 @@
-/**
- * Shared quote-aware scanning for the YAML-subset and dotenv parsers, so the
- * escaping rules (backslash escapes inside double quotes, none inside single
- * quotes) live in one place.
- */
+// Quote-aware scanning shared by the YAML and dotenv parsers.
 
-/**
- * Characters after which a quote is understood to START a quoted span. A quote
- * anywhere else is a literal character in a bare scalar — without this rule the
- * apostrophe in `msg: it's fine # note` would open a span that never closes,
- * hiding the trailing comment and swallowing the rest of the line.
- */
+// A quote opens a span only after one of these, so the apostrophe in `msg: it's fine # note` stays literal.
 const QUOTE_OPENER_PREDECESSORS = /[\s:=,[{(-]/;
 
 function opensQuotedSpan(input: string, index: number): boolean {
@@ -17,11 +8,7 @@ function opensQuotedSpan(input: string, index: number): boolean {
   return QUOTE_OPENER_PREDECESSORS.test(input[index - 1]!);
 }
 
-/**
- * Return the index of the first character outside any quoted span for which
- * `predicate` returns true, or -1. The predicate is never consulted for
- * characters inside quotes or for the quote characters themselves.
- */
+/** -1 when nothing matches. `predicate` never sees quoted characters or the quotes themselves. */
 export function findUnquoted(input: string, predicate: (char: string, index: number) => boolean): number {
   let quote: '"' | "'" | null = null;
   let escaped = false;

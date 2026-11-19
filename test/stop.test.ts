@@ -1,12 +1,6 @@
 /**
- * Real-process tests for the stop path. No Docker, no Kubernetes: services are
- * plain `node` processes in their own process group, exactly like spawnService
- * creates them.
- *
- * The motivating incident: a pids.json written by an older Portler (no start
- * token) recorded a pid that the OS has since handed to an unrelated process.
- * `portler down` sent SIGTERM/SIGKILL to that pid's process GROUP, killing a
- * stranger's process tree. Everything below exists to keep that impossible.
+ * Stop-path tests with real processes and no Docker or Kubernetes: each service is a
+ * plain `node` process in its own group, as spawnService makes them.
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -42,7 +36,6 @@ afterEach(async () => {
   await fs.rm(projectDir, { recursive: true, force: true });
 });
 
-/** A long-lived process in its own group, like the ones Portler supervises. */
 async function startSleeper(): Promise<ChildProcess> {
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], {
     detached: true,
@@ -73,8 +66,7 @@ function pidInfo(pid: number, startToken: string | undefined): PidServiceInfo {
   };
 }
 
-/** Poll until the pid is gone, so the assertion does not race the signal. */
-/** Waits until `pid` no longer runs: a zombie counts as exited, as under a PID 1 that never reaps it stays one. */
+// Counts a zombie as exited: under a PID 1 that never reaps, it stays one.
 async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -89,10 +81,8 @@ describe('signalDecision', () => {
     assert.equal(signalDecision('match', 'alive', false), 'group');
   });
 
-  it('never signals a pid the OS handed to someone else', () => {
+  it('never signals a pid the OS handed to someone else, even one proven ours earlier in the stop', () => {
     assert.equal(signalDecision('reused', 'alive', false), 'none');
-    // Not even if we proved ownership earlier in this same stop: the pid was
-    // released and recycled inside the grace window, and the group id with it.
     assert.equal(signalDecision('reused', 'alive', true), 'none');
   });
 
@@ -102,16 +92,11 @@ describe('signalDecision', () => {
   });
 
   it('keeps signalling our group after the leader exits (kernel pgid reservation)', () => {
-    // The `sh -c` wrapper dies but the server it spawned lives on. While the
-    // group still has members the kernel cannot recycle the pid — and therefore
-    // cannot recycle the pgid — so the group is still provably ours.
+    // While the group has members the kernel cannot recycle the pid, so not the pgid either.
     assert.equal(signalDecision('gone', 'alive', true), 'group');
   });
 
   it('does NOT signal a live group whose leader is gone if ownership was never proven', () => {
-    // Without a prior proof, a live group under that pgid could belong to a
-    // process that recycled the pid, led a group, and exited. Unprovable, so
-    // untouchable.
     assert.equal(signalDecision('gone', 'alive', false), 'none');
   });
 
@@ -178,9 +163,6 @@ describe('stopServices', () => {
   });
 
   it('does NOT signal a pid that was recycled onto another process', async () => {
-    // pids.json records pid P, process P exits, and the OS hands P to something
-    // unrelated. The recorded start token no longer matches, so the pid must be
-    // left strictly alone — signalling its GROUP would kill a stranger's tree.
     const survivor = await startSleeper();
     const pid = survivor.pid!;
 
@@ -189,19 +171,15 @@ describe('stopServices', () => {
     const result = await stopServices(projectDir);
 
     assert.deepEqual(result.stopped, [], 'a reused pid must not be reported as stopped');
-    // Give any (buggy) signal time to land before asserting survival.
+    // Give a wrong signal time to land before asserting survival.
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(isPidRunning(pid), 'the unrelated process holding the pid must survive');
 
-    // The entry is stale by definition — our service is long gone — so the
-    // bookkeeping is cleared. That is the part we own.
     assert.equal(await readPids(projectDir), null);
   });
 
   it('does NOT signal a legacy entry that has no start token', async () => {
-    // THE REGRESSION. A pids.json from Portler < 0.2.0 has a pid and no token.
-    // The old code called that "unverifiable" and signalled it best-effort. If
-    // the pid has since been reused, that kills an unrelated process group.
+    // A pids.json from Portler < 0.2.0 has a pid and no token.
     const bystander = await startSleeper();
     const pid = bystander.pid!;
     await writePidsFile({ api: pidInfo(pid, undefined) });
@@ -214,15 +192,12 @@ describe('stopServices', () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(isPidRunning(pid), 'the process must survive an ordinary down');
 
-    // The entry is KEPT: it may be a real service of ours, and silently
-    // forgetting it would orphan it with no record anywhere.
     const remaining = await readPids(projectDir);
     assert.deepEqual(Object.keys(remaining?.services ?? {}), ['api']);
   });
 
   it('does NOT signal a fresh entry whose token capture failed', async () => {
-    // Same shape as a legacy entry: pidInfoFor could not read the token, so
-    // startToken is undefined. Fail closed, identically.
+    // pidInfoFor could not read the token, so the entry looks legacy.
     const bystander = await startSleeper();
     await writePidsFile({ api: pidInfo(bystander.pid!, undefined) });
 
@@ -234,7 +209,6 @@ describe('stopServices', () => {
   });
 
   it('signals an unverifiable pid only when --force is given', async () => {
-    // The escape hatch for the legacy case: an explicit, documented user act.
     const child = await startSleeper();
     const pid = child.pid!;
     await writePidsFile({ api: pidInfo(pid, undefined) });
@@ -247,8 +221,6 @@ describe('stopServices', () => {
   });
 
   it('refuses a reused pid EVEN with --force', async () => {
-    // --force means "I accept the risk on pids you cannot identify". It does not
-    // mean "kill a process you have PROVEN belongs to someone else".
     const survivor = await startSleeper();
     const pid = survivor.pid!;
     await writePidsFile({ api: pidInfo(pid, 'a-token-from-a-long-dead-process') });
@@ -261,11 +233,6 @@ describe('stopServices', () => {
   });
 
   it('re-verifies identity between classification and the signal', async () => {
-    // The race: the pid is ours when `down` reads pids.json, exits during the
-    // stop, and the number is recycled before we signal. Simulated by recording
-    // a live pid with a token, then killing it and letting an unrelated process
-    // stand in for the recycled number — the token check must catch it at signal
-    // time, not only at classification time.
     const original = await startSleeper();
     const pid = original.pid!;
     const token = (await readProcessStartToken(pid)) ?? undefined;
@@ -273,9 +240,7 @@ describe('stopServices', () => {
 
     await writePidsFile({ api: pidInfo(pid, token) });
 
-    // The process exits; the pid entry now points at nothing. Wait for Node to
-    // reap it (its own child), not just for it to stop running: an unreaped
-    // zombie would still answer to its pid and start token.
+    // Wait for Node to reap it: an unreaped zombie still answers to its pid and start token.
     const reaped = new Promise((resolve) => original.once('exit', resolve));
     process.kill(pid, 'SIGKILL');
     await reaped;
@@ -326,9 +291,7 @@ describe('stopServices', () => {
 
 
   it('leaves what a dependent needs running when that dependent could not be stopped', async () => {
-    // cache <- db <- api, and web on its own. api has no start token, so its
-    // identity cannot be proven and it is kept; db and cache must then stay up
-    // with it instead of being stopped under a still-running api.
+    // cache <- db <- api, and web on its own; api has no start token.
     const entry = (pid: number, token: string | undefined, dependsOn: string[]): PidServiceInfo => ({
       ...pidInfo(pid, token),
       dependsOn,
@@ -384,10 +347,8 @@ describe('stopServices', () => {
   });
 
   it('kills a service whose group leader exits but whose children live on', { timeout: 10_000 }, async (t) => {
-    // The leader must stay alive until stopServices reads its real start token.
-    // A timed exit races CI scheduling: if it exits before that read, refusing
-    // the unproven group is correct. IPC also proves the grandchild is ready,
-    // so this cannot pass just by killing the leader before it forks.
+    // The leader exits only after stopServices reads its token (a timed exit races CI),
+    // and IPC proves the grandchild is up before that.
     const grandchildScript = `
       process.on('SIGTERM', () => {});
       setTimeout(() => {}, 60_000);
@@ -440,15 +401,12 @@ describe('stopServices', () => {
       },
     });
 
-    // SIGKILL must exercise the gone-leader/proven-group path, not merely
-    // signal a still-live leader or succeed before a grandchild ever existed.
     assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
     assert.deepEqual(result.stopped, ['api']);
     assert.deepEqual(result.unverified, []);
     assert.deepEqual(result.failures, []);
-    // Under a PID 1 that does not reap, the killed members stay as zombies and
-    // kill(-pid, 0) keeps succeeding, so ask whether anything in the group can
-    // still run, the same question stop answers.
+    // Under a PID 1 that does not reap, killed members stay zombies and kill(-pid, 0)
+    // still succeeds, so ask whether anything in the group can still run.
     assert.equal(processGroupAliveAfterKill(pid), false, 'nothing in the group may still run');
     assert.equal(await readPids(projectDir), null, 'the confirmed teardown must remove the PID file');
   });
@@ -482,8 +440,7 @@ describe('stopServices', () => {
   });
 
   it('reports a service as stopped only once its group is actually gone', async () => {
-    // A service that ignores SIGTERM. "We sent SIGTERM" is not a teardown; the
-    // SIGKILL round has to finish the job before this counts as stopped.
+    // It ignores SIGTERM, so only the SIGKILL round can make it count as stopped.
     const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60_000)"], {
       detached: true,
       stdio: 'ignore',
@@ -502,22 +459,10 @@ describe('stopServices', () => {
   });
 });
 
-/**
- * The second signal round is where a stop can go wrong in ways the first cannot:
- * the pid was proven ours at SIGTERM, and then — inside the grace window — it is
- * released and recycled, or its token stops being readable, or the kernel
- * refuses the kill. `stopped` must not survive any of that, because `down`
- * reports it, prunes the PID entry on the strength of it, and exits 0.
- *
- * The OS will not recycle a pid on cue, so the syscalls are injected. Everything
- * below the hooks is the real stopServices control flow.
- */
 describe('stopServices: a PID 1 that does not reap', () => {
   it('reports a service as stopped once its group holds only zombies, and drops its entry', { skip: process.platform !== 'linux' }, async () => {
-    // In a container whose PID 1 never reaps orphans (tail -f /dev/null, a
-    // shell), a detached service that exits on SIGTERM stays a zombie. Its
-    // group still answers kill(-pgid, 0), so down used to wait, send SIGKILL,
-    // and report a failure every time, keeping the entry and the port.
+    // In a container whose PID 1 never reaps orphans (tail -f /dev/null, a shell), a
+    // service that exits on SIGTERM stays a zombie, and its group still answers kill(-pgid, 0).
     const group = await startZombieGroup(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)']);
     try {
       const token = await readProcessStartToken(group.pgid);
@@ -537,11 +482,13 @@ describe('stopServices: a PID 1 that does not reap', () => {
   });
 });
 
+// `down` prunes an entry reported `stopped`. The OS will not recycle a pid on cue, so
+// these tests inject the syscalls as hooks.
 describe('stopServices: the SIGKILL round', () => {
   const PID = 424_242;
   const TOKEN = 'start-token-of-our-service';
 
-  /** Ignores SIGTERM: the group is always still alive when the SIGKILL round runs. */
+  // The group survives SIGTERM, so the SIGKILL round always runs.
   function stubbornHooks(overrides: Partial<StopHooks> = {}): StopHooks {
     return {
       graceMs: 20,
@@ -559,10 +506,6 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('does not report "stopped" when the pid is RECYCLED between SIGTERM and SIGKILL', async () => {
-    // Matched at SIGTERM (so it was signalled), then the process exits and the OS
-    // hands the number to a stranger. The SIGKILL round re-verifies, sees a
-    // different token, and must refuse — and refusing means the service is NOT
-    // stopped: something is still running under that pid, and it is not ours.
     const signals: NodeJS.Signals[] = [];
     let round = 0;
 
@@ -591,9 +534,7 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('does not report "stopped" when the token becomes UNREADABLE before SIGKILL', async () => {
-    // Matched at SIGTERM; by the SIGKILL round the token cannot be read (the
-    // /proc entry vanished mid-read, ps failed, ...). "We cannot tell" is not
-    // permission to kill a process group, and it is not proof of a teardown.
+    // The /proc entry vanished mid-read, or ps failed.
     let round = 0;
     const signals: NodeJS.Signals[] = [];
 
@@ -620,8 +561,7 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('does not report "stopped" when the group survives SIGKILL', async () => {
-    // Both rounds went out and the group is still there (a process wedged in
-    // uninterruptible sleep, an unreaped group). The teardown did not complete.
+    // As with a process wedged in uninterruptible sleep.
     const result = await stopServices(projectDir, undefined, {}, stubbornHooks());
 
     assert.deepEqual(result.stopped, []);
@@ -631,10 +571,7 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('does not report "stopped" when the kernel REFUSES the signal', async () => {
-    // EPERM: the group exists and is not ours to signal. This was swallowed —
-    // `sendSignalToProcessGroup` caught everything — so `down` reported the
-    // service stopped, pruned its entry, released its port and exited 0 while the
-    // process kept running.
+    // EPERM: the group exists and is not ours to signal.
     const result = await stopServices(
       projectDir,
       undefined,
@@ -651,8 +588,6 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('reports "stopped" when the SIGKILL round confirms the group is gone', async () => {
-    // The happy path through the same code: SIGTERM does not do it, SIGKILL does,
-    // and the group is observed gone. Only THIS prunes the entry.
     let alive = true;
 
     const result = await stopServices(
@@ -676,10 +611,8 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('confirms a zombie-only group after its own SIGKILL even when the check before it never settles', async () => {
-    // Under a PID 1 that does not reap, on a busy host, other processes exiting
-    // mid-scan can keep the strict check answering "alive" through the grace
-    // period. After this stop's SIGKILL no member can start another process, so
-    // the after-kill check decides, and the entry is dropped instead of kept.
+    // Under a non-reaping PID 1 on a busy host, processes exiting mid-scan can hold the
+    // strict check at "alive" all grace period; after our SIGKILL the after-kill check decides.
     const signals: NodeJS.Signals[] = [];
     const result = await stopServices(
       projectDir,
@@ -704,8 +637,6 @@ describe('stopServices: the SIGKILL round', () => {
   });
 
   it('counts a group that vanished on its own (ESRCH) as stopped', async () => {
-    // The service exited between the identity check and the kill. The signal
-    // "failed" with ESRCH, but the thing we wanted gone IS gone.
     let alive = true;
 
     const result = await stopServices(
@@ -727,18 +658,10 @@ describe('stopServices: the SIGKILL round', () => {
   });
 });
 
-/**
- * A Docker service whose supervising `docker run` shell was killed while its
- * container ran on: the leader pid is gone, and the `docker run` client is left
- * in the group until the container goes. A `docker` on PATH stands in for the
- * daemon; its `rm -f` drops a marker that makes the left-behind member exit,
- * the way the real client does when its container is removed.
- */
+// The `docker run` shell is gone and its client stays in the group until the container
+// goes; the fake docker's `rm` drops a marker that makes that member exit, as the real one does.
 describe('stopServices: a container whose docker run shell is gone', () => {
-  /**
-   * `rmDelay` keeps `docker rm` from returning for that many seconds after it
-   * drops the marker, so the member can exit before Portler looks at its group.
-   */
+  /** `rmDelay` (seconds) holds `docker rm` after the marker, so the member exits before Portler looks. */
   async function fakeDocker(
     dir: string,
     marker: string,
@@ -823,11 +746,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its tokenless leader is left a zombie', { timeout: 15_000 }, async () => {
-    // Under a PID 1 that does not reap, the exited shell stays a zombie: kill(pid, 0)
-    // still answers, so an entry without a start token (older Portler, or a token
-    // that could not be read) verifies as unverifiable. The container was removed
-    // and nothing in the group can run, so it is stopped, signalled by nobody and
-    // without a warning.
+    // Under a PID 1 that does not reap, the exited shell stays a zombie, so a tokenless
+    // entry verifies as unverifiable.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4242, undefined), dockerContainer: 'c-db' } });
@@ -868,10 +788,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its leader pid now belongs to a stranger', { timeout: 15_000 }, async () => {
-    // The shell exited long ago and the OS gave its pid to an unrelated process,
-    // which here even leads a live group under that number. The token proves the
-    // pid is not ours, and the reuse proves our old group was empty, so removing
-    // the running container is the stop. The stranger is never signalled.
+    // The shell's pid now leads a stranger's live group; the token proves it is not ours.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
@@ -904,10 +821,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its leader pid is reused during the wait', { timeout: 15_000 }, async () => {
-    // The shell was already gone when the container was removed, so the service
-    // waits for its group. During that wait the old group empties and the OS hands
-    // the pid to a stranger that leads a live group under the same number. The
-    // token still proves the pid is not ours, so this is a stop, not an orphan.
+    // During the group wait the group empties and a stranger takes the pid, leading a group under it.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
@@ -946,10 +860,7 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its group exits right after the settle wait', { timeout: 15_000 }, async () => {
-    // The shell was gone when the container was removed, and the client it left
-    // stays alive through the whole settle wait, including the last check. It
-    // exits before the signal round looks, so that round sees a plain stale
-    // entry. The container was still removed by us, so the service was stopped.
+    // The client the shell left survives the settle wait and exits before the signal round.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
@@ -991,10 +902,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
       ? 'keeps the entry when the group of a leader that exited just before the round outlives the wait'
       : 'counts a removed container stopped when its leader exits just before the signal round';
     it(title, { timeout: 15_000 }, async () => {
-      // The shell is still alive when the container is removed and when the
-      // settle checks look, so the service is not settling. It exits just before
-      // the signal round, leaving its `docker run` client in the group for a
-      // moment. The round must not judge that group on the spot.
+      // The shell lives through the removal and settle checks, then exits just before the
+      // signal round, leaving its client in the group for a moment.
       const marker = path.join(projectDir, 'removed');
       const bin = await fakeDocker(projectDir, marker);
       const token = 'Mon Oct 12 20:48:05 2026 4242';
@@ -1048,10 +957,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   }
 
   it('counts a removed container stopped when its late-exiting leader pid is reused during the late wait', { timeout: 15_000 }, async () => {
-    // The shell exits just before the signal round (so its refusal is held back),
-    // its group then empties, and its pid goes to a stranger that leads a group
-    // under the same number. The group probe reads alive to the end, but the
-    // leader's identity says the pid is no longer ours: the service was stopped.
+    // The shell exits just before the signal round, its group empties, and a stranger
+    // takes the pid and leads a group under it, so the probe reads alive to the end.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     const ours = 'Mon Oct 12 20:48:05 2026 4242';
@@ -1096,10 +1003,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its pid is reused between the round and the hold-back', { timeout: 15_000 }, async () => {
-    // At the signal round the leader is gone and its group still alive; before
-    // Portler decides whether to hold the refusal back, the group empties and the
-    // pid goes to a stranger leading a group under the same number. The refusal
-    // is held back anyway, and the check after the wait sees the stranger.
+    // At the round the leader is gone and its group alive; before the hold-back decision
+    // the group empties and a stranger takes the pid, leading a group under it.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     const ours = 'Mon Oct 12 20:48:05 2026 4343';
@@ -1147,10 +1052,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its pid is reused right after the late check', { timeout: 15_000 }, async () => {
-    // The leader exits just before the round, so its refusal waits out the late
-    // wait. The check after it sees the leader gone and its group gone; a
-    // stranger then takes the pid (without leading a group). That later
-    // liveness must not overturn the gone/gone just sampled.
+    // The leader exits just before the round; the check after the late wait sees leader
+    // and group gone, then a stranger takes the pid (without leading a group).
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     const ours = 'Mon Oct 12 20:48:05 2026 4444';
@@ -1192,10 +1095,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('counts a removed container stopped when its tokenless pid goes to a stranger after the group is seen gone', { timeout: 15_000 }, async () => {
-    // An entry without a start token verifies as unverifiable, so its refusal is
-    // held back. During the wait its old group is seen gone; a stranger then
-    // takes the pid and leads a group under that number. Re-probing would read
-    // that stranger's group as alive, so the gone that was seen must stand.
+    // A tokenless entry is unverifiable, so its refusal is held back. Mid-wait its old
+    // group is seen gone, then a stranger takes the pid and leads a group under it.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4545, undefined), dockerContainer: 'c-db' } });
@@ -1248,10 +1149,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('keeps a group seen gone during the settle wait counted as gone while another group holds the wait', { timeout: 15_000 }, async () => {
-    // db (no start token) and cache both had their shells exit before down
-    // started. db's old group is seen gone mid-wait; a stranger then takes its pid
-    // and leads a group under that number. cache's group never goes, so the wait
-    // runs on. The gone seen for db must stand rather than be re-probed.
+    // db (no start token) and cache lost their shells before down. db's group is seen gone
+    // mid-wait, then a stranger leads a group under its pid; cache's group never goes.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({
@@ -1322,9 +1221,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('gives a removed container whose leader was already gone one confirm window, not two', { timeout: 15_000 }, async () => {
-    // The shell had exited before down started and its group never goes. The
-    // settle wait spends the confirm window on it; the later hold-back must not
-    // add a second one, so the warning comes after about one window in all.
+    // The shell exited before down and its group never goes, so the settle wait spends
+    // the confirm window on it.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     await writePidsFile({ db: { ...pidInfo(4242, 'Mon Oct 12 20:48:05 2026 4242'), dockerContainer: 'c-db' } });
@@ -1364,10 +1262,8 @@ describe('stopServices: a container whose docker run shell is gone', () => {
   });
 
   it('judges each held-back container at its own deadline, not at the last one', { timeout: 15_000 }, async () => {
-    // db's shell had exited before down started, so db spends the settle wait;
-    // cache's shell exits just before the signal round and gets its own window
-    // after it. Neither group ever goes. db must be judged when its window ends,
-    // not held on until cache's later one ends too.
+    // db's shell exited before down, so db spends the settle wait; cache's exits just
+    // before the signal round and gets its own window after it. Neither group ever goes.
     const marker = path.join(projectDir, 'removed');
     const bin = await fakeDocker(projectDir, marker);
     const token = 'Mon Oct 12 20:48:05 2026 5252';

@@ -23,12 +23,7 @@ export function optionalNumber(value: unknown, name: string): number | undefined
   return value;
 }
 
-/**
- * A TCP port. Rejected early and by name, because an out-of-range port
- * otherwise surfaces much later as an opaque bind/allocation failure (port 0
- * in particular means "any port" to the OS and would silently defeat Portler's
- * whole reason for existing).
- */
+/** Throws outside 1-65535. Port 0 means "any port" to the OS, which would defeat allocation. */
 export function optionalPort(value: unknown, name: string): number | undefined {
   const port = optionalNumber(value, name);
   if (port === undefined) return undefined;
@@ -36,13 +31,12 @@ export function optionalPort(value: unknown, name: string): number | undefined {
   return port;
 }
 
-/** A duration in milliseconds that must be strictly positive. */
+/** Milliseconds, greater than 0. */
 export function optionalPositiveDuration(value: unknown, name: string): number | undefined {
   const duration = optionalNumber(value, name);
   if (duration === undefined) return undefined;
   if (duration <= 0) throw new Error(`${name} must be greater than 0, got ${duration}`);
-  // Node clamps larger setTimeout values to 1ms. Accepting one here would turn
-  // a supposedly slow readiness poll into a CPU-heavy busy loop.
+  // Node turns a larger setTimeout delay into 1ms, so a slow poll would become a busy loop.
   if (duration > 2_147_483_647) throw new Error(`${name} must not exceed 2147483647ms, got ${duration}`);
   return duration;
 }
@@ -54,10 +48,7 @@ export function normalizeStringArray(value: unknown, name: string): string[] {
   throw new Error(`${name} must be a string or an inline/block array of strings`);
 }
 
-/**
- * Normalize an env-like value into an object. Accepts a `KEY: value` mapping
- * or the Docker-Compose list form (`- KEY=value`).
- */
+/** A `KEY: value` mapping, or the Docker Compose list form (`- KEY=value`). */
 export function normalizeEnvObject(value: unknown, name: string): UnknownMap {
   if (value === undefined || value === null) return {};
   if (isObjectGuard(value)) return value;

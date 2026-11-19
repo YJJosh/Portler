@@ -38,16 +38,14 @@ import { printPortTable } from '../table.ts';
 import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
 import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown } from './up.ts';
 
-/** How long a namespace left Terminating by a previous down may take to clear. */
+// How long a namespace left Terminating by an earlier `down` may take to clear.
 const NAMESPACE_TERMINATION_TIMEOUT_MS = 120_000;
-/** Final pre-ready sweep: every forwarded port must accept a TCP connection. */
+// Final pre-ready sweep: every forwarded port must accept a TCP connection.
 const FORWARD_VERIFY_TIMEOUT_MS = 10_000;
 
 export function validateK8sMode(config: PortlerConfig, selectedNames: string[]): void {
-  // Validate the whole project's name mapping, not only this invocation's
-  // selection. Otherwise `up k8s foo_bar` followed by `up k8s foo-bar` applies
-  // over the same Deployment/Service even though each one-service render looks
-  // collision-free in isolation.
+  // The whole project's name mapping, not only the selection: `up k8s foo_bar` then
+  // `up k8s foo-bar` would apply over the same Deployment/Service.
   k8sServiceNames(Object.keys(config.services));
 
   for (const serviceName of selectedNames) {
@@ -60,11 +58,8 @@ export function validateK8sMode(config: PortlerConfig, selectedNames: string[]):
   }
 }
 
-/**
- * `kubectl port-forward` carries TCP only. A UDP-only service would get a local
- * port that nothing answers on, so `up k8s` refuses it; `k8s render` still
- * renders it. A tcp+udp service is forwarded for its TCP half.
- */
+/** `kubectl port-forward` carries TCP only, so `up k8s` refuses a UDP-only service (`k8s render`
+ * still renders it) and forwards only the TCP half of a tcp+udp one. */
 export function validateK8sForwards(config: PortlerConfig, selectedNames: string[]): void {
   for (const serviceName of selectedNames) {
     const service = config.services[serviceName]!;
@@ -84,11 +79,8 @@ export function validateK8sForwards(config: PortlerConfig, selectedNames: string
   }
 }
 
-/**
- * The config the local side of `up k8s` allocates ports with. kubectl port-forward
- * binds only TCP on this machine, so a tcp+udp service needs a free TCP port here,
- * not a port free for both protocols; manifests keep the service's own transport.
- */
+/** For the local side of `up k8s`: kubectl port-forward binds only TCP here, so a tcp+udp service
+ * needs only a free TCP port. Manifests keep the service's own transport. */
 export function k8sForwardConfig(config: PortlerConfig): PortlerConfig {
   if (!Object.values(config.services).some((service) => serviceTransport(service) === 'tcp+udp')) return config;
   const services = Object.fromEntries(
@@ -100,7 +92,6 @@ export function k8sForwardConfig(config: PortlerConfig): PortlerConfig {
   return { ...config, services };
 }
 
-/** Record one freshly spawned port-forward, merging with the existing file (see up.ts). */
 async function writePortForwardPid(
   config: PortlerConfig,
   serviceName: string,
@@ -115,11 +106,8 @@ async function writePortForwardPid(
   });
 }
 
-/**
- * A previous `down k8s --volumes` may have left the namespace Terminating;
- * applying into it fails with "namespace is being terminated", so wait it out
- * (bounded).
- */
+// A `down k8s --volumes` can leave the namespace Terminating, and applying into it fails
+// ("namespace is being terminated").
 async function waitOutTerminatingNamespace(cluster: ClusterInfo, config: PortlerConfig, signal?: AbortSignal): Promise<void> {
   if ((await getNamespacePhase(cluster, config.k8sNamespace, undefined, signal)) !== 'Terminating') return;
 
@@ -134,12 +122,7 @@ async function waitOutTerminatingNamespace(cluster: ClusterInfo, config: Portler
   }
 }
 
-/**
- * Final gate before declaring the stack up: every port-forward supervisor must
- * still be alive and its localhost port must actually accept a TCP connection
- * right now. Catches forwards killed by late pod restarts after their initial
- * readiness check passed.
- */
+// A late pod restart can kill a forward after its readiness check passed.
 async function verifyForwards(
   config: PortlerConfig,
   children: Map<string, ChildProcess>,
@@ -183,12 +166,8 @@ interface K8sStack {
   teardown: () => Promise<void>;
 }
 
-/**
- * The start decision for k8s mode. Runs under the lifecycle lock (see up.ts). An aborted
- * `signal` (Ctrl-C or SIGTERM on a foreground run) ends startup like a failure does: the
- * rollback below stops this run's port-forwards, deletes what it applied and releases its
- * ports, and only then does the error reach the caller.
- */
+// Runs under the lifecycle lock. An aborted `signal` ends startup like a failure: the rollback stops
+// this run's port-forwards, deletes what it applied and releases its ports before the error returns.
 async function startK8sPhase(
   args: ParsedArgs,
   config: PortlerConfig,
@@ -204,17 +183,15 @@ async function startK8sPhase(
   ensureNoOverlap(runningNames, selectedNames);
   // Read the cached state before writing the record, so a corrupt cache leaves none behind.
   const state = await readState(config.projectDir);
-  // Before anything touches the cluster: `env` and `down k8s` reach it through this
-  // record, whatever context is active by then. Only a complete teardown takes it back,
-  // since a rollback can fail to delete what it applied. Its kubectl reads are cancellable
-  // like every startup call; the rollback's are not, since it must finish.
+  // Before anything touches the cluster: `env` and `down k8s` find it through this record.
+  // Only a complete teardown takes it back, since a rollback can fail to delete what it
+  // applied. Its kubectl reads are cancellable; the rollback's are not, since it must finish.
   const forgetOwnRecord = await recordLaunchContext(config, cluster, run);
 
   const reserveNames = servicesWithPorts(config, selectedNames);
   const startProxy = config.proxy !== undefined && !runningNames.has(PROXY_SERVICE_NAME);
   if (startProxy) reserveNames.push(PROXY_SERVICE_NAME);
-  // As in up.ts: Ctrl-C may end the wait for another project's hold on the port
-  // registry, before anything is reserved.
+  // Ctrl-C may end the wait for another project's hold on the port registry.
   const assignments = await allocateAssignments(k8sForwardConfig(config), state, reserveNames, runningNames, {
     recorded: pids?.services,
     signal,
@@ -228,19 +205,11 @@ async function startK8sPhase(
   const generatedEnv = buildGeneratedEnv(assignments);
 
   const children = new Map<string, ChildProcess>();
-  // The services whose manifests this run has started applying. Teardown deletes
-  // exactly these, by label, even when the run selected every service the config
-  // had when it started: the config may have grown since, and a newer run may
-  // own the services it added.
+  // Teardown deletes exactly these by label, even when every service was selected: the
+  // config may have grown since, and a newer run may own the added services.
   const appliedNames: string[] = [];
-  // stopServices kills the port-forward supervisors and prunes their pids.json
-  // entries. Nothing to delete when the failure came before the first apply.
-  // Rolling back a failed start never deletes volumes: a PVC that already holds
-  // a database's data must survive a crash-loop during startup.
-  //
-  // A failure while deleting must not abort the rollback — the ports still have
-  // to be released, and on the error path a throw here would replace the real
-  // startup error with a misleading cleanup one.
+  // Rollback never deletes volumes: a PVC with a database's data must survive a startup crash-loop. A
+  // failed delete must not abort it: ports still need releasing, and a throw would hide the startup error.
   const stopNames = startProxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames;
   const teardown = async (): Promise<void> => {
     const result = await stopServices(config.projectDir, stopNames);
@@ -256,9 +225,8 @@ async function startK8sPhase(
       }
     }
 
-    // Do not return reservations for forwards that survived. If Kubernetes
-    // deletion failed, keep all of them: the lifecycle is incomplete and a
-    // later explicit `down k8s` needs the bookkeeping intact.
+    // Keep reservations of forwards that survived, and all of them when the Kubernetes
+    // delete failed: a later `down k8s` needs the bookkeeping intact.
     if (!resourceCleanupError) {
       const remaining = new Set(result.remaining);
       await releasePorts(
@@ -283,7 +251,7 @@ async function startK8sPhase(
     printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
 
     signal?.throwIfAborted();
-    // REVIEW: Render/validate required env before building images or changing the cluster.
+    // Rendering checks required env, so it comes before any build or cluster change.
     const rendered = await renderManifests(config, selectedNames, assignments);
     const builtImages = await buildServiceImages(config, selectedNames, assignments, signal);
 
@@ -296,21 +264,13 @@ async function startK8sPhase(
     await waitOutTerminatingNamespace(cluster, config, signal);
     signal?.throwIfAborted();
 
-    // The namespace is CREATED here (kubectl create), never applied. The
-    // rendered 00-namespace.yml stays on disk for `portler k8s render` and for
-    // the user to read, but it is deliberately not in the apply set below:
-    // `kubectl apply` on a namespace that appeared between the ownership check
-    // and this line would ADOPT it — stamping Portler's labels onto a stranger's
-    // namespace and thereby authorizing a later `down k8s --volumes` to delete
-    // it. `create` fails on AlreadyExists instead, and ensureNamespace re-reads
-    // the namespace and refuses unless it really is ours.
+    // `kubectl create`, never apply: apply would adopt a namespace that appeared since the ownership
+    // check and label it ours, so `down k8s --volumes` deletes it; ensureNamespace refuses one not ours.
+    // 00-namespace.yml stays on disk for `k8s render` but is not in the apply set.
     await ensureNamespace(cluster, config, run);
 
-    // Apply and await one dependency level at a time — a service's manifests
-    // are not applied until every dependency's pods are stable and answering
-    // through their port-forward, mirroring local/Docker startup ordering. This
-    // avoids crash-loops like an api migrating against a postgres that is
-    // still initializing (and the dead port-forwards those restarts leave).
+    // One dependency level at a time, as locally: a service is applied once its dependencies' pods are
+    // stable and answer through their forward, so an api does not crash-loop on a starting postgres.
     for (const level of dependencyLevels(config, selectedNames)) {
       signal?.throwIfAborted();
       // Recorded before the apply: a failed apply may still have created some.
@@ -330,9 +290,8 @@ async function startK8sPhase(
       );
       signal?.throwIfAborted();
 
-      // As in up.ts, probes start only once every forward has a pid entry: an abort
-      // while a sibling's entry is written must not reject an earlier probe before
-      // anything awaits it (Node would exit on the unhandled rejection, skipping rollback).
+      // Probes start only once every forward has a pid entry: an abort during a sibling's write would
+      // reject a probe nothing awaits yet, and Node exits on the unhandled rejection, skipping rollback.
       const readinessWaits: Array<() => Promise<void>> = [];
 
       // Not cancellable between a spawn and its pid entry: the entry is how the
@@ -351,10 +310,8 @@ async function startK8sPhase(
         if (args.detach) child.unref();
 
         await writePortForwardPid(config, serviceName, child, assignment, args.images?.[serviceName]);
-        // k8s mode never has command healthchecks (applyK8sMode strips them),
-        // so the readiness env is not consulted.
-        // REVIEW: an HTTP healthcheck URL may use an export with ${env.KEY};
-        // resolve it with the shell/env-file values the pod got, not config only.
+        // applyK8sMode strips command healthchecks, so the readiness env is unused. An HTTP
+        // healthcheck URL can use `${env.KEY}`, so resolve it with the env the pod got.
         const resolveOptions = hostResolveOptions(config, service, rendered.baseEnv, generatedEnv, assignments);
         readinessWaits.push(
           () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions),
@@ -367,14 +324,12 @@ async function startK8sPhase(
       signal?.throwIfAborted();
     }
 
-    // Forwards started for early levels may have died while later levels were
-    // rolling out; never report ready with a dead forward.
+    // Forwards of early levels may have died while later levels rolled out.
     await verifyForwards(config, children, assignments, signal);
     signal?.throwIfAborted();
 
-    // The built-in proxy remains a host process in Kubernetes mode and routes to
-    // the localhost port-forwards. This keeps the documented one-project URL and
-    // PORTLER_PROXY_* contract consistent across all three run modes.
+    // The proxy stays a host process routing to the port-forwards, so the project URL and
+    // PORTLER_PROXY_* work as in the other run modes.
     if (config.proxy && startProxy) {
       let proxyExited = false;
       const child = spawnProxy(config.proxy, assignments, !args.detach);
@@ -433,24 +388,16 @@ export async function commandUpK8s(args: ParsedArgs, requested: string[]): Promi
   const cancellation = listenForStartupCancellation(args.detach);
   const { signal } = cancellation;
   try {
-    // Resolve (and validate) the cluster before anything is allocated or spawned:
-    // an unrecognized context must abort here, not after ports are reserved. The
-    // resolved context is then pinned onto every kubectl call below. The namespace
-    // ownership check is read-only and also runs before anything is reserved; the
-    // namespace itself is created (never applied) inside the start phase.
-    // These reads are cancellable too: with the signal handler installed, a hung API
-    // server or credential helper would otherwise swallow Ctrl-C.
+    // Resolve the cluster and check namespace ownership (read-only) before anything is
+    // reserved or spawned; the context is then pinned on every kubectl call. Cancellable,
+    // so a hung API server or credential helper cannot swallow Ctrl-C.
     const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
     const cluster = await detectCluster(run);
     process.stdout.write(`[portler] kubectl context: ${cluster.context} (${cluster.type})\n`);
     await ensureNamespaceClaimable(cluster, config, run);
 
-    // As in local mode: the lifecycle lock covers the decision, never the
-    // foreground wait — but the teardown that ends that wait is a decision again
-    // (it stops the forwards, deletes cluster resources and releases the ports),
-    // so it takes the lock back. startK8sPhase's own failure path already runs
-    // under the lock and uses the raw teardown, so nothing nests. The signal also
-    // ends a wait for a lock another command holds.
+    // The lock covers decisions, not the foreground wait; the teardown that ends the wait retakes it.
+    // The failure path inside uses the raw teardown, so nothing nests. The signal also ends a lock wait.
     const stack = await withLifecycleLock(config.projectDir, async () => {
       const stack = await startK8sPhase(args, config, cluster, selectedNames, signal);
       // A signal that arrived after the last startup check still rolls back under this lock.

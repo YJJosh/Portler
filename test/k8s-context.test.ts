@@ -1,7 +1,6 @@
 /**
- * `env` and `down k8s` act on the kubectl context `up k8s` deployed to, not on whichever
- * one is active by then. These drive the real CLI against a fake kubectl with several
- * contexts, each remembering the Deployments applied to it; no cluster is used.
+ * `env` and `down k8s` act on the kubectl context `up k8s` deployed to, not the active one.
+ * The real CLI runs against a fake kubectl with several contexts; no cluster is used.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -15,10 +14,9 @@ import { projectHash } from '../src/util/hash.ts';
 
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 
-// The current context and the kubeconfig's contexts come from files the test rewrites;
-// every call is logged. A context named in FAKE_KUBECTL_BROKEN answers nothing,
-// FAKE_KUBECTL_FAIL_APPLY makes every apply fail, and with FAKE_KUBECTL_NAMESPACE set,
-// Deployments are only listed in that namespace.
+// Contexts and the current one come from files the test rewrites; every call is logged.
+// A context named in FAKE_KUBECTL_BROKEN answers nothing, FAKE_KUBECTL_FAIL_APPLY fails
+// every apply, and FAKE_KUBECTL_NAMESPACE limits Deployment listing to that namespace.
 const kubectl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -142,7 +140,7 @@ async function deployedIn(context: string): Promise<string[]> {
   return JSON.parse(await fs.readFile(file, 'utf8').catch(() => '[]')) as string[];
 }
 
-/** The calls since the last one, so each step's kubectl traffic can be read on its own. */
+// The calls since the last take, so each step's kubectl traffic reads on its own.
 async function takeCalls(): Promise<string[][]> {
   const file = path.join(fakeDir, 'calls.log');
   const calls = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
@@ -189,7 +187,6 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.deepEqual(await deployedIn('kind-b'), []);
     assert.equal(await readLaunchContext(projectDir), 'kind-a');
 
-    // A partial down leaves the rest running there, so the record stays.
     const partial = portler('down', 'k8s', 'cron');
     assert.equal(partial.status, 0, partial.output);
     assert.deepEqual(await deployedIn('kind-a'), ['worker']);
@@ -204,7 +201,6 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.deepEqual(await deployedIn('kind-a'), []);
     assert.equal(await readLaunchContext(projectDir), null, 'a full down k8s ends the launch');
 
-    // With nothing recorded, the active context is used again.
     const moved = portler('up', 'k8s', '-d');
     assert.equal(moved.status, 0, moved.output);
     assert.equal(await readLaunchContext(projectDir), 'kind-b');
@@ -222,7 +218,6 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.ok(pinnedTo(await takeCalls(), 'kind-a').some((call) => call.includes('deployment')), 'asked kind-a first');
   });
 
-  // A full `down k8s` there would still delete it by label.
   it('counts a Deployment of a service since removed from portler.yml as still running there', async () => {
     await writeRecord('kind-a');
     await fs.writeFile(path.join(fakeDir, 'deployed-kind-a.json'), JSON.stringify(['retired']), 'utf8');
@@ -258,7 +253,6 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.deepEqual(mutating(await takeCalls()), []);
     assert.equal(await readLaunchContext(projectDir), 'kind-a');
 
-    // down k8s fails on it too, instead of deleting in the active cluster.
     const down = portler('down', 'k8s');
     assert.equal(down.status, 1, down.output);
     assert.match(down.stdout, /kubectl context: kind-a \(kind\), where "portler up k8s" started this project/);
@@ -292,8 +286,7 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.equal(await readLaunchContext(projectDir), 'kind-b');
   });
 
-  // A shell with another KUBECONFIG does not see the context, but the stack may still
-  // run there: neither forget it nor start elsewhere.
+  // A shell with another KUBECONFIG does not see the context, but the stack may still run there.
   it('is kept when this command reads another kubeconfig than up k8s did', { timeout: 60_000 }, async () => {
     await writeRecord('kind-other', path.join(tempDir, 'other-kubeconfig'));
     await setContexts(['kind-b'], 'kind-b');
@@ -334,8 +327,7 @@ describe('the kubectl context up k8s deployed to', () => {
     assert.deepEqual(await deployedIn('kind-a'), ['worker']);
   });
 
-  // Both kubeconfigs can have a kind-a that points at different clusters: the name being
-  // there (even as the active context) must not let a delete or a start through.
+  // Both kubeconfigs can have a kind-a that points at different clusters.
   for (const active of ['kind-a', 'kind-b']) {
     it(`refuses another kubeconfig with the recorded context present (active ${active})`, async () => {
       await writeRecord('kind-a', path.join(tempDir, 'original-kubeconfig'));

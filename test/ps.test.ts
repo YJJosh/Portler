@@ -33,7 +33,7 @@ async function exitedPid(): Promise<number> {
   return child.pid!;
 }
 
-/** The child of a stopped parent: it has exited, but nothing reaps it until the parent runs again. */
+// The child of a stopped parent: it has exited, but nothing reaps it until the parent runs again.
 async function zombie(): Promise<number> {
   const script = [
     "const { spawn } = require('node:child_process');",
@@ -43,9 +43,8 @@ async function zombie(): Promise<number> {
   const helper = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
   let pid = 0;
   cleanup.push(async () => {
-    // Resume the helper and let it reap its child and exit on its own. A kill
-    // right after the SIGCONT could land before it reaps, and the zombie would
-    // go to PID 1, which may never reap it.
+    // Let the helper reap its child and exit: a kill right after SIGCONT could land before
+    // it reaps, leaving the zombie to a PID 1 that may never reap it.
     if (helper.exitCode !== null || helper.signalCode !== null) return;
     helper.kill('SIGCONT');
     const fallback = setTimeout(() => helper.kill('SIGKILL'), 2000);
@@ -60,11 +59,8 @@ async function zombie(): Promise<number> {
   return pid;
 }
 
-/**
- * A `docker` on PATH that answers `inspect` by container name: c-running and
- * c-exited carry the project's label, c-unreachable stands for a daemon that
- * cannot be asked.
- */
+// A `docker` on PATH answering `inspect` by name: c-running and c-exited carry the
+// project's label, c-unreachable stands for a daemon that cannot be asked.
 async function fakeDocker(dir: string, projectDir: string): Promise<{ bin: string; calls: () => Promise<string[]> }> {
   const bin = path.join(dir, 'fake-bin');
   const log = path.join(dir, 'docker-calls.log');

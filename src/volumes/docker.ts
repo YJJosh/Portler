@@ -6,7 +6,7 @@ export interface DockerCommandResult {
   stderr: string;
 }
 
-/** Run a docker CLI command, capturing output. Rejects only when docker is not installed. */
+/** Rejects only when the docker CLI cannot be run; a failed command is a result. */
 export function runDocker(args: string[]): Promise<DockerCommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -30,7 +30,6 @@ export function runDocker(args: string[]): Promise<DockerCommandResult> {
   });
 }
 
-/** Run a docker CLI command and throw a readable error when it fails. */
 export async function dockerOrThrow(args: string[]): Promise<string> {
   const result = await runDocker(args);
 
@@ -42,7 +41,6 @@ export async function dockerOrThrow(args: string[]): Promise<string> {
   return result.stdout;
 }
 
-/** Fail fast with a clear message when the Docker daemon is not reachable. */
 export async function ensureDockerRunning(): Promise<void> {
   const result = await runDocker(['version', '--format', '{{.Server.Version}}']);
 
