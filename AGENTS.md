@@ -54,7 +54,7 @@ user documentation lives in [`docs/`](docs/).
 - `src/ports/`: allocation and the global registry. `src/state/`: `.portler/`
   files and locks.
 - `src/env/`, `src/setup/`, `src/readiness/`, `src/proxy/`, `src/k8s/`,
-  `src/volumes/`: the features their names say.
+  `src/volumes/`: the features their names say. `src/share/`: `up --share`.
 
 ## Rules that must hold
 
@@ -75,6 +75,9 @@ path in the PR description.
     in `src/process/identity.ts`), or matched earlier in the same stop while
     the group stayed alive, so `down` can still stop children after the leader
     exits (`provenOurs` in `signalDecision`, `src/process/stop.ts`).
+    Under `up --share` the recorded leader is the share wrapper
+    (`src/share/daemon.ts`), which runs the service shell as its child in the
+    same group and only signals itself, to end with the shell's signal.
 
   When in doubt, treat it as not ours and still running. Only `down --force`
   and `clean --force` (both through the `force` option of `stopServices`)

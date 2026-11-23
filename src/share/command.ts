@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { typeStrippingArgs } from '../proxy/spawn.ts';
 import { sharesPort } from './settings.ts';
+import { normalizeIpAddress } from '../util/ip.ts';
 import { isWildcardHost } from './tailnet.ts';
 import type { EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 import { SERVICE_NODE_OPTIONS, type ShareForwardSpec } from './forwarder.ts';
@@ -14,7 +15,8 @@ export function shareForwardSpec(
   const share = config.share;
   if (!share || !assignment || !sharesPort(service) || isWildcardHost(assignment.host)) return undefined;
   // A service bound to a shared address itself needs no forwarder there.
-  const addresses = share.addresses.filter((address) => address !== assignment.host);
+  const host = normalizeIpAddress(assignment.host.replace(/^\[|\]$/g, ''));
+  const addresses = share.addresses.filter((address) => address !== host);
   if (addresses.length === 0) return undefined;
   return { service: service.name, port: assignment.port, upstream: assignment.host, addresses, tailnetOnly: share.tailnetOnly };
 }

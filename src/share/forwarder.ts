@@ -60,11 +60,20 @@ async function firstReachable(hosts: readonly string[], port: number): Promise<s
   return undefined;
 }
 
+const CONNECT_TIMEOUT_MS = 5_000;
+// The errors a service that is down for a moment gives; they say nothing about the source address.
+const UPSTREAM_DOWN = new Set(['ECONNREFUSED', 'ECONNRESET']);
+
 // Connects from the shared address when the OS allows it, so the service does not see a remote peer as loopback.
-function connectUpstream(host: string, port: number, localAddress: string | undefined): Promise<net.Socket> {
+function connectUpstream(host: string, port: number, localAddress: string | undefined, track: (socket: net.Socket) => void): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host, port, allowHalfOpen: true, ...(localAddress !== undefined ? { localAddress } : {}) });
-    socket.once('connect', () => resolve(socket));
+    track(socket);
+    socket.setTimeout(CONNECT_TIMEOUT_MS, () => socket.destroy(Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' })));
+    socket.once('connect', () => {
+      socket.setTimeout(0);
+      resolve(socket);
+    });
     socket.once('error', reject);
   });
 }
@@ -99,7 +108,13 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
   // Aborted by close, so a pending retry does not keep the process alive.
   const sleep = (ms: number): Promise<void> => delay(ms, undefined, { signal: stopped.signal }).catch(() => {});
 
+  const track = (socket: net.Socket): void => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  };
+
   const handle = async (client: net.Socket, listenAddress: string, upstreamHost: string): Promise<void> => {
+    track(client);
     client.pause();
     // A peer can reset while the upstream connection is still being made.
     client.on('error', () => client.destroy());
@@ -111,14 +126,14 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
     let upstream: net.Socket;
     const source = localSourceWorks ? [listenAddress, ...spec.addresses].find((address) => sameFamily(address, upstreamHost)) : undefined;
     try {
-      upstream = await connectUpstream(upstreamHost, spec.port, source);
+      upstream = await connectUpstream(upstreamHost, spec.port, source, track);
     } catch (error) {
-      if (source === undefined) {
+      if (source === undefined || UPSTREAM_DOWN.has((error as NodeJS.ErrnoException).code ?? '')) {
         client.destroy();
         return;
       }
       try {
-        upstream = await connectUpstream(upstreamHost, spec.port, undefined);
+        upstream = await connectUpstream(upstreamHost, spec.port, undefined, track);
       } catch {
         // Both failed: the service is down for a moment (e.g. a port-forward restarting), not the source address.
         client.destroy();
@@ -132,10 +147,6 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
       client.destroy();
       upstream.destroy();
       return;
-    }
-    for (const socket of [client, upstream]) {
-      sockets.add(socket);
-      socket.once('close', () => sockets.delete(socket));
     }
     pipe(client, upstream);
     client.resume();

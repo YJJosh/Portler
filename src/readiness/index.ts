@@ -107,7 +107,7 @@ function isCommandReady(command: string, cwd: string, env: EnvMap, timeoutMs: nu
   });
 }
 
-function defaultHealthcheck(service: ServiceConfig, assignment: ServiceAssignment | undefined): HealthcheckConfig {
+export function defaultHealthcheck(service: ServiceConfig, assignment: ServiceAssignment | undefined): HealthcheckConfig {
   // A UDP-only port cannot be probed without speaking the app's protocol.
   const type = !assignment || service.port === undefined || !usesTcp(service) ? 'none' : 'tcp';
   return { type, timeoutMs: DEFAULT_HEALTHCHECK_TIMEOUT_MS, intervalMs: DEFAULT_HEALTHCHECK_INTERVAL_MS };

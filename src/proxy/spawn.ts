@@ -6,6 +6,7 @@ import { readProcessStartToken } from '../process/identity.ts';
 import { prefixStream } from '../process/logs.ts';
 import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment, ShareSettings } from '../types/index.ts';
 import { isWildcardHost } from '../share/tailnet.ts';
+import { normalizeIpAddress } from '../util/ip.ts';
 import type { ProxyServerOptions } from './server.ts';
 
 // Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited.
@@ -16,6 +17,18 @@ export function typeStrippingArgs(): string[] {
 function daemonPath(): string {
   const daemonFile = import.meta.url.endsWith('.ts') ? './daemon.ts' : './daemon.js';
   return fileURLToPath(new URL(daemonFile, import.meta.url));
+}
+
+// A proxy host that is a shared address, or every address, is already reachable there: a second bind would fail.
+function shareListeners(share: ShareSettings, host: string): Pick<ProxyServerOptions, 'shareAddresses' | 'hostShared' | 'tailnetOnly'> {
+  if (isWildcardHost(host)) return {};
+  const normalized = normalizeIpAddress(host.replace(/^\[|\]$/g, ''));
+  const hostShared = share.addresses.includes(normalized ?? '');
+  return {
+    shareAddresses: share.addresses.filter((address) => address !== normalized),
+    tailnetOnly: share.tailnetOnly,
+    ...(hostShared ? { hostShared: true } : {}),
+  };
 }
 
 export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments, share?: ShareSettings): ProxyServerOptions {
@@ -34,10 +47,7 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
     // url_host is the name Portler prints; other non-loopback names need proxy.allowed_hosts.
     allowedHosts: [assignment.urlHost, ...(assignment.localUrlHost ? [assignment.localUrlHost] : []), ...(share?.hostNames ?? []), ...proxy.allowedHosts],
     trustedProxies: proxy.trustedProxies,
-    // A wildcard proxy host already listens on the shared address; a second bind there would fail.
-    ...(share && !isWildcardHost(assignment.host)
-      ? { shareAddresses: share.addresses.filter((address) => address !== assignment.host), tailnetOnly: share.tailnetOnly }
-      : {}),
+    ...(share ? shareListeners(share, assignment.host) : {}),
   };
 }
 

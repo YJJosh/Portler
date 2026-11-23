@@ -26,7 +26,7 @@ import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/loc
 import { missingManagedVolumes, warnMissingVolumeSetVariants } from '../../volumes/index.ts';
 import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
-import { waitForSharedPort } from '../../share/ready.ts';
+import { readinessProvesListening, waitForSharedPort } from '../../share/ready.ts';
 import { shareForwardSpec } from '../../share/command.ts';
 import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
@@ -593,8 +593,9 @@ export async function startPhase(
               options.signal,
               hostResolveOptions(config, service, baseEnv, generatedEnv, assignments),
             ).then(async () => {
-              if (config.share && shareForwardSpec(config, service, assignments[serviceName])) {
-                await waitForSharedPort(config.share, assignments[serviceName]!, options.signal);
+              const assignment = assignments[serviceName];
+              if (config.share && assignment && shareForwardSpec(config, service, assignment) && readinessProvesListening(service, assignment)) {
+                await waitForSharedPort(config.share, assignment, () => childExited, options.signal);
               }
             }),
           );
@@ -639,7 +640,7 @@ export async function startPhase(
         options.signal,
       );
       if (config.share && buildProxyServerOptions(proxy, assignments, config.share).shareAddresses) {
-        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, options.signal);
+        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, options.signal);
       }
       await assertMembersAlive();
       options.signal?.throwIfAborted();

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -11,6 +12,9 @@ import { shareDefault, shareRequest } from '../src/cli/commands/up.ts';
 import { loadConfig } from '../src/config/index.ts';
 import { localUrl, resolveEnvValue } from '../src/env/index.ts';
 import { allocateAssignments } from '../src/ports/allocate.ts';
+import { pidInfoFor, writePids } from '../src/process/pids.ts';
+import { spawnService } from '../src/process/spawn.ts';
+import { stopServices } from '../src/process/stop.ts';
 import { buildProxyServerOptions } from '../src/proxy/spawn.ts';
 import { isAllowedHost } from '../src/proxy/server.ts';
 import { shareForwardSpec, shareWrapperSpawn } from '../src/share/command.ts';
@@ -270,6 +274,8 @@ describe('shared references and URLs', () => {
     assert.deepEqual(options.routes.map((route) => [route.service, route.local ?? false]), [['db', true], ['api', false]]);
     assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('0.0.0.0') }, TAILSCALE).shareAddresses, undefined);
     assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('127.0.0.1') }).routes[0]!.local, undefined);
+    const onShared = buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('100.64.0.4') }, TAILSCALE);
+    assert.deepEqual([onShared.hostShared, onShared.shareAddresses], [true, ['fd7a:115c:a1e0::4']]);
   });
 });
 
@@ -537,5 +543,53 @@ describe('port allocation with --share', { skip: process.platform !== 'linux' },
     } finally {
       taken.close();
     }
+  });
+});
+
+describe('a shared service under spawn and stop', { skip: process.platform !== 'linux', timeout: 20_000 }, () => {
+  let projectDir: string;
+
+  beforeEach(async () => {
+    projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portler-test-share-stop-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(projectDir, { recursive: true, force: true });
+  });
+
+  async function startShared(command: string) {
+    const probe = await listen('127.0.0.1');
+    const port = portOf(probe);
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const api = service('api', { command, port, portEnv: ['PORT'] });
+    const shared = applyShare({ ...config([api]), projectDir, filePath: path.join(projectDir, 'portler.yml') }, { ...TAILSCALE, addresses: ['127.0.0.2'], urlHost: '127.0.0.2', tailnetOnly: false });
+    const assignment: ServiceAssignment = { name: 'api', port, host: '127.0.0.1', urlHost: '127.0.0.2', localUrlHost: 'localhost', protocol: 'http', url: '' };
+    const env = { ...process.env, PORT: String(port) } as Record<string, string>;
+    const child = spawnService(shared, shared.services.api!, env, new Set(), assignment, { api: assignment }, false);
+    const info = await pidInfoFor(shared, shared.services.api!, child, assignment);
+    await writePids(projectDir, { version: 1, project: projectDir, startedAt: '', services: { api: info } });
+    return { child, port };
+  }
+
+  const server = `node -e 'require("net").createServer((s) => s.end("hi")).listen(+process.env.PORT, "127.0.0.1")'`;
+
+  it('down stops the wrapper, the service and the forwarder as one group', async () => {
+    const { child, port } = await startShared(server);
+    await waitFor(async () => (await request('127.0.0.2', port)) === 'hi');
+    const result = await stopServices(projectDir);
+    assert.deepEqual(result.stopped, ['api']);
+    assert.deepEqual([result.unverified, result.failures], [[], []]);
+    assert.equal(await request('127.0.0.2', port), 'error');
+    assert.equal(await request('127.0.0.1', port), 'error');
+    assert.ok(child.exitCode !== null || child.signalCode !== null);
+  });
+
+  it('ends with the service, so a crashed service leaves nothing for stop to doubt', async () => {
+    const { child, port } = await startShared(`${server.replace(/'$/, '; setTimeout(() => process.exit(4), 1500)\'')}`);
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 4);
+    assert.equal(await request('127.0.0.2', port), 'error');
+    const result = await stopServices(projectDir);
+    assert.deepEqual([result.unverified, result.failures], [[], []]);
   });
 });

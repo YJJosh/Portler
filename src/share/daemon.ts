@@ -1,6 +1,7 @@
 // Leads a shared service's process group: runs the service's shell command as its child, in the same group, and
 // listens on the shared addresses while it runs. argv[2] is the JSON ShareForwardSpec, argv[3] the shell command.
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { isShareForwardSpec, SERVICE_NODE_OPTIONS, startShareForwarder } from './forwarder.ts';
 
 let spec: unknown;
@@ -25,16 +26,19 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal
 const child = spawn(command, { shell: true, stdio: 'inherit', env });
 const forwarder = startShareForwarder(spec);
 
+// Ends as the service ended, so Portler sees the same exit. Signals that dump core end it with 128+n instead.
+const RERAISED = new Set<NodeJS.Signals>(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL', 'SIGPIPE', 'SIGUSR1', 'SIGUSR2', 'SIGALRM']);
+const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+  void forwarder.close();
+  if (signal && RERAISED.has(signal)) {
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  }
+  process.exit(signal ? 128 + (os.constants.signals[signal] ?? 0) : (code ?? 1));
+};
+
 child.on('error', (error) => {
   process.stderr.write(`portler share: cannot start the service: ${error.message}\n`);
-  void forwarder.close().then(() => process.exit(127));
+  finish(127, null);
 });
-child.on('exit', (code, signal) => {
-  void forwarder.close().then(() => {
-    if (signal) {
-      process.removeAllListeners(signal);
-      process.kill(process.pid, signal);
-    }
-    process.exit(code ?? 1);
-  });
-});
+child.on('exit', finish);

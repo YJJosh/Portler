@@ -38,7 +38,7 @@ import { printPortTable } from '../table.ts';
 import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
 import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
-import { waitForSharedPort } from '../../share/ready.ts';
+import { readinessProvesListening, waitForSharedPort } from '../../share/ready.ts';
 import { shareForwardSpec } from '../../share/command.ts';
 import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareDefault, shareRequest } from './up.ts';
@@ -324,7 +324,9 @@ async function startK8sPhase(
         const resolveOptions = hostResolveOptions(config, service, rendered.baseEnv, generatedEnv, assignments);
         readinessWaits.push(async () => {
           await waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions);
-          if (config.share && shareForwardSpec(config, service, assignment)) await waitForSharedPort(config.share, assignment, signal);
+          if (config.share && shareForwardSpec(config, service, assignment) && readinessProvesListening(service, assignment)) {
+            await waitForSharedPort(config.share, assignment, () => forwardExited, signal);
+          }
         });
       }
 
@@ -365,7 +367,7 @@ async function startK8sPhase(
         signal,
       );
       if (config.share && buildProxyServerOptions(config.proxy, assignments, config.share).shareAddresses) {
-        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, signal);
+        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, signal);
       }
       signal?.throwIfAborted();
     }
