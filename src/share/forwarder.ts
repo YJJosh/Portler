@@ -27,9 +27,6 @@ export function isShareForwardSpec(value: unknown): value is ShareForwardSpec {
   );
 }
 
-/** The service's own NODE_OPTIONS, moved aside so they apply to the service and not to the wrapper's Node. */
-export const SERVICE_NODE_OPTIONS = 'PORTLER_SHARE_SERVICE_NODE_OPTIONS';
-
 const UPSTREAM_POLL_MS = 300;
 const BIND_RETRY_MS = 2_000;
 
@@ -42,20 +39,23 @@ function log(spec: ShareForwardSpec, message: string): void {
   process.stderr.write(`[portler share] ${spec.service}: ${message}\n`);
 }
 
-function canConnect(host: string, port: number): Promise<boolean> {
+function canConnect(host: string, port: number, track: (socket: net.Socket) => void): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect({ host, port });
+    track(socket);
+    socket.on('error', () => {});
+    socket.setTimeout(CONNECT_TIMEOUT_MS, () => socket.destroy());
     socket.once('connect', () => {
       socket.destroy();
       resolve(true);
     });
-    socket.once('error', () => resolve(false));
+    socket.once('close', () => resolve(false));
   });
 }
 
-async function firstReachable(hosts: readonly string[], port: number): Promise<string | undefined> {
+async function firstReachable(hosts: readonly string[], port: number, track: (socket: net.Socket) => void): Promise<string | undefined> {
   for (const host of hosts) {
-    if (await canConnect(host, port)) return host;
+    if (await canConnect(host, port, track)) return host;
   }
   return undefined;
 }
@@ -132,6 +132,10 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         client.destroy();
         return;
       }
+      if (closed || client.destroyed) {
+        client.destroy();
+        return;
+      }
       try {
         upstream = await connectUpstream(upstreamHost, spec.port, undefined, track);
       } catch {
@@ -172,7 +176,7 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
   const run = async (): Promise<void> => {
     let upstreamHost: string | undefined;
     while (!closed && upstreamHost === undefined) {
-      upstreamHost = await firstReachable(upstreamHosts(spec.upstream), spec.port);
+      upstreamHost = await firstReachable(upstreamHosts(spec.upstream), spec.port, track);
       if (upstreamHost === undefined) await sleep(UPSTREAM_POLL_MS);
     }
     // In parallel: one address that is missing for a while must not hold up the others.

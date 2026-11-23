@@ -40,7 +40,6 @@ import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
 import { readinessProvesListening, waitForSharedPort } from '../../share/ready.ts';
 import { shareForwardSpec } from '../../share/command.ts';
-import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareDefault, shareRequest } from './up.ts';
 
 // How long a namespace left Terminating by an earlier `down` may take to clear.
@@ -366,7 +365,7 @@ async function startK8sPhase(
         undefined,
         signal,
       );
-      if (config.share && buildProxyServerOptions(config.proxy, assignments, config.share).shareAddresses) {
+      if (config.share) {
         await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, signal);
       }
       signal?.throwIfAborted();

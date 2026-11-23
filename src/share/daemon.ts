@@ -1,8 +1,9 @@
 // Leads a shared service's process group: runs the service's shell command as its child, in the same group, and
-// listens on the shared addresses while it runs. argv[2] is the JSON ShareForwardSpec, argv[3] the shell command.
+// listens on the shared addresses while it runs. argv: the JSON ShareForwardSpec, the shell command, and the service's
+// NODE_OPTIONS if it has any.
 import { spawn } from 'node:child_process';
 import os from 'node:os';
-import { isShareForwardSpec, SERVICE_NODE_OPTIONS, startShareForwarder } from './forwarder.ts';
+import { isShareForwardSpec, startShareForwarder } from './forwarder.ts';
 
 let spec: unknown;
 try {
@@ -17,8 +18,7 @@ if (!isShareForwardSpec(spec) || !command) {
 }
 
 const env = { ...process.env };
-delete env[SERVICE_NODE_OPTIONS];
-if (process.env[SERVICE_NODE_OPTIONS] !== undefined) env.NODE_OPTIONS = process.env[SERVICE_NODE_OPTIONS];
+if (process.argv[4] !== undefined) env.NODE_OPTIONS = process.argv[4];
 
 // Not detached: the shell joins this process's group, so a group signal reaches it, and this process, the leader
 // Portler recorded, exits only after it. Signals are left to the shell; this process follows its exit.

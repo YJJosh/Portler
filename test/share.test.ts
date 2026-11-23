@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,7 @@ import { pidInfoFor, writePids } from '../src/process/pids.ts';
 import { spawnService } from '../src/process/spawn.ts';
 import { stopServices } from '../src/process/stop.ts';
 import { buildProxyServerOptions } from '../src/proxy/spawn.ts';
-import { isAllowedHost } from '../src/proxy/server.ts';
+import { isAllowedHost, startProxyServer } from '../src/proxy/server.ts';
 import { shareForwardSpec, shareWrapperSpawn } from '../src/share/command.ts';
 import { startShareForwarder, upstreamHosts } from '../src/share/forwarder.ts';
 import { applyShare, chooseShare, isShareSettings, resolveShare } from '../src/share/settings.ts';
@@ -222,10 +223,10 @@ describe('applyShare', () => {
     const spec = { service: 'api', port: 52400, upstream: '127.0.0.1', addresses: ['100.64.0.4'], tailnetOnly: true };
     const wrapper = shareWrapperSpawn(spec, 'npm run dev', { PATH: '/bin', NODE_OPTIONS: '--require ./otel.js' });
     assert.equal(wrapper.file, process.execPath);
-    assert.match(wrapper.args.at(-3)!, /share[/\\]daemon\.(ts|js)$/);
-    assert.deepEqual(wrapper.args.slice(-2), [JSON.stringify(spec), 'npm run dev']);
+    assert.match(wrapper.args.at(-4)!, /share[/\\]daemon\.(ts|js)$/);
+    assert.deepEqual(wrapper.args.slice(-3), [JSON.stringify(spec), 'npm run dev', '--require ./otel.js']);
     assert.equal(wrapper.env.NODE_OPTIONS, undefined);
-    assert.equal(wrapper.env.PORTLER_SHARE_SERVICE_NODE_OPTIONS, '--require ./otel.js');
+    assert.equal(shareWrapperSpawn(spec, 'x', { PATH: '/bin' }).args.at(-1), 'x');
   });
 
   it('drops a shared address the service binds itself', () => {
@@ -272,10 +273,11 @@ describe('shared references and URLs', () => {
     const proxyConfig = { trustedProxies: [], routes: [{ prefix: '/db', service: 'db' }, { prefix: '/', service: 'api' }], allowedHosts: [] };
     const options = buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('127.0.0.1') }, TAILSCALE);
     assert.deepEqual(options.routes.map((route) => [route.service, route.local ?? false]), [['db', true], ['api', false]]);
-    assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('0.0.0.0') }, TAILSCALE).shareAddresses, undefined);
+    assert.deepEqual(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('0.0.0.0') }, TAILSCALE).shareAddresses, []);
     assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('127.0.0.1') }).routes[0]!.local, undefined);
     const onShared = buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('100.64.0.4') }, TAILSCALE);
-    assert.deepEqual([onShared.hostShared, onShared.shareAddresses], [true, ['fd7a:115c:a1e0::4']]);
+    assert.deepEqual([onShared.shareAddresses, onShared.sharedAddresses], [['fd7a:115c:a1e0::4'], TAILSCALE.addresses]);
+    assert.deepEqual(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('0:0:0:0:0:0:0:0') }, TAILSCALE).shareAddresses, []);
   });
 });
 
@@ -480,8 +482,8 @@ describe('share forwarder', { skip: process.platform !== 'linux' }, () => {
 describe('share wrapper', () => {
   const daemon = path.join(import.meta.dirname, '..', 'src', 'share', 'daemon.ts');
   const spec = JSON.stringify({ service: 'api', port: 52499, upstream: '127.0.0.1', addresses: ['127.0.0.1'], tailnetOnly: false });
-  const run = (command: string, env: NodeJS.ProcessEnv = process.env) =>
-    spawn(process.execPath, ['--experimental-strip-types', daemon, spec, command], { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env });
+  const run = (command: string, env: NodeJS.ProcessEnv = process.env, extra: string[] = []) =>
+    spawn(process.execPath, ['--experimental-strip-types', daemon, spec, command, ...extra], { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env });
   const exit = (child: ReturnType<typeof run>) =>
     new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }>((resolve) => {
       let out = '';
@@ -494,10 +496,10 @@ describe('share wrapper', () => {
   });
 
   it('gives the service its own NODE_OPTIONS back', async () => {
-    const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_SHARE_SERVICE_NODE_OPTIONS: '--max-old-space-size=64' };
+    const env: NodeJS.ProcessEnv = { ...process.env };
     delete env.NODE_OPTIONS;
-    const result = await exit(run('printf "%s" "$NODE_OPTIONS"; printf "|%s" "$PORTLER_SHARE_SERVICE_NODE_OPTIONS"', env));
-    assert.deepEqual([result.code, result.out], [0, '--max-old-space-size=64|']);
+    const result = await exit(run('printf "%s" "$NODE_OPTIONS"', env, ['--max-old-space-size=64']));
+    assert.deepEqual([result.code, result.out], [0, '--max-old-space-size=64']);
   });
 
   it('stops with its group and exits after the service, by its signal', async () => {
@@ -591,5 +593,33 @@ describe('a shared service under spawn and stop', { skip: process.platform !== '
     assert.equal(await request('127.0.0.2', port), 'error');
     const result = await stopServices(projectDir);
     assert.deepEqual([result.unverified, result.failures], [[], []]);
+  });
+});
+
+describe('a proxy on every address with --share', { skip: process.platform !== 'linux' }, () => {
+  it('refuses share: false routes on connections to a shared address only', async () => {
+    const upstream = http.createServer((_req, res) => res.end('local service'));
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+    const proxy = await startProxyServer({
+      host: '0.0.0.0',
+      port: 0,
+      routes: [{ prefix: '/', service: 'db', host: '127.0.0.1', port: upstreamPort, local: true }],
+      allowedHosts: ['127.0.0.2'],
+      trustedProxies: [],
+      shareAddresses: [],
+      sharedAddresses: ['127.0.0.2'],
+      tailnetOnly: false,
+    });
+    const port = (proxy.address() as net.AddressInfo).port;
+    const get = (host: string) =>
+      new Promise<number>((resolve) => http.get({ host, port, path: '/' }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', () => resolve(-1)));
+    try {
+      assert.equal(await get('127.0.0.1'), 200);
+      assert.equal(await get('127.0.0.2'), 403);
+    } finally {
+      proxy.close();
+      upstream.close();
+    }
   });
 });

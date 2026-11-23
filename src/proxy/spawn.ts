@@ -19,15 +19,13 @@ function daemonPath(): string {
   return fileURLToPath(new URL(daemonFile, import.meta.url));
 }
 
-// A proxy host that is a shared address, or every address, is already reachable there: a second bind would fail.
-function shareListeners(share: ShareSettings, host: string): Pick<ProxyServerOptions, 'shareAddresses' | 'hostShared' | 'tailnetOnly'> {
-  if (isWildcardHost(host)) return {};
+// A proxy host that is a shared address, or every address, already listens there: a second bind would fail.
+function shareListeners(share: ShareSettings, host: string): Pick<ProxyServerOptions, 'shareAddresses' | 'sharedAddresses' | 'tailnetOnly'> {
   const normalized = normalizeIpAddress(host.replace(/^\[|\]$/g, ''));
-  const hostShared = share.addresses.includes(normalized ?? '');
   return {
-    shareAddresses: share.addresses.filter((address) => address !== normalized),
+    shareAddresses: isWildcardHost(host) ? [] : share.addresses.filter((address) => address !== normalized),
+    sharedAddresses: share.addresses,
     tailnetOnly: share.tailnetOnly,
-    ...(hostShared ? { hostShared: true } : {}),
   };
 }
 

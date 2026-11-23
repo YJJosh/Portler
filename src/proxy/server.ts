@@ -27,10 +27,10 @@ export interface ProxyServerOptions {
   trustedProxies: string[];
   /** `--share`: more addresses to listen on, besides `host`. */
   shareAddresses?: string[];
-  /** Refuse peers outside the tailnet on the share addresses. */
+  /** `--share`: a connection to one of these local addresses is a shared one, whichever listener took it. */
+  sharedAddresses?: string[];
+  /** Refuse peers outside the tailnet on shared connections. */
   tailnetOnly?: boolean;
-  /** `host` is a share address itself, so its listener is a shared one. */
-  hostShared?: true;
 }
 
 function isProxyTarget(value: unknown): value is ProxyTarget {
@@ -54,8 +54,9 @@ export function isProxyServerOptions(value: unknown): value is ProxyServerOption
     value.trustedProxies.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined) &&
     (value.shareAddresses === undefined ||
       (Array.isArray(value.shareAddresses) && value.shareAddresses.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined))) &&
-    (value.tailnetOnly === undefined || typeof value.tailnetOnly === 'boolean') &&
-    (value.hostShared === undefined || value.hostShared === true)
+    (value.sharedAddresses === undefined ||
+      (Array.isArray(value.sharedAddresses) && value.sharedAddresses.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined))) &&
+    (value.tailnetOnly === undefined || typeof value.tailnetOnly === 'boolean')
   );
 }
 
@@ -330,12 +331,18 @@ function handleUpgrade(options: ProxyServerOptions, shared: boolean, req: Incomi
   socket.on('close', () => upstream.destroy());
 }
 
-function createProxyServer(options: ProxyServerOptions, shared: boolean): http.Server {
-  const server = http.createServer((req, res) => handleRequest(options, shared, req, res));
-  server.on('upgrade', (req, socket, head) => handleUpgrade(options, shared, req, socket as net.Socket, head));
-  if (shared && options.tailnetOnly) {
+// By the address the connection came in on, so a proxy on 0.0.0.0 treats its tailnet connections as shared too.
+function isSharedConnection(options: ProxyServerOptions, socket: net.Socket): boolean {
+  const local = normalizeIpAddress(socket.localAddress ?? '');
+  return local !== undefined && (options.sharedAddresses ?? []).includes(local);
+}
+
+function createProxyServer(options: ProxyServerOptions): http.Server {
+  const server = http.createServer((req, res) => handleRequest(options, isSharedConnection(options, req.socket), req, res));
+  server.on('upgrade', (req, socket, head) => handleUpgrade(options, isSharedConnection(options, req.socket), req, socket as net.Socket, head));
+  if (options.tailnetOnly) {
     server.on('connection', (socket: net.Socket) => {
-      if (!isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();
+      if (isSharedConnection(options, socket) && !isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();
     });
   }
   return server;
@@ -353,7 +360,7 @@ function listen(server: http.Server, port: number, host: string): Promise<http.S
 
 /** Resolves once the server is listening. */
 export function startProxyServer(options: ProxyServerOptions): Promise<http.Server> {
-  return listen(createProxyServer(options, options.hostShared === true), options.port, options.host);
+  return listen(createProxyServer(options), options.port, options.host);
 }
 
 /** One listener per share address, on the proxy's port. Closing them is up to the caller. */
@@ -361,7 +368,7 @@ export async function startProxyShareServers(options: ProxyServerOptions): Promi
   const servers: http.Server[] = [];
   try {
     for (const address of options.shareAddresses ?? []) {
-      const server = createProxyServer(options, true);
+      const server = createProxyServer(options);
       servers.push(await listen(server, options.port, address));
     }
   } catch (error) {

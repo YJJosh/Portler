@@ -14,7 +14,8 @@ export function isTailnetAddress(ip: string): boolean {
 
 
 export function isWildcardHost(host: string): boolean {
-  return host === '0.0.0.0' || host === '::' || host === '[::]' || host === '';
+  const normalized = normalizeIpAddress(host.replace(/^\[|\]$/g, ''));
+  return host === '' || normalized === '0.0.0.0' || normalized === '::';
 }
 
 /** An IP in the form a URL and a Host header use: IPv6 in brackets. */

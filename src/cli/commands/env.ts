@@ -30,13 +30,17 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 }
 
 /** Side effect: allocates and writes state.json when it is missing, incomplete, or has stale
- * Docker/transport data. */
-export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
-  // A running shared stack's env keeps its shared URLs; a crashed one's does not.
+ * Docker/transport data. A running shared stack keeps its shared URLs; with `share: false` (and under --prod,
+ * which refuses --share) the assignments are a local view, returned with `view: true` and never written. */
+export async function ensureAssignments(
+  unsharedConfig: PortlerConfig,
+  options: { share?: boolean } = {},
+): Promise<{ assignments: Assignments; generatedEnv: EnvMap; view: boolean }> {
   const pids = await readPids(unsharedConfig.projectDir);
   const running = new Set(await liveServiceNames(unsharedConfig.projectDir, pids));
-  // Never under --prod, which refuses --share.
-  const share = unsharedConfig.production ? undefined : liveShare([...running].flatMap((name) => pids?.services[name] ?? []));
+  const live = liveShare([...running].flatMap((name) => pids?.services[name] ?? []));
+  const share = options.share === false || unsharedConfig.production ? undefined : live;
+  const view = live !== undefined && share === undefined;
   const config = applyShare(unsharedConfig, share);
   const state = await readState(config.projectDir);
   const configuredWithPorts = servicesWithPorts(config, Object.keys(config.services));
@@ -66,7 +70,7 @@ export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<
       Object.create(null) as Assignments,
       Object.fromEntries(cached.map(([name, assignment]) => [name, asAllocatedFor(config, name, assignment)])),
     );
-    return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
+    return { assignments, generatedEnv: buildGeneratedEnv(assignments), view: false };
   }
 
   // Never re-reserve currently-running services: allocateAssignments would
@@ -74,8 +78,8 @@ export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 
   const assignments = await allocateAssignments(config, state, reserveServices, running, { recorded: pids?.services });
-  await writeState(config.projectDir, assignments);
-  return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
+  if (!view) await writeState(config.projectDir, assignments);
+  return { assignments, generatedEnv: buildGeneratedEnv(assignments), view };
 }
 
 // Keeps `PORTLER_<SERVICE>_IMAGE` and `${service.image}` naming the running image when state.json
@@ -191,9 +195,9 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
 
     // `config` carries the running containers' pins, so the assignments name their images.
     // A k8s launch forwards only TCP to this machine, as `up k8s` allocates it.
-    const { assignments, generatedEnv } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
+    const { assignments, generatedEnv, view } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
     // Also from cached state, so a deleted runtime.env comes back.
-    await writeRuntimeEnv(config.projectDir, generatedEnv);
+    if (!view) await writeRuntimeEnv(config.projectDir, generatedEnv);
 
     // A missing required value is reported, not fatal: this view is how one finds out.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true, quiet: !prod });

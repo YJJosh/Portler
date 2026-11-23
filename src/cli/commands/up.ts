@@ -28,7 +28,6 @@ import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
 import { readinessProvesListening, waitForSharedPort } from '../../share/ready.ts';
 import { shareForwardSpec } from '../../share/command.ts';
-import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
@@ -639,7 +638,7 @@ export async function startPhase(
         undefined,
         options.signal,
       );
-      if (config.share && buildProxyServerOptions(proxy, assignments, config.share).shareAddresses) {
+      if (config.share) {
         await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, options.signal);
       }
       await assertMembersAlive();

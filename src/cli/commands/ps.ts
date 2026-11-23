@@ -68,7 +68,8 @@ async function sharedLabel(config: PortlerConfig, serviceName: string, info: Pid
   const service = config.services[serviceName];
   const isProxy = config.proxy !== undefined && serviceName === PROXY_SERVICE_NAME;
   if (!isProxy && (!service || !sharesPort(service))) return '-';
-  return (await isTcpReady(info.share.addresses[0]!, info.port, SHARE_PROBE_MS)) ? 'yes' : 'not reachable';
+  const answers = await Promise.all(info.share.addresses.map((address) => isTcpReady(address, info.port!, SHARE_PROBE_MS)));
+  return answers.every(Boolean) ? 'yes' : 'not reachable';
 }
 
 const SHARE_PROBE_MS = 1_000;
