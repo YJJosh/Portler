@@ -367,6 +367,7 @@ async function startK8sPhase(
       );
       if (config.share) {
         await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, signal);
+        if (proxyExited) throw new Error('the proxy exited while it was opening its shared listeners; run it in the foreground (portler up --share ...) to see why');
       }
       signal?.throwIfAborted();
     }

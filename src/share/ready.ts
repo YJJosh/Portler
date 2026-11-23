@@ -26,7 +26,7 @@ export async function waitForSharedPort(
   }
   if (waiting.size === 0) return;
   const where = [...waiting].map((address) => `${urlHostForm(address)}:${assignment.port}`).join(', ');
-  process.stderr.write(`[portler] warning: ${assignment.name} runs, but ${where} does not answer; see "portler logs ${assignment.name}" for the [portler share] lines\n`);
+  process.stderr.write(`[portler] warning: ${assignment.name} runs, but ${where} does not answer, so it is not shared there\n`);
 }
 
 /** Only a tcp or http readiness check proves the service accepts connections, which the forwarder waits for. */

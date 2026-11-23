@@ -27,7 +27,7 @@ const child = spawn(command, { shell: true, stdio: 'inherit', env });
 const forwarder = startShareForwarder(spec);
 
 // Ends as the service ended, so Portler sees the same exit. Signals that dump core end it with 128+n instead.
-const RERAISED = new Set<NodeJS.Signals>(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL', 'SIGPIPE', 'SIGUSR1', 'SIGUSR2', 'SIGALRM']);
+const RERAISED = new Set<NodeJS.Signals>(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL', 'SIGUSR2', 'SIGALRM']);
 const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
   void forwarder.close();
   if (signal && RERAISED.has(signal)) {

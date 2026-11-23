@@ -640,6 +640,7 @@ export async function startPhase(
       );
       if (config.share) {
         await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, options.signal);
+        if (proxyExited) throw new Error('the proxy exited while it was opening its shared listeners; run it in the foreground (portler up --share ...) to see why');
       }
       await assertMembersAlive();
       options.signal?.throwIfAborted();
