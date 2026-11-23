@@ -26,6 +26,9 @@ import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/loc
 import { missingManagedVolumes, warnMissingVolumeSetVariants } from '../../volumes/index.ts';
 import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
+import { waitForSharedPort } from '../../share/ready.ts';
+import { shareForwardSpec } from '../../share/command.ts';
+import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
@@ -289,6 +292,13 @@ export async function startPhase(
     }),
   );
 
+  // Before the overlap check, whose restart hint would keep the running share.
+  const liveEntries = [...runningNames].flatMap((name) => pidsBefore?.services[name] ?? []);
+  const share = await chooseShare(liveEntries, options.share, options.replayShare);
+  if (share && options.prod) {
+    throw new Error(`this stack is running with --share ${share.target}, which does not apply with --prod; run "portler down" first`);
+  }
+
   let selectedNames: string[];
   if (options.skipRunning) {
     selectedNames = orderedNames.filter((serviceName) => !runningNames.has(serviceName));
@@ -313,8 +323,7 @@ export async function startPhase(
   validateImageOverrideTargets(images, selectedNames, runningNames);
   reportImageOverrides(modeConfig, images);
 
-  const liveEntries = [...runningNames].flatMap((name) => pidsBefore?.services[name] ?? []);
-  const config = applyShare(launched, await chooseShare(liveEntries, options.share, options.replayShare));
+  const config = applyShare(launched, share);
   checkLaunch(config, mode, selectedNames);
 
   // A proxy that is already running keeps its port and old routing targets;
@@ -580,7 +589,11 @@ export async function startPhase(
               logFilePath,
               options.signal,
               hostResolveOptions(config, service, baseEnv, generatedEnv, assignments),
-            ),
+            ).then(async () => {
+              if (config.share && shareForwardSpec(config, service, assignments[serviceName])) {
+                await waitForSharedPort(config.share, assignments[serviceName]!, options.signal);
+              }
+            }),
           );
         }
       }
@@ -622,6 +635,9 @@ export async function startPhase(
         undefined,
         options.signal,
       );
+      if (config.share && buildProxyServerOptions(proxy, assignments, config.share).shareAddresses) {
+        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, options.signal);
+      }
       await assertMembersAlive();
       options.signal?.throwIfAborted();
     }

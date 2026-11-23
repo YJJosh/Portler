@@ -37,19 +37,23 @@ Portler uses the Tailscale that is already installed and logged in. It only read
 
 ```text
 other device ──► 100.64.0.4:52329 ──► Portler forwarder ──► 127.0.0.1:52329 ──► frontend
-                 (tailnet only)        (in frontend's process group)
+                 (tailnet only)        (leads frontend's process group)
 ```
 
 - Services keep listening on `127.0.0.1` as always. Portler cannot make an app bind somewhere else, so it does not try.
-- For each shared port, a small Portler forwarder listens on the Tailscale address with the **same port number** and passes connections to the service. The forwarder runs in the service's own process group: it starts with the service, and `down`, `restart`, a crash or `Ctrl+C` stop it with the service. A stopped service is never still reachable.
+- For each shared port, a small Portler forwarder listens on the Tailscale address with the **same port number** and passes connections to the service. The forwarder leads the service's process group and runs the service's command as its child: it stops when the service exits, and `down`, `restart` and `Ctrl+C` stop both. A stopped service is never still reachable.
 - The forwarder starts listening only once the service accepts connections, so it never takes a port the service is about to bind.
 - The forwarder connects to the service *from* the shared address, so the service does not mistake a remote visitor for a local one (`127.0.0.1`). Where the OS refuses that, the forwarder logs it and connects from loopback.
 - The [proxy](/guide/proxy) listens on the Tailscale addresses itself, so it still sees the real visitor address for `X-Forwarded-For`, and it answers for the Tailscale IPs and the MagicDNS name.
 - Ports are chosen so they are free on loopback **and** on the shared address.
+- Each shared port has its own small forwarder process (a Node process, tens of MB of memory), so sharing a large stack costs some memory.
+- `up` waits until each shared address answers before it starts the next service and returns, so the printed URLs work right away. If one does not answer, `up` warns and the service keeps running.
 
 ### Only the tailnet
 
 With `tailscale` (or an `<ip>` inside the tailnet ranges), Portler listens only on the Tailscale addresses, never on `0.0.0.0`, and it also refuses every connection that does not come from a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The second check matters: Linux and macOS accept a packet for any local address on any interface, so a machine on your LAN could otherwise reach `100.64.0.4` by routing it through your LAN address.
+
+Headscale's `prefixes` setting has to stay inside these two ranges too, since the Tailscale client only supports them.
 
 Who on the tailnet can connect is decided by your tailnet's ACLs (in Headscale, its policy file). A tailnet with no policy lets every node reach every node.
 
@@ -66,9 +70,9 @@ services:
 
 Not shared:
 
-- `share: false` services;
+- `share: false` services. A proxy route to one answers `403` on the shared address and still works on this machine;
 - UDP ports: `transport: udp` services get a warning, a `tcp+udp` service is shared over TCP only;
-- a service with `host: 0.0.0.0` (or `::`): it already listens on every network, which Portler warns about, since that includes the LAN.
+- a service with `host: 0.0.0.0` (or `::`), or a proxy with `proxy.host: 0.0.0.0`: it already listens on every network, which Portler warns about, since that includes the LAN.
 
 ## References between services
 

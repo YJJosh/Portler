@@ -3,16 +3,11 @@ import os from 'node:os';
 import { usesTcp } from '../ports/transport.ts';
 import { isObject, isString } from '../util/guards.ts';
 import { normalizeIpAddress } from '../util/ip.ts';
-import { isTailnetAddress } from './tailnet.ts';
+import { isTailnetAddress, urlHostForm } from './tailnet.ts';
 import { readTailscaleSelf, type TailscaleSelf } from './tailscale.ts';
 import type { PidServiceInfo, PortlerConfig, ServiceConfig, ShareSettings } from '../types/index.ts';
 
 export const SHARE_TARGETS = '"tailscale", "tailscale-dns", an IP address of this machine, or "none"';
-
-/** An IP in the form a URL and a Host header use: IPv6 in brackets. */
-export function urlHostForm(host: string): string {
-  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-}
 
 function interfaceAddresses(): Set<string> {
   const found = new Set<string>();
@@ -76,7 +71,7 @@ export function isShareSettings(value: unknown): value is ShareSettings {
   );
 }
 
-function sameShare(a: ShareSettings, b: ShareSettings): boolean {
+export function sameShare(a: ShareSettings, b: ShareSettings): boolean {
   return a.target === b.target && [...a.addresses].sort().join(',') === [...b.addresses].sort().join(',');
 }
 

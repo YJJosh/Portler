@@ -12,3 +12,12 @@ export function isTailnetAddress(ip: string): boolean {
   return TAILNET.check(normalized, net.isIPv4(normalized) ? 'ipv4' : 'ipv6');
 }
 
+
+export function isWildcardHost(host: string): boolean {
+  return host === '0.0.0.0' || host === '::' || host === '[::]' || host === '';
+}
+
+/** An IP in the form a URL and a Host header use: IPv6 in brackets. */
+export function urlHostForm(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}

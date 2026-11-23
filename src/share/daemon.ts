@@ -1,8 +1,7 @@
-// Started in the background by a shared service's own shell, so it lives in the service's process group and
-// stops with it. argv[2] is the JSON ShareForwardSpec.
-import { isShareForwardSpec, startShareForwarder } from './forwarder.ts';
-
-const PARENT_POLL_MS = 1_000;
+// Leads a shared service's process group: runs the service's shell command as its child, in the same group, and
+// listens on the shared addresses while it runs. argv[2] is the JSON ShareForwardSpec, argv[3] the shell command.
+import { spawn } from 'node:child_process';
+import { isShareForwardSpec, SERVICE_NODE_OPTIONS, startShareForwarder } from './forwarder.ts';
 
 let spec: unknown;
 try {
@@ -10,14 +9,32 @@ try {
 } catch {
   spec = undefined;
 }
-if (!isShareForwardSpec(spec)) {
-  process.stderr.write('portler share: invalid forward spec\n');
+const command = process.argv[3];
+if (!isShareForwardSpec(spec) || !command) {
+  process.stderr.write('portler share: invalid arguments\n');
   process.exit(1);
 }
 
-startShareForwarder(spec);
-// The service's shell is the parent; once it is gone the service is too, and its port may go to someone else.
-const parent = process.ppid;
-setInterval(() => {
-  if (process.ppid !== parent) process.exit(0);
-}, PARENT_POLL_MS);
+const env = { ...process.env };
+delete env[SERVICE_NODE_OPTIONS];
+if (process.env[SERVICE_NODE_OPTIONS] !== undefined) env.NODE_OPTIONS = process.env[SERVICE_NODE_OPTIONS];
+
+// Not detached: the shell joins this process's group, so a group signal reaches it, and this process, the leader
+// Portler recorded, exits only after it. Signals are left to the shell; this process follows its exit.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, () => {});
+const child = spawn(command, { shell: true, stdio: 'inherit', env });
+const forwarder = startShareForwarder(spec);
+
+child.on('error', (error) => {
+  process.stderr.write(`portler share: cannot start the service: ${error.message}\n`);
+  void forwarder.close().then(() => process.exit(127));
+});
+child.on('exit', (code, signal) => {
+  void forwarder.close().then(() => {
+    if (signal) {
+      process.removeAllListeners(signal);
+      process.kill(process.pid, signal);
+    }
+    process.exit(code ?? 1);
+  });
+});

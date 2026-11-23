@@ -32,9 +32,12 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 /** Side effect: allocates and writes state.json when it is missing, incomplete, or has stale
  * Docker/transport data. */
 export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
-  // A shared stack's env keeps its shared URLs; any recorded entry with a share speaks for it.
-  const recorded = await readPids(unsharedConfig.projectDir);
-  const config = applyShare(unsharedConfig, liveShare(Object.values(recorded?.services ?? {})));
+  // A running shared stack's env keeps its shared URLs; a crashed one's does not.
+  const pids = await readPids(unsharedConfig.projectDir);
+  const running = new Set(await liveServiceNames(unsharedConfig.projectDir, pids));
+  // Never under --prod, which refuses --share.
+  const share = unsharedConfig.production ? undefined : liveShare([...running].flatMap((name) => pids?.services[name] ?? []));
+  const config = applyShare(unsharedConfig, share);
   const state = await readState(config.projectDir);
   const configuredWithPorts = servicesWithPorts(config, Object.keys(config.services));
   if (config.proxy) configuredWithPorts.push(PROXY_SERVICE_NAME);
@@ -68,8 +71,6 @@ export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<
 
   // Never re-reserve currently-running services: allocateAssignments would
   // re-probe their busy ports and move them away from where they listen.
-  const pids = recorded;
-  const running = new Set(await liveServiceNames(config.projectDir, pids));
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 
   const assignments = await allocateAssignments(config, state, reserveServices, running, { recorded: pids?.services });

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -12,7 +13,7 @@ import { localUrl, resolveEnvValue } from '../src/env/index.ts';
 import { allocateAssignments } from '../src/ports/allocate.ts';
 import { buildProxyServerOptions } from '../src/proxy/spawn.ts';
 import { isAllowedHost } from '../src/proxy/server.ts';
-import { shareForwardSpec, shareForwarderShellLine } from '../src/share/command.ts';
+import { shareForwardSpec, shareWrapperSpawn } from '../src/share/command.ts';
 import { startShareForwarder, upstreamHosts } from '../src/share/forwarder.ts';
 import { applyShare, chooseShare, isShareSettings, resolveShare } from '../src/share/settings.ts';
 import { isTailnetAddress } from '../src/share/tailnet.ts';
@@ -213,10 +214,22 @@ describe('applyShare', () => {
     assert.equal(shareForwardSpec(config([service('api')]), service('api'), assignment('api')), undefined);
   });
 
-  it('starts the forwarder in the background of the service shell', () => {
-    const line = shareForwarderShellLine({ service: 'api', port: 52400, upstream: '127.0.0.1', addresses: ['100.64.0.4'], tailnetOnly: true });
-    assert.match(line, /share[/\\]daemon\.(ts|js) '\{"service":"api"/);
-    assert.ok(line.endsWith(' &\n'));
+  it('wraps the service command and moves NODE_OPTIONS aside for the wrapper', () => {
+    const spec = { service: 'api', port: 52400, upstream: '127.0.0.1', addresses: ['100.64.0.4'], tailnetOnly: true };
+    const wrapper = shareWrapperSpawn(spec, 'npm run dev', { PATH: '/bin', NODE_OPTIONS: '--require ./otel.js' });
+    assert.equal(wrapper.file, process.execPath);
+    assert.match(wrapper.args.at(-3)!, /share[/\\]daemon\.(ts|js)$/);
+    assert.deepEqual(wrapper.args.slice(-2), [JSON.stringify(spec), 'npm run dev']);
+    assert.equal(wrapper.env.NODE_OPTIONS, undefined);
+    assert.equal(wrapper.env.PORTLER_SHARE_SERVICE_NODE_OPTIONS, '--require ./otel.js');
+  });
+
+  it('drops a shared address the service binds itself', () => {
+    const shared = applyShare(config([service('api', { host: '100.64.0.4' }), service('only', { host: '100.64.0.4' })]), TAILSCALE);
+    const assignment: ServiceAssignment = { name: 'api', port: 52400, host: '100.64.0.4', urlHost: '100.64.0.4', protocol: 'http', url: '' };
+    assert.deepEqual(shareForwardSpec(shared, shared.services.api!, assignment)?.addresses, ['fd7a:115c:a1e0::4']);
+    const v4Only = applyShare(config([service('only', { host: '100.64.0.4' })]), { ...TAILSCALE, addresses: ['100.64.0.4'] });
+    assert.equal(shareForwardSpec(v4Only, v4Only.services.only!, assignment), undefined);
   });
 });
 
@@ -247,6 +260,16 @@ describe('shared references and URLs', () => {
       assert.equal(isAllowedHost(host, options.allowedHosts), true, host);
     }
     assert.equal(isAllowedHost('attacker.example:52401', options.allowedHosts), false);
+  });
+
+  it('marks routes to share: false services, and keeps a wildcard proxy off the shared addresses', () => {
+    const db: ServiceAssignment = { name: 'db', port: 52402, host: '127.0.0.1', urlHost: 'localhost', protocol: 'http', url: 'http://localhost:52402' };
+    const proxy = (host: string): ServiceAssignment => ({ ...api, name: 'proxy', host, port: 52401, url: '' });
+    const proxyConfig = { trustedProxies: [], routes: [{ prefix: '/db', service: 'db' }, { prefix: '/', service: 'api' }], allowedHosts: [] };
+    const options = buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('127.0.0.1') }, TAILSCALE);
+    assert.deepEqual(options.routes.map((route) => [route.service, route.local ?? false]), [['db', true], ['api', false]]);
+    assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('0.0.0.0') }, TAILSCALE).shareAddresses, undefined);
+    assert.equal(buildProxyServerOptions(proxyConfig, { api, db, proxy: proxy('127.0.0.1') }).routes[0]!.local, undefined);
   });
 });
 
@@ -311,6 +334,28 @@ describe('restart and --share', () => {
     assert.deepEqual(shared.replayed, ['--share tailscale']);
     assert.equal(plan({ db: entry(), api: entry() }).share, undefined);
     assert.throws(() => plan({ db: entry(), api: entry(TAILSCALE) }), /api was started with --share tailscale and db without it/);
+  });
+
+  it('refuses to replay a share into production', async () => {
+    const rawConfig = await loadConfig(projectDir);
+    assert.throws(
+      () =>
+        planRestart({
+          rawConfig,
+          running: { db: entry(TAILSCALE), api: entry(TAILSCALE) },
+          runningNow: new Set(['db', 'api']),
+          stopping: ['db', 'api'],
+          involved: ['db', 'api'],
+          starting: ['db', 'api'],
+          requestedMode: 'local',
+          modeExplicit: false,
+          prod: true,
+          setup: undefined,
+          images: undefined,
+          volumeSetGiven: false,
+        }),
+      /does not apply with --prod/,
+    );
   });
 
   it('loads share: false and rejects other values', async () => {
@@ -391,9 +436,67 @@ describe('share forwarder', { skip: process.platform !== 'linux' }, () => {
     }
   });
 
+  it('keeps a half-closed client connection open for the reply', async () => {
+    const upstream = await listen('127.0.0.1', 0, (socket) => {
+      socket.on('end', () => socket.end('reply\n'));
+      socket.resume();
+    });
+    const port = portOf(upstream);
+    const forwarder = startShareForwarder({ service: 'api', port, upstream: '127.0.0.1', addresses: ['127.0.0.2'], tailnetOnly: false });
+    try {
+      await waitFor(async () => new Promise((resolve) => {
+        const probe = net.connect({ host: '127.0.0.2', port }, () => { probe.destroy(); resolve(true); });
+        probe.on('error', () => resolve(false));
+      }));
+      const reply = await new Promise<string>((resolve) => {
+        const socket = net.connect({ host: '127.0.0.2', port, allowHalfOpen: true }, () => socket.end('request\n'));
+        let data = '';
+        socket.on('data', (chunk) => (data += chunk));
+        socket.on('close', () => resolve(data.trim()));
+        socket.on('error', () => resolve('error'));
+      });
+      assert.equal(reply, 'reply');
+    } finally {
+      await forwarder.close();
+      upstream.close();
+    }
+  });
+
   it('tries both loopback families for a localhost service', () => {
     assert.deepEqual(upstreamHosts('localhost'), ['127.0.0.1', '::1']);
     assert.deepEqual(upstreamHosts('10.0.0.5'), ['10.0.0.5']);
+  });
+});
+
+describe('share wrapper', () => {
+  const daemon = path.join(import.meta.dirname, '..', 'src', 'share', 'daemon.ts');
+  const spec = JSON.stringify({ service: 'api', port: 52499, upstream: '127.0.0.1', addresses: ['127.0.0.1'], tailnetOnly: false });
+  const run = (command: string, env: NodeJS.ProcessEnv = process.env) =>
+    spawn(process.execPath, ['--experimental-strip-types', daemon, spec, command], { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env });
+  const exit = (child: ReturnType<typeof run>) =>
+    new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }>((resolve) => {
+      let out = '';
+      child.stdout!.on('data', (chunk) => (out += chunk));
+      child.on('close', (code, signal) => resolve({ code, signal, out: out.trim() }));
+    });
+
+  it('exits with the exit code of the service command', async () => {
+    assert.equal((await exit(run('exit 3'))).code, 3);
+  });
+
+  it('gives the service its own NODE_OPTIONS back', async () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, PORTLER_SHARE_SERVICE_NODE_OPTIONS: '--max-old-space-size=64' };
+    delete env.NODE_OPTIONS;
+    const result = await exit(run('printf "%s" "$NODE_OPTIONS"; printf "|%s" "$PORTLER_SHARE_SERVICE_NODE_OPTIONS"', env));
+    assert.deepEqual([result.code, result.out], [0, '--max-old-space-size=64|']);
+  });
+
+  it('stops with its group and exits after the service, by its signal', async () => {
+    const child = run('sleep 30');
+    const done = exit(child);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    process.kill(-child.pid!, 'SIGTERM');
+    assert.equal((await done).signal, 'SIGTERM');
   });
 });
 

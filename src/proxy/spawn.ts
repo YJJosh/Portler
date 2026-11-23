@@ -5,6 +5,7 @@ import { PROXY_SERVICE_NAME } from '../constants.ts';
 import { readProcessStartToken } from '../process/identity.ts';
 import { prefixStream } from '../process/logs.ts';
 import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment, ShareSettings } from '../types/index.ts';
+import { isWildcardHost } from '../share/tailnet.ts';
 import type { ProxyServerOptions } from './server.ts';
 
 // Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited.
@@ -27,12 +28,16 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
     routes: proxy.routes.map((route) => {
       const target = assignments[route.service];
       if (!target) throw new Error(`proxy route "${route.prefix}" targets service "${route.service}" with no assigned port`);
-      return { prefix: route.prefix, service: route.service, host: target.host, port: target.port };
+      const local = share !== undefined && target.localUrlHost === undefined;
+      return { prefix: route.prefix, service: route.service, host: target.host, port: target.port, ...(local ? { local: true as const } : {}) };
     }),
     // url_host is the name Portler prints; other non-loopback names need proxy.allowed_hosts.
     allowedHosts: [assignment.urlHost, ...(assignment.localUrlHost ? [assignment.localUrlHost] : []), ...(share?.hostNames ?? []), ...proxy.allowedHosts],
     trustedProxies: proxy.trustedProxies,
-    ...(share ? { shareAddresses: share.addresses, tailnetOnly: share.tailnetOnly } : {}),
+    // A wildcard proxy host already listens on the shared address; a second bind there would fail.
+    ...(share && !isWildcardHost(assignment.host)
+      ? { shareAddresses: share.addresses.filter((address) => address !== assignment.host), tailnetOnly: share.tailnetOnly }
+      : {}),
   };
 }
 

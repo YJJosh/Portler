@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { isObject, isPort, isString } from '../util/guards.ts';
 import { normalizeIpAddress } from '../util/ip.ts';
-import { sleep } from '../util/sleep.ts';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isTailnetAddress } from './tailnet.ts';
 
 /** One service's share listeners: `addresses`:`port` piped to the service on `upstream`:`port`. */
@@ -26,6 +26,9 @@ export function isShareForwardSpec(value: unknown): value is ShareForwardSpec {
     typeof value.tailnetOnly === 'boolean'
   );
 }
+
+/** The service's own NODE_OPTIONS, moved aside so they apply to the service and not to the wrapper's Node. */
+export const SERVICE_NODE_OPTIONS = 'PORTLER_SHARE_SERVICE_NODE_OPTIONS';
 
 const UPSTREAM_POLL_MS = 300;
 const BIND_RETRY_MS = 2_000;
@@ -61,7 +64,7 @@ async function firstReachable(hosts: readonly string[], port: number): Promise<s
 // Connects from the shared address when the OS allows it, so the service does not see a remote peer as loopback.
 function connectUpstream(host: string, port: number, localAddress: string | undefined): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host, port, ...(localAddress !== undefined ? { localAddress } : {}) });
+    const socket = net.connect({ host, port, allowHalfOpen: true, ...(localAddress !== undefined ? { localAddress } : {}) });
     socket.once('connect', () => resolve(socket));
     socket.once('error', reject);
   });
@@ -93,6 +96,9 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
   const sockets = new Set<net.Socket>();
   let closed = false;
   let localSourceWorks = true;
+  const stopped = new AbortController();
+  // Aborted by close, so a pending retry does not keep the process alive.
+  const sleep = (ms: number): Promise<void> => delay(ms, undefined, { signal: stopped.signal }).catch(() => {});
 
   const handle = async (client: net.Socket, listenAddress: string, upstreamHost: string): Promise<void> => {
     client.pause();
@@ -112,17 +118,18 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         client.destroy();
         return;
       }
-      // macOS refuses a loopback connection from a non-loopback source address.
-      localSourceWorks = false;
-      log(spec, `cannot connect from ${source} (${(error as Error).message}); the service sees shared connections as local`);
       try {
         upstream = await connectUpstream(upstreamHost, spec.port, undefined);
       } catch {
+        // Both failed: the service is down for a moment (e.g. a port-forward restarting), not the source address.
         client.destroy();
         return;
       }
+      // Only the source address failed, as on macOS, which refuses loopback connections from a non-loopback source.
+      localSourceWorks = false;
+      log(spec, `cannot connect from ${source} (${(error as Error).message}); the service sees shared connections as local`);
     }
-    if (closed) {
+    if (closed || client.destroyed) {
       client.destroy();
       upstream.destroy();
       return;
@@ -137,7 +144,8 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
 
   const listen = (address: string, upstreamHost: string): Promise<'ok' | 'taken' | 'retry'> =>
     new Promise((resolve) => {
-      const server = net.createServer({ allowHalfOpen: false }, (client) => {
+      // Half-open both ways: a client that ends its request still gets the reply.
+      const server = net.createServer({ allowHalfOpen: true }, (client) => {
         void handle(client, address, upstreamHost);
       });
       server.once('error', (error: NodeJS.ErrnoException) => {
@@ -145,7 +153,8 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         resolve(error.code === 'EADDRINUSE' ? 'taken' : 'retry');
       });
       server.listen({ host: address, port: spec.port, exclusive: true }, () => {
-        servers.push(server);
+        if (closed) server.close();
+        else servers.push(server);
         resolve('ok');
       });
     });
@@ -156,7 +165,8 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
       upstreamHost = await firstReachable(upstreamHosts(spec.upstream), spec.port);
       if (upstreamHost === undefined) await sleep(UPSTREAM_POLL_MS);
     }
-    for (const address of spec.addresses) {
+    // In parallel: one address that is missing for a while must not hold up the others.
+    await Promise.all(spec.addresses.map(async (address) => {
       let warned = false;
       while (!closed) {
         const result = await listen(address, upstreamHost!);
@@ -178,11 +188,12 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         warned = true;
         await sleep(BIND_RETRY_MS);
       }
-    }
+    }));
   };
 
   const close = async (): Promise<void> => {
     closed = true;
+    stopped.abort();
     for (const socket of sockets) socket.destroy();
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   };

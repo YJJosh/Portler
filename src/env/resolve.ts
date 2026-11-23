@@ -1,5 +1,6 @@
 import { envEntryValue, isEnvSpec, mergeEnvMaps } from '../config/env-spec.ts';
 import { k8sName } from '../config/naming.ts';
+import { urlHostForm } from '../share/tailnet.ts';
 import { didYouMean } from '../util/suggest.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig, UnknownMap } from '../types/index.ts';
 
@@ -83,8 +84,7 @@ export function isSecretEnvKey(key: string, entry?: unknown): boolean {
 /** The URL this machine itself reaches the service on: `url` unless the port is shared. */
 export function localUrl(assignment: ServiceAssignment): string {
   if (assignment.localUrlHost === undefined) return assignment.url;
-  const host = assignment.localUrlHost.includes(':') && !assignment.localUrlHost.startsWith('[') ? `[${assignment.localUrlHost}]` : assignment.localUrlHost;
-  return `${assignment.protocol}://${host}:${assignment.port}`;
+  return `${assignment.protocol}://${urlHostForm(assignment.localUrlHost)}:${assignment.port}`;
 }
 
 /** Where a service of this config runs, as a reader of env values. */

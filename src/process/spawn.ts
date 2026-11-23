@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, StdioOptions } from 'node:child_process';
 import { closeSync } from 'node:fs';
 import { resolveServiceCwd } from '../config/index.ts';
-import { shareForwardSpec, shareForwarderShellLine } from '../share/command.ts';
+import { shareForwardSpec, shareWrapperSpawn } from '../share/command.ts';
 import { dockerShellCommand } from './docker.ts';
 import { openServiceLog, prefixStream } from './logs.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -35,8 +35,7 @@ export function spawnService(
   baseEnv: EnvMap = {},
 ): ChildProcess {
   const forward = shareForwardSpec(config, service, assignment);
-  const command =
-    (forward ? shareForwarderShellLine(forward) : '') + serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
+  const command = serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
   const cwd = resolveServiceCwd(config, service);
 
   // The child inherits the fd, so capture keeps working after Portler exits.
@@ -45,14 +44,12 @@ export function spawnService(
     logFd = openServiceLog(logFilePath);
   }
 
-  const child = spawn(command, {
-    cwd,
-    env,
-    shell: true,
-    // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren; foreground mode needs it too.
-    detached: true,
-    stdio: attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
-  });
+  // Its own process group, so stopServices can signal -pid and reach the shell's grandchildren; foreground mode needs it too.
+  const stdio: StdioOptions = attachLogs ? ['ignore', 'pipe', 'pipe'] : ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'];
+  const wrapper = forward ? shareWrapperSpawn(forward, command, env) : undefined;
+  const child = wrapper
+    ? spawn(wrapper.file, wrapper.args, { cwd, env: wrapper.env, detached: true, stdio })
+    : spawn(command, { cwd, env, shell: true, detached: true, stdio });
 
   if (logFd !== undefined) closeSync(logFd);
 

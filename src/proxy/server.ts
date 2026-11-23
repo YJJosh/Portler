@@ -12,6 +12,8 @@ export interface ProxyTarget {
   service: string;
   host: string;
   port: number;
+  /** A `share: false` service: the shared listeners refuse this route. */
+  local?: true;
 }
 
 export interface ProxyServerOptions {
@@ -30,7 +32,10 @@ export interface ProxyServerOptions {
 }
 
 function isProxyTarget(value: unknown): value is ProxyTarget {
-  return isObject(value) && isString(value.prefix) && isString(value.service) && isString(value.host) && isPort(value.port);
+  return (
+    isObject(value) && isString(value.prefix) && isString(value.service) && isString(value.host) && isPort(value.port) &&
+    (value.local === undefined || value.local === true)
+  );
 }
 
 export function isProxyServerOptions(value: unknown): value is ProxyServerOptions {
@@ -213,7 +218,7 @@ function badGatewayMessage(route: ProxyTarget, error: Error): string {
   return `portler proxy: service "${route.service}" is not reachable at ${route.host}:${route.port} (${error.message})\n`;
 }
 
-function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: ServerResponse): void {
+function handleRequest(options: ProxyServerOptions, shared: boolean, req: IncomingMessage, res: ServerResponse): void {
   if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(rejectForbiddenHost(req.headers.host));
@@ -226,6 +231,11 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
   if (!route) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(`portler proxy: no route matches ${req.url ?? '/'}\n`);
+    return;
+  }
+  if (shared && route.local) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(`portler proxy: service "${route.service}" is not shared (share: false)\n`);
     return;
   }
 
@@ -275,7 +285,7 @@ function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): stri
   return `${lines.join('\r\n')}\r\n\r\n`;
 }
 
-function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket: net.Socket, head: Buffer): void {
+function handleUpgrade(options: ProxyServerOptions, shared: boolean, req: IncomingMessage, socket: net.Socket, head: Buffer): void {
   socket.on('error', () => {});
 
   // WebSockets are not covered by the same-origin policy, so they need the Host check too.
@@ -287,6 +297,10 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   const route = matchRoute(options.routes, req.url ?? '/');
   if (!route) {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  if (shared && route.local) {
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;
   }
 
@@ -313,9 +327,9 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   socket.on('close', () => upstream.destroy());
 }
 
-function createProxyServer(options: ProxyServerOptions): http.Server {
-  const server = http.createServer((req, res) => handleRequest(options, req, res));
-  server.on('upgrade', (req, socket, head) => handleUpgrade(options, req, socket as net.Socket, head));
+function createProxyServer(options: ProxyServerOptions, shared: boolean): http.Server {
+  const server = http.createServer((req, res) => handleRequest(options, shared, req, res));
+  server.on('upgrade', (req, socket, head) => handleUpgrade(options, shared, req, socket as net.Socket, head));
   return server;
 }
 
@@ -331,7 +345,7 @@ function listen(server: http.Server, port: number, host: string): Promise<http.S
 
 /** Resolves once the server is listening. */
 export function startProxyServer(options: ProxyServerOptions): Promise<http.Server> {
-  return listen(createProxyServer(options), options.port, options.host);
+  return listen(createProxyServer(options, false), options.port, options.host);
 }
 
 /** One listener per share address, on the proxy's port. Closing them is up to the caller. */
@@ -339,7 +353,7 @@ export async function startProxyShareServers(options: ProxyServerOptions): Promi
   const servers: http.Server[] = [];
   try {
     for (const address of options.shareAddresses ?? []) {
-      const server = createProxyServer(options);
+      const server = createProxyServer(options, true);
       if (options.tailnetOnly) {
         server.on('connection', (socket: net.Socket) => {
           if (!isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();

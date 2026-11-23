@@ -1,6 +1,6 @@
 import { PROXY_SERVICE_NAME } from '../constants.ts';
 import { usesTcp } from '../ports/transport.ts';
-import { isWildcardHost } from './command.ts';
+import { isWildcardHost } from './tailnet.ts';
 import { sharesPort } from './settings.ts';
 import type { Assignments, PortlerConfig } from '../types/index.ts';
 
@@ -26,8 +26,13 @@ export function reportShare(config: PortlerConfig, serviceNames: readonly string
       if (service.transport === 'tcp+udp') process.stderr.write(`[portler] warning: ${name}: only its TCP port is shared\n`);
     }
   }
-  if (config.proxy && assignments[PROXY_SERVICE_NAME] && serviceNames.includes(PROXY_SERVICE_NAME)) {
-    shared.push(`${PROXY_SERVICE_NAME} ${assignments[PROXY_SERVICE_NAME].port}`);
+  const proxy = assignments[PROXY_SERVICE_NAME];
+  if (config.proxy && proxy && serviceNames.includes(PROXY_SERVICE_NAME)) {
+    if (isWildcardHost(proxy.host)) {
+      process.stderr.write(`[portler] warning: the proxy listens on all interfaces (proxy.host: ${proxy.host}), so every network can reach it, not only --share ${share.target}\n`);
+    } else {
+      shared.push(`${PROXY_SERVICE_NAME} ${proxy.port}`);
+    }
   }
   if (shared.length === 0) return;
   const where = share.target.startsWith('tailscale') ? `tailscale (${share.addresses.join(', ')})` : share.target;

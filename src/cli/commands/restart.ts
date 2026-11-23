@@ -6,6 +6,7 @@ import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
+import { sameShare } from '../../share/settings.ts';
 import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
@@ -238,12 +239,24 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
   // Running services hold env with their URLs, so a restart cannot change whether the stack is shared.
   const shares = involved.map((name) => entry(name).share);
   const share = shares.find((recorded) => recorded !== undefined);
+  const other = shares.find((recorded) => recorded !== undefined && !sameShare(recorded, share!));
+  if (share !== undefined && other !== undefined) {
+    throw new Error(
+      `the services were started with --share ${share.target} and --share ${other.target}, so there is no one share to replay. ` +
+        'Run "portler down" and then "portler up" to start over.',
+    );
+  }
   if (share !== undefined && shares.some((recorded) => recorded === undefined)) {
     const sharedNames = involved.filter((name) => entry(name).share !== undefined);
     const localNames = involved.filter((name) => entry(name).share === undefined);
     throw new Error(
       `${list(sharedNames)} ${verb(sharedNames, 'was', 'were')} started with --share ${share.target} and ${list(localNames)} without it, ` +
         'so there is no one share to replay. Run "portler down" and then "portler up" to start over.',
+    );
+  }
+  if (share !== undefined && prod) {
+    throw new Error(
+      `the stack runs with --share ${share.target}, which does not apply with --prod. Run "portler down" and then "portler up --prod" to start it unshared.`,
     );
   }
   if (share !== undefined) replayed.push(`--share ${share.target}`);

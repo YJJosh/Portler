@@ -38,6 +38,9 @@ import { printPortTable } from '../table.ts';
 import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
 import { applyShare, chooseShare } from '../../share/settings.ts';
 import { reportShare } from '../../share/report.ts';
+import { waitForSharedPort } from '../../share/ready.ts';
+import { shareForwardSpec } from '../../share/command.ts';
+import { buildProxyServerOptions } from '../../proxy/spawn.ts';
 import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareRequest } from './up.ts';
 
 // How long a namespace left Terminating by an earlier `down` may take to clear.
@@ -182,9 +185,9 @@ async function startK8sPhase(
   // The overlap check can run docker inspect for an earlier launch, so it is cancellable too.
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   const runningNames = new Set(await liveServiceNames(launchedConfig.projectDir, pids, undefined, run));
-  ensureNoOverlap(runningNames, selectedNames);
   const liveEntries = [...runningNames].flatMap((name) => pids?.services[name] ?? []);
   const config = applyShare(launchedConfig, await chooseShare(liveEntries, shareRequest(args)));
+  ensureNoOverlap(runningNames, selectedNames);
   // Read the cached state before writing the record, so a corrupt cache leaves none behind.
   const state = await readState(config.projectDir);
   // Before anything touches the cluster: `env` and `down k8s` find it through this record.
@@ -318,9 +321,10 @@ async function startK8sPhase(
         // applyK8sMode strips command healthchecks, so the readiness env is unused. An HTTP
         // healthcheck URL can use `${env.KEY}`, so resolve it with the env the pod got.
         const resolveOptions = hostResolveOptions(config, service, rendered.baseEnv, generatedEnv, assignments);
-        readinessWaits.push(
-          () => waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions),
-        );
+        readinessWaits.push(async () => {
+          await waitForServiceReady(config, service, {}, assignments, assignment, () => forwardExited, 0, undefined, signal, resolveOptions);
+          if (config.share && shareForwardSpec(config, service, assignment)) await waitForSharedPort(config.share, assignment, signal);
+        });
       }
 
       const waits = readinessWaits.map((wait) => wait());
@@ -359,6 +363,9 @@ async function startK8sPhase(
         undefined,
         signal,
       );
+      if (config.share && buildProxyServerOptions(config.proxy, assignments, config.share).shareAddresses) {
+        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, signal);
+      }
       signal?.throwIfAborted();
     }
     if (config.proxy) process.stdout.write(`[portler] project url: ${assignments[PROXY_SERVICE_NAME]!.url}\n`);
