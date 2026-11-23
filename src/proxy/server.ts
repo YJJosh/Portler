@@ -332,19 +332,22 @@ function handleUpgrade(options: ProxyServerOptions, shared: boolean, req: Incomi
 }
 
 // By the address the connection came in on, so a proxy on 0.0.0.0 treats its tailnet connections as shared too.
+// Decided once per connection; a socket without a local address counts as shared, the stricter side.
 function isSharedConnection(options: ProxyServerOptions, socket: net.Socket): boolean {
+  if (!options.sharedAddresses?.length) return false;
   const local = normalizeIpAddress(socket.localAddress ?? '');
-  return local !== undefined && (options.sharedAddresses ?? []).includes(local);
+  return local === undefined || options.sharedAddresses.includes(local);
 }
 
 function createProxyServer(options: ProxyServerOptions): http.Server {
-  const server = http.createServer((req, res) => handleRequest(options, isSharedConnection(options, req.socket), req, res));
-  server.on('upgrade', (req, socket, head) => handleUpgrade(options, isSharedConnection(options, req.socket), req, socket as net.Socket, head));
-  if (options.tailnetOnly) {
-    server.on('connection', (socket: net.Socket) => {
-      if (isSharedConnection(options, socket) && !isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();
-    });
-  }
+  const shared = new WeakSet<net.Socket>();
+  const server = http.createServer((req, res) => handleRequest(options, shared.has(req.socket), req, res));
+  server.on('upgrade', (req, socket, head) => handleUpgrade(options, shared.has(req.socket), req, socket as net.Socket, head));
+  server.on('connection', (socket: net.Socket) => {
+    if (!isSharedConnection(options, socket)) return;
+    if (options.tailnetOnly && !isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();
+    else shared.add(socket);
+  });
   return server;
 }
 

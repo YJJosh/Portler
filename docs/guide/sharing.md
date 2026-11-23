@@ -42,6 +42,7 @@ other device ──► 100.64.0.4:52329 ──► Portler forwarder ──► 12
 
 - Services keep listening on `127.0.0.1` as always. Portler cannot make an app bind somewhere else, so it does not try.
 - For each shared port, a small Portler forwarder listens on the Tailscale address with the **same port number** and passes connections to the service. The forwarder leads the service's process group and runs the service's command as its child: it stops when the service exits, and `down`, `restart` and `Ctrl+C` stop both. A stopped service is never still reachable.
+- The pid Portler prints for a shared service is the wrapper's. Stop a service by its group, as Portler does: `portler down <name>`, or `kill -TERM -<pid>`; a plain `kill <pid>` leaves it running.
 - The forwarder starts listening only once the service accepts connections, so it never takes a port the service is about to bind.
 - The forwarder connects to the service *from* the shared address, so the service does not mistake a remote visitor for a local one (`127.0.0.1`). Where the OS refuses that, the forwarder logs it and connects from loopback.
 - The [proxy](/guide/proxy) listens on the Tailscale addresses itself, so it still sees the real visitor address for `X-Forwarded-For`, and it answers for the Tailscale IPs and the MagicDNS name.
