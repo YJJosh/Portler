@@ -37,6 +37,7 @@ portler volumes list|fork|remove          # manage "@name" Docker volumes
 - **Stop only what you started:** check `portler ps` first; stop only yours with `portler down [k8s] <service...>`. Use bare `portler down` only when nothing was running before you (`down <service>` warns on running dependents).
 - **No `--force` without asking:** never pass `--force` to `down`, `clean`, or `volumes fork`/`remove` unless the user asks (`down --force` can signal unverifiable processes; `clean --force` stops running services; `volumes fork --force` risks corrupt DB copies). Plain `clean` refuses running or unverifiable services.
 - **Kubernetes context:** `env` and `down k8s` target the context `up k8s` deployed to — use the same `KUBECONFIG`. `up k8s` refuses another context while Deployments remain (`down k8s` first). Portler docs: `guide/kubernetes`.
+- **Share with other machines:** only when the user asks, `portler up -d --share tailscale` (also `tailscale-dns`, an IP of this machine) listens on the Tailscale address too; printed URLs then work from the tailnet. `${svc.url}` becomes the shared URL; use `${svc.local_url}` or `${svc.address}` between services. `share: false` keeps a service local. `restart` keeps the share until `down`. Portler docs: `guide/sharing`.
 - **State:** `.portler/` holds runtime state and belongs in `.gitignore`.
 
 ## portler.yml essentials
@@ -76,5 +77,5 @@ Read docs for the **installed** version (`portler --version`), not memory — `p
 
 - **Version-pinned Markdown:** `https://raw.githubusercontent.com/YJJosh/Portler/v<version>/docs/<page>.md` (or `git clone --depth 1 --branch v<version> https://github.com/YJJosh/Portler`).
 - **Latest site:** https://yjjosh.github.io/Portler/ (`guide/proxy` → `docs/guide/proxy.md`, `reference/cli/` → `docs/reference/cli/index.md`).
-- **Pages:** `guide/` (`getting-started`, `services`, `ports`, `dependencies`, `setup-and-production`, `docker`, `volumes`, `databases`, `proxy`, `kubernetes`); `reference/` (`configuration`, `environment`, `generated-files`, `cli/<command>`).
+- **Pages:** `guide/` (`getting-started`, `services`, `ports`, `dependencies`, `setup-and-production`, `docker`, `volumes`, `databases`, `proxy`, `sharing`, `kubernetes`); `reference/` (`configuration`, `environment`, `generated-files`, `cli/<command>`).
 - A 404 at your tag or a rejected flag means it is not in your version. Follow your tag's docs over this file, and ask the user before upgrading Portler.

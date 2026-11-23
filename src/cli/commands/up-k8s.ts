@@ -36,7 +36,9 @@ import type { Assignments, PortlerConfig, ServiceAssignment } from '../../types/
 import type { ParsedArgs } from '../args.ts';
 import { printPortTable } from '../table.ts';
 import { dependencyLevels, ensureNoOverlap, expandAndOrderServices, reportImageOverrides, selectServiceNames, servicesWithPorts, validateImageOverrideTargets } from '../services.ts';
-import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown } from './up.ts';
+import { applyShare, chooseShare } from '../../share/settings.ts';
+import { reportShare } from '../../share/report.ts';
+import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareRequest } from './up.ts';
 
 // How long a namespace left Terminating by an earlier `down` may take to clear.
 const NAMESPACE_TERMINATION_TIMEOUT_MS = 120_000;
@@ -170,17 +172,19 @@ interface K8sStack {
 // this run's port-forwards, deletes what it applied and releases its ports before the error returns.
 async function startK8sPhase(
   args: ParsedArgs,
-  config: PortlerConfig,
+  launchedConfig: PortlerConfig,
   cluster: ClusterInfo,
   selectedNames: string[],
   signal?: AbortSignal,
 ): Promise<K8sStack> {
   signal?.throwIfAborted();
-  const pids = await readPids(config.projectDir);
+  const pids = await readPids(launchedConfig.projectDir);
   // The overlap check can run docker inspect for an earlier launch, so it is cancellable too.
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
-  const runningNames = new Set(await liveServiceNames(config.projectDir, pids, undefined, run));
+  const runningNames = new Set(await liveServiceNames(launchedConfig.projectDir, pids, undefined, run));
   ensureNoOverlap(runningNames, selectedNames);
+  const liveEntries = [...runningNames].flatMap((name) => pids?.services[name] ?? []);
+  const config = applyShare(launchedConfig, await chooseShare(liveEntries, shareRequest(args)));
   // Read the cached state before writing the record, so a corrupt cache leaves none behind.
   const state = await readState(config.projectDir);
   // Before anything touches the cluster: `env` and `down k8s` find it through this record.
@@ -249,6 +253,7 @@ async function startK8sPhase(
     await writeState(config.projectDir, assignments);
     await writeRuntimeEnv(config.projectDir, generatedEnv);
     printPortTable(assignments, config.proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
+    reportShare(config, startProxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames, assignments);
 
     signal?.throwIfAborted();
     // Rendering checks required env, so it comes before any build or cluster change.
@@ -332,7 +337,7 @@ async function startK8sPhase(
     // PORTLER_PROXY_* work as in the other run modes.
     if (config.proxy && startProxy) {
       let proxyExited = false;
-      const child = spawnProxy(config.proxy, assignments, !args.detach);
+      const child = spawnProxy(config.proxy, assignments, !args.detach, config.share);
       child.once('exit', () => {
         proxyExited = true;
       });

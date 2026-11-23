@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyShare, liveShare } from '../../share/settings.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, envRequirementProblems, maskSecrets } from '../../env/index.ts';
 import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
@@ -30,7 +31,10 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 
 /** Side effect: allocates and writes state.json when it is missing, incomplete, or has stale
  * Docker/transport data. */
-export async function ensureAssignments(config: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
+export async function ensureAssignments(unsharedConfig: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
+  // A shared stack's env keeps its shared URLs; any recorded entry with a share speaks for it.
+  const recorded = await readPids(unsharedConfig.projectDir);
+  const config = applyShare(unsharedConfig, liveShare(Object.values(recorded?.services ?? {})));
   const state = await readState(config.projectDir);
   const configuredWithPorts = servicesWithPorts(config, Object.keys(config.services));
   if (config.proxy) configuredWithPorts.push(PROXY_SERVICE_NAME);
@@ -45,7 +49,12 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
   const hasFreshTransportMetadata = Object.values(config.services).every((service) =>
     service.port === undefined || (state?.services[service.name]?.transport ?? 'tcp') === serviceTransport(service),
   );
-  if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata) {
+  const hasFreshUrlHosts = [...Object.values(config.services), ...(config.proxy ? [proxyServiceConfig(config, config.proxy)] : [])].every(
+    (service) =>
+      (service.port === undefined && service.name !== PROXY_SERVICE_NAME) ||
+      (state?.services[service.name]?.urlHost === service.urlHost && state.services[service.name]?.localUrlHost === service.localUrlHost),
+  );
+  if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata && hasFreshUrlHosts) {
     // state.json can also hold removed services or ones prod.services leaves out: `env --prod` must
     // not show them, nor `setup --prod` resolve a `${db.url}` that `up --prod` rejects.
     const configured = new Set(configuredWithPorts);
@@ -59,7 +68,7 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
 
   // Never re-reserve currently-running services: allocateAssignments would
   // re-probe their busy ports and move them away from where they listen.
-  const pids = await readPids(config.projectDir);
+  const pids = recorded;
   const running = new Set(await liveServiceNames(config.projectDir, pids));
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 

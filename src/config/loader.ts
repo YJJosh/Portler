@@ -264,6 +264,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
       `services.${serviceName}.env`,
     );
     const exports = normalizeExports(rawService.exports, serviceName);
+    const share = optionalBoolean(rawService.share, `services.${serviceName}.share`, true);
 
     const topLevelDocker = normalizeTopLevelDockerConfig(rawService, serviceName, projectDir);
     const dockerModeOverride = normalizeDockerModeConfig(rawService, serviceName, projectDir, topLevelDocker);
@@ -280,6 +281,7 @@ export async function loadConfig(projectDir: string, explicitFile?: string, opti
       env: serviceEnv,
       host: serviceHost,
       urlHost: serviceUrlHost,
+      ...(share ? {} : { share: false as const }),
       protocol: serviceProtocol,
       preferDeclaredPort: optionalBoolean(
         rawService.prefer_declared_port,

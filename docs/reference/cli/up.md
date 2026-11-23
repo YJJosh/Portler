@@ -3,9 +3,9 @@
 Start services: assign ports, resolve env, and launch in dependency order.
 
 ```bash
-portler up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-portler up docker [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-portler up k8s [service...] [--detach] [--image <service>=<image>]
+portler up [service...] [--detach] [--share <target>] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+portler up docker [service...] [--detach] [--share <target>] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+portler up k8s [service...] [--detach] [--share <target>] [--image <service>=<image>]
 ```
 
 ## Behavior
@@ -34,6 +34,7 @@ portler up k8s [service...] [--detach] [--image <service>=<image>]
 | `--setup` | Run every plain setup step of the selection, dependencies and root included, ignoring receipts. `if_missing` steps still skip while their path exists |
 | `--no-setup` | Run no setup command (receipts are still reconciled); cannot be combined with `--setup` |
 | `-d, --detach` | Start in the background; local service output is captured to `.portler/logs/` |
+| `--share <target>` | Make the stack reachable from other machines: `tailscale`, `tailscale-dns`, an IP address of this machine, or `none` ([sharing](/guide/sharing)); env fallback `PORTLER_SHARE`. Not with `--prod` |
 | `--volume-set <name>` | Run against the `--<name>` variants of all managed `@` volumes ([volume sets](/guide/volumes#volume-sets)); env fallback `PORTLER_VOLUME_SET` |
 | `--image <service>=<image>` | Run that Docker service from this image instead of building it; repeatable ([prebuilt images](/guide/docker#prebuilt-images)) |
 | `-f, --file <path>` | Use a specific portler.yml |
@@ -45,6 +46,7 @@ portler up                       # everything, foreground
 portler up -d                    # everything, background
 portler up backend               # backend + its dependencies
 portler up docker -d             # full Docker mode, detached
+portler up -d --share tailscale  # reachable from the tailnet
 portler up --volume-set my-branch   # forked data variants
 portler up docker -d --image api=ghcr.io/org/api@sha256:3dc17e…   # CI-built image, nothing built
 ```

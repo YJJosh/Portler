@@ -2,7 +2,10 @@ import { loadConfig } from '../../config/index.ts';
 import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { readPids, serviceLiveness } from '../../process/index.ts';
 import type { ServiceLiveness } from '../../process/index.ts';
-import type { PidServiceInfo } from '../../types/index.ts';
+import { PROXY_SERVICE_NAME } from '../../constants.ts';
+import { isTcpReady } from '../../readiness/index.ts';
+import { sharesPort } from '../../share/settings.ts';
+import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { portLabel, printTable } from '../table.ts';
 import { selectServiceTargets } from '../services.ts';
@@ -21,9 +24,14 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   }
 
   const liveness = await Promise.all(entries.map(([, info]) => serviceLiveness(config.projectDir, info)));
+  const shared = await Promise.all(entries.map(([serviceName, info], index) => sharedLabel(config, serviceName, info, liveness[index]!)));
   const hasDocker = entries.some(([, info]) => info.dockerContainer);
   const hasImage = entries.some(([, info]) => info.image);
-  const headers = ['SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL', ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : [])];
+  const hasShare = entries.some(([, info]) => info.share);
+  const headers = [
+    'SERVICE', 'MODE', 'PID', 'STATUS', 'PORT', 'URL',
+    ...(hasShare ? ['SHARED'] : []), ...(hasDocker ? ['CONTAINER'] : []), ...(hasImage ? ['IMAGE'] : []),
+  ];
   const rows = entries.map(([serviceName, info], index) => {
     const mode = modeLabel(info);
     // kubectl port-forward carries TCP only.
@@ -35,6 +43,7 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
       statusLabel(liveness[index]!),
       info.port !== undefined ? portLabel(info.port, transport) : '-',
       info.url ?? '-',
+      ...(hasShare ? [shared[index]!] : []),
       ...(hasDocker ? [info.dockerContainer ?? '-'] : []),
       ...(hasImage ? [info.image ?? '-'] : []),
     ];
@@ -52,6 +61,17 @@ export async function commandPs(args: ParsedArgs): Promise<number> {
   });
   return 0;
 }
+
+// Asks the shared address itself, since the forwarder can be missing while the service runs (e.g. a bind it could not make).
+async function sharedLabel(config: PortlerConfig, serviceName: string, info: PidServiceInfo, liveness: ServiceLiveness): Promise<string> {
+  if (!info.share || info.port === undefined || liveness.status === 'dead') return '-';
+  const service = config.services[serviceName];
+  const isProxy = config.proxy !== undefined && serviceName === PROXY_SERVICE_NAME;
+  if (!isProxy && (!service || !sharesPort(service))) return '-';
+  return (await isTcpReady(info.share.addresses[0]!, info.port, SHARE_PROBE_MS)) ? 'yes' : 'not reachable';
+}
+
+const SHARE_PROBE_MS = 1_000;
 
 // Entries without a runMode are k8s if their command is the port-forward supervisor.
 function modeLabel(info: PidServiceInfo): string {

@@ -17,6 +17,8 @@ export interface ParsedArgs {
   /** `down k8s --volumes`: also delete PersistentVolumeClaims (destroys data). */
   volumes: boolean;
   volumeSet?: string;
+  /** `up --share <target>`: make the stack reachable from other machines. */
+  share?: string;
   /** `--image <service>=<image>`: run that Docker service from this image instead of building it (up/restart). */
   images?: Record<string, string>;
   positionals: string[];
@@ -40,6 +42,7 @@ const KNOWN_FLAGS = [
   '--volume-set',
   '--file',
   '--image',
+  '--share',
 ];
 
 // The longest delay a Node timer accepts.
@@ -163,6 +166,15 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
       const value = arg.slice('--volume-set='.length);
       if (!value) throw new Error('--volume-set requires a name');
       parsed.volumeSet = value;
+      continue;
+    }
+
+    if (arg === '--share' || arg.startsWith('--share=')) {
+      const value = arg === '--share' ? args[index + 1] : arg.slice('--share='.length);
+      if (!value || value.startsWith('-')) throw new Error('--share requires a target: tailscale, tailscale-dns, an IP address or none');
+      if (parsed.share !== undefined) throw new Error('--share given twice');
+      parsed.share = value;
+      if (arg === '--share') index += 1;
       continue;
     }
 

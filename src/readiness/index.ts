@@ -5,7 +5,7 @@ import net from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_HEALTHCHECK_INTERVAL_MS, DEFAULT_HEALTHCHECK_TIMEOUT_MS } from '../constants.ts';
 import { resolveServiceCwd } from '../config/index.ts';
-import { resolveEnvValue, type ResolveOptions } from '../env/index.ts';
+import { localUrl, resolveEnvValue, type ResolveOptions } from '../env/index.ts';
 import { usesTcp } from '../ports/transport.ts';
 import type { Assignments, EnvMap, HealthcheckConfig, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
@@ -132,7 +132,7 @@ async function checkReady(
       if (!assignment) return true;
       return isTcpReady(assignment.host, assignment.port, attemptTimeoutMs, tcpHoldMs, signal);
     case 'http': {
-      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment?.url;
+      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment && localUrl(assignment);
       if (!url) return true;
       return isHttpReady(url, attemptTimeoutMs, healthcheck.accept, signal);
     }
@@ -154,7 +154,7 @@ function describeHealthcheck(
     case 'tcp':
       return assignment ? `tcp check on ${assignment.host}:${assignment.port}` : 'tcp check';
     case 'http': {
-      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment?.url;
+      const url = healthcheck.url ? resolveEnvValue(healthcheck.url, assignments, resolve) : assignment && localUrl(assignment);
       return url ? `http check on ${url}` : 'http check';
     }
     case 'command':

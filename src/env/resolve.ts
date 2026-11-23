@@ -25,6 +25,8 @@ export interface ResolveOptions {
 
 type ReferenceProperty =
   | 'url'
+  | 'local_url'
+  | 'localUrl'
   | 'port'
   | 'host'
   | 'url_host'
@@ -43,6 +45,8 @@ type ReferenceProperty =
 
 export const REFERENCE_PROPERTIES: ReadonlySet<string> = new Set<string>([
   'url',
+  'local_url',
+  'localUrl',
   'port',
   'host',
   'url_host',
@@ -60,7 +64,7 @@ export const REFERENCE_PROPERTIES: ReadonlySet<string> = new Set<string>([
   'address_port',
 ]);
 
-const PROPERTY_LIST = 'url, port, host, url_host, protocol, desired_port, container, image, name, address, address_host, address_port';
+const PROPERTY_LIST = 'url, local_url, port, host, url_host, protocol, desired_port, container, image, name, address, address_host, address_port';
 
 function isReferenceProperty(property: string): property is ReferenceProperty {
   return REFERENCE_PROPERTIES.has(property);
@@ -76,6 +80,13 @@ export function isSecretEnvKey(key: string, entry?: unknown): boolean {
   return SECRET_KEY.test(key);
 }
 
+/** The URL this machine itself reaches the service on: `url` unless the port is shared. */
+export function localUrl(assignment: ServiceAssignment): string {
+  if (assignment.localUrlHost === undefined) return assignment.url;
+  const host = assignment.localUrlHost.includes(':') && !assignment.localUrlHost.startsWith('[') ? `[${assignment.localUrlHost}]` : assignment.localUrlHost;
+  return `${assignment.protocol}://${host}:${assignment.port}`;
+}
+
 /** Where a service of this config runs, as a reader of env values. */
 export function serviceViewer(config: PortlerConfig, service: ServiceConfig): EnvViewer {
   if (config.runMode === 'k8s') return 'cluster';
@@ -86,6 +97,9 @@ function assignmentValue(assignment: ServiceAssignment, property: Exclude<Refere
   switch (property) {
     case 'url':
       return assignment.url;
+    case 'local_url':
+    case 'localUrl':
+      return localUrl(assignment);
     case 'port':
       return String(assignment.port);
     case 'host':
@@ -139,7 +153,7 @@ function addressOf(reference: string, serviceName: string, assignments: Assignme
   }
   const assignment = assignments[serviceName];
   if (!assignment) throw missingAssignment(reference, serviceName, assignments);
-  return { host: viewer === 'container' ? 'host.docker.internal' : assignment.urlHost, port: assignment.port };
+  return { host: viewer === 'container' ? 'host.docker.internal' : (assignment.localUrlHost ?? assignment.urlHost), port: assignment.port };
 }
 
 function propertyValue(reference: string, serviceName: string, property: ReferenceProperty, assignments: Assignments, options: ResolveOptions): string {

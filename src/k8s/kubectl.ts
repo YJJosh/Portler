@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { formatYamlDocuments } from '../parse/yaml-format.ts';
 import { prefixStream, readProcessStartToken } from '../process/index.ts';
+import { shareForwardSpec } from '../share/command.ts';
 import { runCommand } from '../util/exec.ts';
 import type { CommandRunner } from '../util/exec.ts';
 import type { ClusterInfo } from './cluster.ts';
@@ -530,6 +531,7 @@ export function spawnPortForward(
   assignment: ServiceAssignment,
   attachLogs: boolean,
 ): ChildProcess {
+  const share = shareForwardSpec(config, service, assignment);
   const spec: ForwardSpec = {
     serviceName: service.name,
     k8sName: name,
@@ -538,6 +540,7 @@ export function spawnPortForward(
     targetPort: service.port!,
     address: assignment.host,
     context: cluster.context,
+    ...(share !== undefined ? { share } : {}),
   };
 
   // Re-exec the running entrypoint (.ts or .js) with the same node flags.
@@ -585,6 +588,7 @@ export async function portForwardPidInfo(
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
     runMode: 'k8s',
+    ...(config.share ? { share: config.share } : {}),
     // The --image pin, as a container entry records it: `env` rebuilds state from it.
     ...(image !== undefined ? { image } : {}),
   };

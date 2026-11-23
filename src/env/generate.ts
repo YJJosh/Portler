@@ -1,3 +1,4 @@
+import { localUrl } from './resolve.ts';
 import type { Assignments, EnvMap } from '../types/index.ts';
 
 function upperSnake(input: string): string {
@@ -20,6 +21,7 @@ export function buildGeneratedEnv(assignments: Assignments): EnvMap {
 
     env[`${prefix}_PORT`] = String(assignment.port);
     env[`${prefix}_URL`] = assignment.url;
+    if (assignment.localUrlHost !== undefined) env[`${prefix}_LOCAL_URL`] = localUrl(assignment);
     env[`${prefix}_HOST`] = assignment.host;
     env[`${prefix}_URL_HOST`] = assignment.urlHost;
     env[`${prefix}_PROTOCOL`] = assignment.protocol;

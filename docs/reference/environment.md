@@ -10,6 +10,7 @@ For **every service that has an assigned port**, all services receive (with `<NA
 | --- | --- |
 | `PORTLER_<NAME>_PORT` | Assigned host port |
 | `PORTLER_<NAME>_URL` | Full URL, e.g. `http://localhost:51235` |
+| `PORTLER_<NAME>_LOCAL_URL` | Only while the stack is [shared](/guide/sharing): the URL this machine uses, e.g. `http://localhost:51235`; `PORTLER_<NAME>_URL` is then the shared one |
 | `PORTLER_<NAME>_HOST` | Bind host (default `127.0.0.1`) |
 | `PORTLER_<NAME>_URL_HOST` | URL host (default `localhost`) |
 | `PORTLER_<NAME>_PROTOCOL` | URL scheme (default `http`) |

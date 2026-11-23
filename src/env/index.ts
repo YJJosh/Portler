@@ -1,4 +1,4 @@
-export { resolveEnvValue, serviceViewer } from './resolve.ts';
+export { localUrl, resolveEnvValue, serviceViewer } from './resolve.ts';
 export type { EnvViewer, ResolveOptions } from './resolve.ts';
 export { buildGeneratedEnv } from './generate.ts';
 export {

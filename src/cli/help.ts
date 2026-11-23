@@ -6,9 +6,9 @@ export function printHelp(): void {
 Usage:
   ${PACKAGE_NAME} setup [docker] [service...] [--prod]
   ${PACKAGE_NAME} start [service] [--prod] [--drain-ms <ms>]
-  ${PACKAGE_NAME} up [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-  ${PACKAGE_NAME} up docker [service...] [--detach] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
-  ${PACKAGE_NAME} up k8s [service...] [--detach] [--image <service>=<image>]
+  ${PACKAGE_NAME} up [service...] [--detach] [--share <target>] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+  ${PACKAGE_NAME} up docker [service...] [--detach] [--share <target>] [--volume-set <name>] [--prod] [--setup|--no-setup] [--image <service>=<image>]
+  ${PACKAGE_NAME} up k8s [service...] [--detach] [--share <target>] [--image <service>=<image>]
   ${PACKAGE_NAME} down [docker|k8s] [service...] [--volumes] [--force]
   ${PACKAGE_NAME} k8s render [service...]
   ${PACKAGE_NAME} restart [docker] [service...] [--prod] [--setup|--no-setup] [--image <service>=<image>] [--volume-set <name>]
@@ -27,6 +27,11 @@ Options:
   -f, --file <path>       Use a specific portler.yml file (for "logs", -f means
                           --follow; use --file there)
   -d, --detach            Start services in the background for "up"
+      --share <target>    For "up": also listen on another network, with URLs that
+                          work from other machines. <target>: tailscale (Tailscale
+                          IP), tailscale-dns (MagicDNS name), an IP address of this
+                          machine, or none (env fallback: PORTLER_SHARE). "restart"
+                          and a later "up" keep it until "down"
       --prod              Use production overrides for setup, start, up, restart, env, run
                           and volumes
       --reveal            For "env": print values marked "secret: true" (and, with

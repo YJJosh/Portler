@@ -6,7 +6,7 @@ import { K8S_FORWARD_COMMAND } from '../../k8s/index.ts';
 import { liveServiceNames, mountedVolumeSet, readPids, stopServices, type MountedVolumeSet } from '../../process/index.ts';
 import { withLifecycleLock } from '../../state/lock.ts';
 import type { ParsedArgs } from '../args.ts';
-import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import type { PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
 import { expandAndOrderServices, parseRunMode, recordedRunMode, selectServiceNames, validateImageOverrideTargets } from '../services.ts';
 import { checkLaunch, launchConfig, StartSetChangedError, startPhase } from './up.ts';
 
@@ -21,6 +21,8 @@ export interface RestartLaunch {
   replayed: string[];
   /** Recorded pins that do not apply in the chosen run mode (the service is not a container there). */
   droppedPins: string[];
+  /** The recorded `--share`, replayed for every service this restart touches. */
+  share?: ShareSettings;
 }
 
 export interface RestartPlanInput {
@@ -233,7 +235,20 @@ export function planRestart(input: RestartPlanInput): RestartLaunch {
     }
   }
 
-  return { prod, mode, images, setup, volumeSet, replayed, droppedPins };
+  // Running services hold env with their URLs, so a restart cannot change whether the stack is shared.
+  const shares = involved.map((name) => entry(name).share);
+  const share = shares.find((recorded) => recorded !== undefined);
+  if (share !== undefined && shares.some((recorded) => recorded === undefined)) {
+    const sharedNames = involved.filter((name) => entry(name).share !== undefined);
+    const localNames = involved.filter((name) => entry(name).share === undefined);
+    throw new Error(
+      `${list(sharedNames)} ${verb(sharedNames, 'was', 'were')} started with --share ${share.target} and ${list(localNames)} without it, ` +
+        'so there is no one share to replay. Run "portler down" and then "portler up" to start over.',
+    );
+  }
+  if (share !== undefined) replayed.push(`--share ${share.target}`);
+
+  return { prod, mode, images, setup, volumeSet, replayed, droppedPins, ...(share !== undefined ? { share } : {}) };
 }
 
 type ManagedMount = { name: string; destination: string };
@@ -524,6 +539,7 @@ export async function commandRestart(args: ParsedArgs): Promise<number> {
           prod: launch.prod,
           ...(launch.setup !== undefined ? { setup: launch.setup } : {}),
           images: launch.images,
+          ...(launch.share !== undefined ? { replayShare: launch.share } : {}),
           expectStart: starting,
         });
         return 0;

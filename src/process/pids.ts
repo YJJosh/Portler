@@ -15,6 +15,7 @@ import {
   isString,
 } from '../util/guards.ts';
 import { readValidatedJsonFile, readValidatedJsonFileOrNull, writeJsonFile } from '../util/json-file.ts';
+import { isShareSettings } from '../share/settings.ts';
 import { readProcessStartToken } from './identity.ts';
 import type { PidsFile, PidServiceInfo, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
 
@@ -33,6 +34,7 @@ function isPidServiceInfo(value: unknown): value is PidServiceInfo {
     isOptionalString(value.image) &&
     isOptionalBoolean(value.setup) &&
     isOptionalString(value.volumeSet) &&
+    (value.share === undefined || isShareSettings(value.share)) &&
     isOptionalString(value.startToken) &&
     isOptionalStringArray(value.dependsOn) &&
     isString(value.startedAt)
@@ -378,6 +380,7 @@ export async function pidInfoFor(
     ...(service.docker?.volumes.some((volume) => managedVolumeName(volume) !== undefined)
       ? { volumeSet: config.volumeSet ?? '' }
       : {}),
+    ...(config.share ? { share: config.share } : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     // Always recorded, even empty: a missing field means an older Portler wrote it.
     dependsOn: service.dependsOn.map((dependency) => dependency.service),

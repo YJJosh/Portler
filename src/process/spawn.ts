@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { closeSync } from 'node:fs';
 import { resolveServiceCwd } from '../config/index.ts';
+import { shareForwardSpec, shareForwarderShellLine } from '../share/command.ts';
 import { dockerShellCommand } from './docker.ts';
 import { openServiceLog, prefixStream } from './logs.ts';
 import type { Assignments, EnvMap, PortlerConfig, ServiceAssignment, ServiceConfig } from '../types/index.ts';
@@ -33,7 +34,9 @@ export function spawnService(
   // Lets build-arg exports keep use_env values.
   baseEnv: EnvMap = {},
 ): ChildProcess {
-  const command = serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
+  const forward = shareForwardSpec(config, service, assignment);
+  const command =
+    (forward ? shareForwarderShellLine(forward) : '') + serviceCommandFor(config, service, env, explicitEnvKeys, assignment, assignments, baseEnv);
   const cwd = resolveServiceCwd(config, service);
 
   // The child inherits the fd, so capture keeps working after Portler exits.

@@ -104,4 +104,4 @@ url_host: localhost  # what generated URLs use
 protocol: http       # URL scheme
 ```
 
-A generated URL is `<protocol>://<url_host>:<assigned port>`. The defaults suit almost everyone; change them for things like binding on all interfaces (`host: 0.0.0.0`) while keeping `localhost` URLs.
+A generated URL is `<protocol>://<url_host>:<assigned port>`. The defaults suit almost everyone; change them for things like binding on all interfaces (`host: 0.0.0.0`) while keeping `localhost` URLs. To reach a stack from other machines, such as over Tailscale, use [`portler up --share`](/guide/sharing) instead: it keeps services on loopback and listens only on the shared address.

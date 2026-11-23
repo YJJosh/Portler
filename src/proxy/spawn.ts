@@ -4,11 +4,11 @@ import type { ChildProcess } from 'node:child_process';
 import { PROXY_SERVICE_NAME } from '../constants.ts';
 import { readProcessStartToken } from '../process/identity.ts';
 import { prefixStream } from '../process/logs.ts';
-import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment } from '../types/index.ts';
+import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment, ShareSettings } from '../types/index.ts';
 import type { ProxyServerOptions } from './server.ts';
 
 // Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited.
-function typeStrippingArgs(): string[] {
+export function typeStrippingArgs(): string[] {
   return process.execArgv.filter((arg) => arg.includes('strip-types') || arg.includes('transform-types'));
 }
 
@@ -17,7 +17,7 @@ function daemonPath(): string {
   return fileURLToPath(new URL(daemonFile, import.meta.url));
 }
 
-export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments): ProxyServerOptions {
+export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments, share?: ShareSettings): ProxyServerOptions {
   const assignment = assignments[PROXY_SERVICE_NAME];
   if (!assignment) throw new Error('proxy has no assigned port');
 
@@ -30,13 +30,14 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
       return { prefix: route.prefix, service: route.service, host: target.host, port: target.port };
     }),
     // url_host is the name Portler prints; other non-loopback names need proxy.allowed_hosts.
-    allowedHosts: [assignment.urlHost, ...proxy.allowedHosts],
+    allowedHosts: [assignment.urlHost, ...(assignment.localUrlHost ? [assignment.localUrlHost] : []), ...(share?.hostNames ?? []), ...proxy.allowedHosts],
     trustedProxies: proxy.trustedProxies,
+    ...(share ? { shareAddresses: share.addresses, tailnetOnly: share.tailnetOnly } : {}),
   };
 }
 
-export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachLogs: boolean): ChildProcess {
-  const options = buildProxyServerOptions(proxy, assignments);
+export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachLogs: boolean, share?: ShareSettings): ChildProcess {
+  const options = buildProxyServerOptions(proxy, assignments, share);
   const child = spawn(process.execPath, [...typeStrippingArgs(), daemonPath(), JSON.stringify(options)], {
     // Its own process group, so stopServices can signal -pid, in foreground mode too (see spawnService).
     detached: true,
@@ -70,6 +71,7 @@ export async function proxyPidInfoFor(
     cwd: config.projectDir,
     port: assignment.port,
     url: assignment.url,
+    ...(config.share ? { share: config.share } : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
   };
