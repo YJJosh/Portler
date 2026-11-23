@@ -35,8 +35,7 @@ const BIND_RETRY_MS = 2_000;
 
 /** The hosts to try for a service bound to `host`; `localhost` may be either loopback family. */
 export function upstreamHosts(host: string): string[] {
-  if (host === 'localhost' || host === '127.0.0.1') return ['127.0.0.1', '::1'];
-  return [host];
+  return host === 'localhost' ? ['127.0.0.1', '::1'] : [host];
 }
 
 function log(spec: ShareForwardSpec, message: string): void {

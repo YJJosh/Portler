@@ -7,7 +7,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { parseArgs } from '../src/cli/args.ts';
 import { planRestart } from '../src/cli/commands/restart.ts';
-import { shareRequest } from '../src/cli/commands/up.ts';
+import { shareDefault, shareRequest } from '../src/cli/commands/up.ts';
 import { loadConfig } from '../src/config/index.ts';
 import { localUrl, resolveEnvValue } from '../src/env/index.ts';
 import { allocateAssignments } from '../src/ports/allocate.ts';
@@ -286,9 +286,11 @@ describe('--share flag', () => {
     const previous = process.env.PORTLER_SHARE;
     process.env.PORTLER_SHARE = 'tailscale';
     try {
-      assert.equal(shareRequest({}), 'tailscale');
+      assert.equal(shareRequest({}), undefined);
+      assert.equal(shareDefault({}), 'tailscale');
       assert.equal(shareRequest({ share: 'none' }), 'none');
-      assert.equal(shareRequest({ prod: true }), undefined);
+      assert.equal(shareDefault({ prod: true }), undefined);
+      assert.equal(shareRequest({ prod: true, share: 'none' }), 'none');
       assert.throws(() => shareRequest({ prod: true, share: 'tailscale' }), /does not apply with --prod/);
     } finally {
       if (previous === undefined) delete process.env.PORTLER_SHARE;
@@ -462,8 +464,9 @@ describe('share forwarder', { skip: process.platform !== 'linux' }, () => {
     }
   });
 
-  it('tries both loopback families for a localhost service', () => {
+  it('tries both loopback families only for a localhost service', () => {
     assert.deepEqual(upstreamHosts('localhost'), ['127.0.0.1', '::1']);
+    assert.deepEqual(upstreamHosts('127.0.0.1'), ['127.0.0.1']);
     assert.deepEqual(upstreamHosts('10.0.0.5'), ['10.0.0.5']);
   });
 });

@@ -161,6 +161,8 @@ export interface StartOptions {
   images?: Readonly<Record<string, string>>;
   /** `--share <target>` (or `none`); without it a running stack's share is kept. */
   share?: string;
+  /** PORTLER_SHARE: used only when nothing runs yet. */
+  shareDefault?: string;
   /** restart: the share its stopped services were started with. */
   replayShare?: ShareSettings;
   /** restart: the services its plan covers. If what is not running differs, startPhase throws
@@ -294,7 +296,8 @@ export async function startPhase(
 
   // Before the overlap check, whose restart hint would keep the running share.
   const liveEntries = [...runningNames].flatMap((name) => pidsBefore?.services[name] ?? []);
-  const share = await chooseShare(liveEntries, options.share, options.replayShare);
+  const request = options.share ?? (liveEntries.length === 0 ? options.shareDefault : undefined);
+  const share = await chooseShare(liveEntries, request, options.replayShare);
   if (share && options.prod) {
     throw new Error(`this stack is running with --share ${share.target}, which does not apply with --prod; run "portler down" first`);
   }
@@ -754,15 +757,17 @@ export async function startServices(
   }
 }
 
-/** `--share`, else PORTLER_SHARE. `--share` is refused with --prod, whose ports belong behind the deployment's own edge. */
+/** `--share`, refused with --prod, whose ports belong behind the deployment's own edge. */
 export function shareRequest(args: Pick<ParsedArgs, 'share' | 'prod'>): string | undefined {
-  if (args.prod) {
-    if (args.share !== undefined && args.share !== 'none') {
-      throw new Error('--share does not apply with --prod; put a production stack behind its own edge (see "Behind a TLS edge" in the proxy guide)');
-    }
-    return undefined;
+  if (args.prod && args.share !== undefined && args.share !== 'none') {
+    throw new Error('--share does not apply with --prod; put a production stack behind its own edge (see "Behind a TLS edge" in the proxy guide)');
   }
-  return args.share ?? (process.env.PORTLER_SHARE?.trim() || undefined);
+  return args.share;
+}
+
+/** PORTLER_SHARE: only a default for a stack that is not running yet, and never under --prod. */
+export function shareDefault(args: Pick<ParsedArgs, 'prod'>): string | undefined {
+  return args.prod ? undefined : process.env.PORTLER_SHARE?.trim() || undefined;
 }
 
 export async function commandUp(args: ParsedArgs): Promise<number> {
@@ -782,6 +787,7 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
     setup: args.setup,
     images: args.images,
     share: shareRequest(args),
+    shareDefault: shareDefault(args),
     // Offered only if the suggested restart would pass its checks and replay nothing this
     // command did not say (a pin on a service it leaves running, a stale entry's --prod or mode).
     restartHint: async (serviceNames, pidsBefore, runningNames) => {

@@ -41,7 +41,7 @@ import { reportShare } from '../../share/report.ts';
 import { waitForSharedPort } from '../../share/ready.ts';
 import { shareForwardSpec } from '../../share/command.ts';
 import { buildProxyServerOptions } from '../../proxy/spawn.ts';
-import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareRequest } from './up.ts';
+import { IncompleteTeardownError, listenForStartupCancellation, reportIncompleteTeardown, shareDefault, shareRequest } from './up.ts';
 
 // How long a namespace left Terminating by an earlier `down` may take to clear.
 const NAMESPACE_TERMINATION_TIMEOUT_MS = 120_000;
@@ -186,7 +186,8 @@ async function startK8sPhase(
   const run: CommandRunner = (command, args, input) => runCommand(command, args, input, signal);
   const runningNames = new Set(await liveServiceNames(launchedConfig.projectDir, pids, undefined, run));
   const liveEntries = [...runningNames].flatMap((name) => pids?.services[name] ?? []);
-  const config = applyShare(launchedConfig, await chooseShare(liveEntries, shareRequest(args)));
+  const request = shareRequest(args) ?? (liveEntries.length === 0 ? shareDefault(args) : undefined);
+  const config = applyShare(launchedConfig, await chooseShare(liveEntries, request));
   ensureNoOverlap(runningNames, selectedNames);
   // Read the cached state before writing the record, so a corrupt cache leaves none behind.
   const state = await readState(config.projectDir);

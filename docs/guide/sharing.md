@@ -27,7 +27,7 @@ Every URL Portler prints (the table, the project URL, [`portler ps`](/reference/
 | `<ip>` | that one address of this machine, e.g. a LAN address | that address |
 | `none` | nothing extra | `localhost` |
 
-`PORTLER_SHARE` sets the default for `up`, so `PORTLER_SHARE=tailscale` in your shell shares every stack you start; `--share none` overrides it for one run.
+`PORTLER_SHARE` sets the default for `up` when nothing of the stack runs yet, so `PORTLER_SHARE=tailscale` in your shell shares every stack you start; `--share none` overrides it for one run. Next to a running stack, that stack's choice wins over `PORTLER_SHARE`.
 
 Portler uses the Tailscale that is already installed and logged in. It only reads `tailscale status --json`: it never runs `tailscale up`, changes the node's settings, asks for certificates, or creates DNS records. On macOS it also finds the CLI inside `Tailscale.app`; set `PORTLER_TAILSCALE` to use another path.
 
