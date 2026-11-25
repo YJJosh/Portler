@@ -18,7 +18,7 @@ Usage:
   ${PACKAGE_NAME} env [docker|k8s] [service] [--prod] [--reveal]
   ${PACKAGE_NAME} run [docker|k8s] [task|service] [-- <command>...] [--prod] [--volume-set <name>]
   ${PACKAGE_NAME} clean [--ports] [--global] [--force]
-  ${PACKAGE_NAME} volumes [list] [--prod]
+  ${PACKAGE_NAME} volumes [list] [--prod] [--json]
   ${PACKAGE_NAME} volumes fork <volume> <new-set> [--force] [--prod]
   ${PACKAGE_NAME} volumes remove <volume> [--force] [--prod]
   ${PACKAGE_NAME} init

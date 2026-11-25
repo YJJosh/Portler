@@ -6,8 +6,16 @@ import type { PortlerConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { printTable } from '../table.ts';
 
-async function listVolumes(config: PortlerConfig): Promise<number> {
+async function listVolumes(config: PortlerConfig, json: boolean): Promise<number> {
   const volumes = await listProjectVolumes(config);
+
+  // `owner` is the portler.project label value a tool must set on volumes it creates for this project.
+  if (json) {
+    const scope = volumeScope(config);
+    const rows = volumes.map((v) => ({ name: v.name, fullName: v.fullName, volumeSet: v.volumeSet ?? null, services: v.services, exists: v.exists, size: v.size ?? null, usedBy: v.usedBy }));
+    process.stdout.write(`${JSON.stringify({ prefix: scope.prefix, owner: scope.owner, volumeSet: config.volumeSet ?? null, volumes: rows }, null, 2)}\n`);
+    return 0;
+  }
 
   if (volumes.length === 0) {
     process.stdout.write('[portler] no project volumes. Declare one with "@name:/path" under a service\'s volumes.\n');
@@ -43,6 +51,7 @@ export function forkUpCommand(volumeSet: string, args: Pick<ParsedArgs, 'file' |
 
 export async function commandVolumes(args: ParsedArgs): Promise<number> {
   const [subcommand = 'list', ...rest] = args.positionals;
+  if (args.json && !['list', 'ls'].includes(subcommand)) throw new Error('--json only applies to "portler volumes list"');
   if (args.force && !['remove', 'rm', 'fork'].includes(subcommand)) {
     throw new Error('--force only applies to "portler volumes remove" and "portler volumes fork"');
   }
@@ -53,7 +62,7 @@ export async function commandVolumes(args: ParsedArgs): Promise<number> {
     case 'list':
     case 'ls':
       if (rest.length > 0) throw new Error('usage: portler volumes [list]');
-      return listVolumes(config);
+      return listVolumes(config, args.json);
 
     case 'fork': {
       const [volumeArg, newSet, extra] = rest;

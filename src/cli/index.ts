@@ -41,6 +41,7 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     ...(args.ports ? ['--ports'] : []),
     ...(args.force ? ['--force'] : []),
     ...(args.volumes ? ['--volumes'] : []),
+    ...(args.json ? ['--json'] : []),
     ...(args.volumeSet !== undefined ? ['--volume-set'] : []),
     ...(args.file !== undefined ? ['--file'] : []),
     ...(args.images !== undefined ? ['--image'] : []),
@@ -59,7 +60,7 @@ function validateCommandFlags(command: string, args: ParsedArgs): void {
     ports: new Set(['--file']),
     env: new Set(['--file', '--prod', '--reveal']),
     run: new Set(['--file', '--prod', '--volume-set']),
-    volumes: new Set(['--force', '--volume-set', '--file', '--prod']),
+    volumes: new Set(['--force', '--volume-set', '--file', '--prod', '--json']),
     k8s: new Set(['--file']),
     init: new Set(),
   };

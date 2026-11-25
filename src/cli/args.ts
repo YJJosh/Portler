@@ -16,6 +16,8 @@ export interface ParsedArgs {
   force: boolean;
   /** `down k8s --volumes`: also delete PersistentVolumeClaims (destroys data). */
   volumes: boolean;
+  /** `volumes list --json`: machine-readable output for other tools. */
+  json: boolean;
   volumeSet?: string;
   /** `--image <service>=<image>`: run that Docker service from this image instead of building it (up/restart). */
   images?: Record<string, string>;
@@ -37,6 +39,7 @@ const KNOWN_FLAGS = [
   '--force',
   '--follow',
   '--volumes',
+  '--json',
   '--volume-set',
   '--file',
   '--image',
@@ -75,6 +78,7 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
     ports: false,
     force: false,
     volumes: false,
+    json: false,
     positionals,
   };
 
@@ -143,6 +147,11 @@ export function parseArgs(args: string[], command = ''): ParsedArgs {
 
     if (arg === '--volumes') {
       parsed.volumes = true;
+      continue;
+    }
+
+    if (arg === '--json') {
+      parsed.json = true;
       continue;
     }
 
