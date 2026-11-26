@@ -1,5 +1,6 @@
 // Proxy process spawned by `up`, tracked and stopped like a service. argv[2] is the
 // JSON-encoded ProxyServerOptions.
+import { urlHostForm } from '../share/tailnet.ts';
 import { isProxyServerOptions, startProxyServer, startProxyShareServers } from './server.ts';
 
 function fail(message: string): never {
@@ -26,7 +27,7 @@ try {
   for (const shared of await startProxyShareServers(options)) {
     shared.on('error', (error) => fail(error.message));
     const address = shared.address();
-    if (address && typeof address === 'object') process.stdout.write(`shared on ${address.address}:${address.port}\n`);
+    if (address && typeof address === 'object') process.stdout.write(`shared on ${urlHostForm(address.address)}:${address.port}\n`);
   }
   for (const route of options.routes) {
     process.stdout.write(`route ${route.prefix} -> ${route.service} (${route.host}:${route.port})\n`);
