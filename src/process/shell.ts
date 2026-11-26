@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, StdioOptions } from 'node:child_process';
+import { fstatSync } from 'node:fs';
 import { constants } from 'node:os';
+import type { Readable } from 'node:stream';
 import type { EnvMap } from '../types/index.ts';
 import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
 
@@ -11,6 +13,43 @@ export interface ShellOptions {
   onSignal?: (signal: NodeJS.Signals) => void;
   /** Ms to wait, at most, after the shell exits for the rest of its group, then kill what is left. Unset: no wait. */
   drainMs?: number;
+  /** Relay output that goes to a pipe or socket through Portler, so the command survives a reader closing it. */
+  relayOutput?: boolean;
+}
+
+// A pipe or socket can be closed by its reader (`| head`); a terminal, file or /dev/null cannot.
+function closable(fd: number): boolean {
+  try {
+    const stats = fstatSync(fd);
+    return stats.isFIFO() || stats.isSocket();
+  } catch {
+    return false;
+  }
+}
+
+// A command writing to Portler's closed output gets SIGPIPE; through its own pipe, Portler drops the output instead.
+function shellStdio(relayOutput: boolean | undefined): StdioOptions {
+  if (!relayOutput) return 'inherit';
+  return ['inherit', closable(1) ? 'pipe' : 'inherit', closable(2) ? 'pipe' : 'inherit'];
+}
+
+function relay(from: Readable | null, to: NodeJS.WriteStream): Readable[] {
+  if (!from) return [];
+  from.on('data', (chunk: Buffer) => to.write(chunk));
+  return [from];
+}
+
+// Waits briefly for the command's last output: something it left in the background can hold the pipe open, and
+// must not keep Portler alive.
+async function finishRelay(streams: Readable[]): Promise<void> {
+  if (streams.length === 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all(streams.map((stream) => new Promise((resolve) => stream.once('close', resolve)))),
+    new Promise((resolve) => { timer = setTimeout(resolve, 500); }),
+  ]);
+  clearTimeout(timer);
+  for (const stream of streams) (stream as Readable & { unref?: () => void }).unref?.();
 }
 
 /** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
@@ -38,12 +77,14 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     process.on('SIGTERM', terminate);
   }
   try {
-    const started = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
+    const started = spawn(command, { cwd, env, shell: true, detached: true, stdio: shellStdio(options.relayOutput) });
     child = started;
+    const relayed = [...relay(started.stdout, process.stdout), ...relay(started.stderr, process.stderr)];
     const code = await new Promise<number>((resolve, reject) => {
       started.once('error', reject);
       started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
+    await finishRelay(relayed);
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
     if (drainMs !== undefined && started.pid) await drainOwnedProcessGroup(started.pid, drainMs);

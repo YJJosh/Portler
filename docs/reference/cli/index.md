@@ -55,6 +55,12 @@ portler up docker      # everything with Docker config runs in containers
 portler up k8s         # everything runs in a local Kubernetes cluster
 ```
 
+## Piping output
+
+A command keeps doing its work when the program reading its output stops early, as in `portler restart | head -1`: Portler drops the rest of its output and exits with the command's own status. Setup steps keep running too, because Portler passes their output on through its own pipe. `logs` ends quietly instead, and so does `logs --follow` at its next line.
+
+The command you give `portler run` writes to the pipe directly, so it may stop early, as it would without Portler.
+
 ## Commands
 
 | Command | Description |

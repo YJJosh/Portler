@@ -17,6 +17,7 @@ import { commandSetup } from './commands/setup.ts';
 import { commandUp } from './commands/up.ts';
 import { commandVolumes } from './commands/volumes.ts';
 import { printHelp } from './help.ts';
+import { keepRunningWhenOutputCloses } from './output.ts';
 
 // `down` needs POSIX process groups and OS process start times; Windows has neither,
 // so `down` would leak processes. See "Supported platforms" in README.
@@ -146,6 +147,7 @@ export async function main(rawArgs = process.argv.slice(2)): Promise<number> {
 }
 
 export async function runCli(): Promise<void> {
+  keepRunningWhenOutputCloses();
   try {
     const exitCode = await main();
     process.exitCode = exitCode;

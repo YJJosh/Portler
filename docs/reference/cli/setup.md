@@ -9,7 +9,7 @@ portler setup docker [service...] [--prod]
 
 - Always runs the top-level `setup` first, from the project root.
 - Runs selected services' setup in dependency order, including their dependencies. With no names, selects every service.
-- Each entry is a shell command, or a `{run, if_missing}` / `{run, always}` / `{run, watch: [files]}` step; lists run sequentially. Output is inherited, with a heading naming each step and command. The first failure stops setup and reports its command and exit code.
+- Each entry is a shell command, or a `{run, if_missing}` / `{run, always}` / `{run, watch: [files]}` step; lists run sequentially. Output goes where Portler's output goes, with a heading naming each step and command; when that is a pipe, Portler passes it on, so a reader that stops early ([Piping output](/reference/cli/#piping-output)) does not stop the step. The first failure stops setup and reports its command and exit code.
 - Top-level setup receives process env, `use_env` files, then top-level `env`. Service setup receives the same resolved env and `port_env` values as `up`.
 - Allocates/reuses development port assignments like `env`. This writes `.portler/state.json` and may reserve ports, but starts no services, containers or proxy.
 - Writes a receipt per successful plain step to [`.portler/setup.json`](/reference/generated-files), so a subsequent `up` skips it. Explicit `setup` **ignores receipts**: every plain step, `watch` step and `always` step runs. An `if_missing` step still skips while its path exists (`skip <command> (<path> exists)`); delete the path to run it again.

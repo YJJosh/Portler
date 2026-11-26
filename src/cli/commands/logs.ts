@@ -101,11 +101,9 @@ async function resolveLogSources(projectDir: string, serviceNames: string[], exp
   return sources;
 }
 
+// Read-only, and `--follow` never ends by itself: stop once nobody reads the output.
 function exitOnClosedStdout(): void {
-  process.stdout.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code === 'EPIPE') process.exit(0);
-    throw error;
-  });
+  process.stdout.on('error', () => process.exit(0));
 }
 
 export async function commandLogs(args: ParsedArgs): Promise<number> {
