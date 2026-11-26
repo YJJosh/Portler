@@ -53,6 +53,11 @@ export async function waitForSharedPort(
 ): Promise<void> {
   const deadline = Date.now() + SHARE_READY_TIMEOUT_MS;
   const waiting = new Set(await checkableAddresses(share.addresses));
+  if (waiting.size === 0) {
+    const where = share.addresses.map((address) => `${urlHostForm(address)}:${assignment.port}`).join(', ');
+    process.stderr.write(`[portler] ${assignment.name}: this machine cannot connect to ${where} to check it; other devices may need a moment\n`);
+    return;
+  }
   while (waiting.size > 0 && Date.now() < deadline) {
     signal?.throwIfAborted();
     if (exited()) return;
