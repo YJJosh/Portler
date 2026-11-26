@@ -238,7 +238,7 @@ it('a background writer behind a slow reader does not hold setup', { timeout: 60
   const status = path.join(dir, 'status');
 
   // The reader takes 16 KiB every 20 ms, so the background writer keeps the relay waiting on it.
-  const child = spawn('sh', ['-c', `{ "$@"; echo $? > ${JSON.stringify(status)}; } 2>&1 | while dd bs=16384 count=1 > /dev/null 2>&1; do sleep 0.02; done`, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], {
+  const child = spawn('sh', ['-c', `{ "$@"; echo $? > ${JSON.stringify(status)}; } 2>&1 | perl -e 'while (sysread(STDIN, my $chunk, 16384)) { select(undef, undef, undef, 0.02) }'`, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], {
     cwd: dir, env: env(dir), stdio: 'ignore',
   });
   cleanup.push(async () => {
