@@ -233,7 +233,7 @@ export async function runSetupStep(
     process.stdout.write(`[portler] setup ${name}: ${step.run}\n`);
     ran += 1;
     let interrupted = undefined as NodeJS.Signals | undefined;
-    const code = await runShell(step.run, cwd, env, { signal, onSignal: (signal) => { interrupted = signal; } });
+    const code = await runShell(step.run, cwd, env, { signal, relayOutput: true, onSignal: (signal) => { interrupted = signal; } });
     // A cancelled step is not done even if it handled SIGTERM and exited 0: no receipt, and no later step or service runs.
     signal?.throwIfAborted();
     if (interrupted !== undefined) {

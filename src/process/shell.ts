@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { constants } from 'node:os';
 import type { EnvMap } from '../types/index.ts';
 import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
+import { finishRelay, relay, relayPlan } from './relay.ts';
 
 export interface ShellOptions {
   /** Cancel this owned shell tree, with a bounded wait even if it ignores signals. */
@@ -11,15 +12,20 @@ export interface ShellOptions {
   onSignal?: (signal: NodeJS.Signals) => void;
   /** Ms to wait, at most, after the shell exits for the rest of its group, then kill what is left. Unset: no wait. */
   drainMs?: number;
+  /** Relay output that goes to a pipe or socket through Portler, so the command survives a reader closing it. */
+  relayOutput?: boolean;
 }
 
-/** A foreground shell with inherited stdio, forwarding signals to its whole tree. */
+/** A foreground shell with inherited stdio (or relayed, see `relayOutput`), forwarding signals to its whole tree. */
 export async function runShell(command: string, cwd: string, env: EnvMap, options: ShellOptions = {}): Promise<number> {
   options.signal?.throwIfAborted();
   // Handlers go in before spawn, or a signal during spawn kills Portler and leaves the command
   // running. They only run after this synchronous part, so `child` is set by then.
   let child: ChildProcess | undefined;
+  // A forwarded signal also ends the wait for relayed output, so a stalled reader cannot hold the lifecycle lock.
+  const stopped = new AbortController();
   const forward = (signal: NodeJS.Signals): void => {
+    stopped.abort();
     options.onSignal?.(signal);
     if (child?.pid) signalOwnedProcessGroup(child.pid, signal);
   };
@@ -38,12 +44,15 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
     process.on('SIGTERM', terminate);
   }
   try {
-    const started = spawn(command, { cwd, env, shell: true, detached: true, stdio: 'inherit' });
+    const plan = relayPlan(command, options.relayOutput);
+    const started = spawn(plan.command, { cwd, env, shell: true, detached: true, stdio: plan.stdio });
     child = started;
+    const relayed = [...relay(started.stdout, process.stdout), ...relay(started.stderr, process.stderr)];
     const code = await new Promise<number>((resolve, reject) => {
       started.once('error', reject);
       started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
+    await finishRelay(command, relayed, stopped.signal);
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
     if (drainMs !== undefined && started.pid) await drainOwnedProcessGroup(started.pid, drainMs);
