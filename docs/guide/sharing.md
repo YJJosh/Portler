@@ -44,7 +44,7 @@ other device ──► 100.64.0.4:52329 ──► Portler forwarder ──► 12
 - For each shared port, a small Portler forwarder listens on the Tailscale address with the **same port number** and passes connections to the service. The forwarder leads the service's process group and runs the service's command as its child: it stops when the service exits, and `down`, `restart` and `Ctrl+C` stop both. A stopped service is never still reachable.
 - The pid Portler prints for a shared service is the wrapper's. Stop a service by its group, as Portler does: `portler down <name>`, or `kill -TERM -<pid>`; a plain `kill <pid>` leaves it running.
 - The forwarder starts listening only once the service accepts connections, so it never takes a port the service is about to bind.
-- The forwarder connects to the service *from* the shared address, so the service does not mistake a remote visitor for a local one (`127.0.0.1`). Where the OS refuses that, the forwarder logs it and connects from loopback.
+- The forwarder connects to the service *from* the shared address, so the service does not mistake a remote visitor for a local one (`127.0.0.1`). Where the OS refuses that, the forwarder logs it and connects from loopback. macOS always refuses it, so on a Mac the forwarder connects from loopback right away, and the service sees every shared visitor as `127.0.0.1`: don't share an app from a Mac that trusts local visitors more, such as a dev admin page open to localhost.
 - The [proxy](/guide/proxy) listens on the Tailscale addresses itself, so it still sees the real visitor address for `X-Forwarded-For`, and it answers for the Tailscale IPs and the MagicDNS name.
 - Ports are chosen so they are free on loopback **and** on the shared address.
 - Each shared port has its own small forwarder process (a Node process, tens of MB of memory), so sharing a large stack costs some memory.
@@ -100,7 +100,7 @@ Portler records the share with the running stack:
 - Changing it needs a fresh start: `--share` on a stack running without it (or another target, or `none` on a shared one) is refused with "run `portler down` first". Running services already hold env with their URLs.
 - After a full `portler down`, a plain `portler up` is private again.
 
-`portler ps` adds a `SHARED` column: `yes` when the shared address answers on that port, `not reachable` when it does not (for example while Tailscale restarts).
+`portler ps` adds a `SHARED` column: `yes` when the shared address answers on that port, `not reachable` when it does not (for example while Tailscale restarts). macOS cannot connect to its own Tailscale IPv6 address (other devices can), so on a Mac `ps` and `up` check only the IPv4 one.
 
 ## Docker and Kubernetes
 

@@ -19,6 +19,7 @@ import { stopServices } from '../src/process/stop.ts';
 import { buildProxyServerOptions } from '../src/proxy/spawn.ts';
 import { isAllowedHost, startProxyServer } from '../src/proxy/server.ts';
 import { shareForwardSpec, shareWrapperSpawn } from '../src/share/command.ts';
+import { checkableAddresses } from '../src/share/ready.ts';
 import { startShareForwarder, upstreamHosts } from '../src/share/forwarder.ts';
 import { applyShare, chooseShare, isShareSettings, resolveShare } from '../src/share/settings.ts';
 import { isTailnetAddress } from '../src/share/tailnet.ts';
@@ -508,6 +509,23 @@ describe('share wrapper', () => {
     await new Promise((resolve) => setTimeout(resolve, 800));
     process.kill(-child.pid!, 'SIGTERM');
     assert.equal((await done).signal, 'SIGTERM');
+  });
+});
+
+describe('checking a shared address from this machine', () => {
+  it('keeps an address this machine reaches itself', async () => {
+    assert.deepEqual(await checkableAddresses(['127.0.0.1']), ['127.0.0.1']);
+  });
+
+  it('leaves out an address this machine cannot connect to, and asks once per address', async () => {
+    const asked: string[] = [];
+    const reaches = async (address: string) => {
+      asked.push(address);
+      return address !== 'fd7a:115c:a1e0::9';
+    };
+    assert.deepEqual(await checkableAddresses(['100.64.0.9', 'fd7a:115c:a1e0::9'], reaches), ['100.64.0.9']);
+    assert.deepEqual(await checkableAddresses(['100.64.0.9', 'fd7a:115c:a1e0::9'], reaches), ['100.64.0.9']);
+    assert.deepEqual(asked, ['100.64.0.9', 'fd7a:115c:a1e0::9']);
   });
 });
 

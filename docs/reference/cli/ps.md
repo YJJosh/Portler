@@ -16,7 +16,7 @@ Prints one row per running service with:
 - **pid** — the process id
 - **status** — whether the service is still alive (below)
 - **port / URL** — the assigned port and generated URL; a `udp` or `tcp+udp` port shows its [transport](/guide/ports#udp-ports), as in `19132/udp` (not for a `k8s` port-forward, which is TCP only)
-- **shared** — for a stack started with [`--share`](/guide/sharing): `yes` when the shared address answers on the port, `not reachable` when it does not, `-` for a port that stays on this machine (shown only for a shared stack)
+- **shared** — for a stack started with [`--share`](/guide/sharing): `yes` when the shared address answers on the port, `not reachable` when it does not, `unknown` when this machine cannot connect to its own shared address to check it, `-` for a port that stays on this machine (shown only for a shared stack)
 - **container** — the Docker container name (Docker services)
 - **image** — the `--image` pin the service runs from (shown when any service has one)
 

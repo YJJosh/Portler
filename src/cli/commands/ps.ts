@@ -4,6 +4,7 @@ import { readPids, serviceLiveness } from '../../process/index.ts';
 import type { ServiceLiveness } from '../../process/index.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { isTcpReady } from '../../readiness/index.ts';
+import { checkableAddresses } from '../../share/ready.ts';
 import { sharesPort } from '../../share/settings.ts';
 import type { PidServiceInfo, PortlerConfig } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -68,7 +69,9 @@ async function sharedLabel(config: PortlerConfig, serviceName: string, info: Pid
   const service = config.services[serviceName];
   const isProxy = config.proxy !== undefined && serviceName === PROXY_SERVICE_NAME;
   if (!isProxy && (!service || !sharesPort(service))) return '-';
-  const answers = await Promise.all(info.share.addresses.map((address) => isTcpReady(address, info.port!, SHARE_PROBE_MS)));
+  const addresses = await checkableAddresses(info.share.addresses);
+  if (addresses.length === 0) return 'unknown';
+  const answers = await Promise.all(addresses.map((address) => isTcpReady(address, info.port!, SHARE_PROBE_MS)));
   return answers.every(Boolean) ? 'yes' : 'not reachable';
 }
 

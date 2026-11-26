@@ -103,7 +103,8 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
   const servers: net.Server[] = [];
   const sockets = new Set<net.Socket>();
   let closed = false;
-  let localSourceWorks = true;
+  // macOS drops loopback connections from a non-loopback source after a timeout, so it never tries.
+  let localSourceWorks = process.platform !== 'darwin';
   const stopped = new AbortController();
   // Aborted by close, so a pending retry does not keep the process alive.
   const sleep = (ms: number): Promise<void> => delay(ms, undefined, { signal: stopped.signal }).catch(() => {});
@@ -143,7 +144,7 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         client.destroy();
         return;
       }
-      // Only the source address failed, as on macOS, which refuses loopback connections from a non-loopback source.
+      // Only the source address failed.
       localSourceWorks = false;
       log(spec, `cannot connect from ${source} (${(error as Error).message}); the service sees shared connections as local`);
     }
