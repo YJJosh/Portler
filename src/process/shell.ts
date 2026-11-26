@@ -44,41 +44,67 @@ function relayPlan(command: string, relayOutput: boolean | undefined): RelayPlan
   return { command, stdio: ['inherit', out ? 'pipe' : 'inherit', err ? 'pipe' : 'inherit'] };
 }
 
+interface Relay {
+  stream: Socket;
+  closed: Promise<void>;
+  /** Paused on a slow reader now, or within the last RELAY_QUIET_MS. */
+  waitingOnReader(): boolean;
+  /** Stops backpressure: later output is passed on without waiting. */
+  release(): void;
+}
+
+const RELAY_QUIET_MS = 500;
+
 // Waits for the reader, as an inherited pipe would. Node never emits 'drain' after a write error on stdout, so an
 // error ends the wait and the rest is dropped.
-function relay(from: Readable | null, to: NodeJS.WriteStream): Promise<void>[] {
+function relay(from: Readable | null, to: NodeJS.WriteStream): Relay[] {
   if (!from) return [];
   let gone = false;
+  let released = false;
+  let lastPaused = 0;
   const resume = (): void => { from.resume(); };
   const drop = (): void => {
     gone = true;
     resume();
   };
+  const release = (): void => {
+    released = true;
+    to.off('drain', resume);
+    to.off('error', drop);
+    resume();
+  };
   to.on('drain', resume);
   to.on('error', drop);
   from.on('data', (chunk: Buffer) => {
-    if (!gone && !to.write(chunk)) from.pause();
+    if (gone || to.write(chunk) || released) return;
+    from.pause();
+    lastPaused = Date.now();
   });
-  return [new Promise((resolve) => from.once('close', () => {
-    to.off('drain', resume);
-    to.off('error', drop);
-    resolve();
-  }))];
+  return [{
+    stream: from as Socket,
+    closed: new Promise((resolve) => from.once('close', () => {
+      release();
+      resolve();
+    })),
+    waitingOnReader: () => from.isPaused() || Date.now() - lastPaused < RELAY_QUIET_MS,
+    release,
+  }];
 }
 
-// Waits briefly for the command's last output: something it left in the background can hold the pipe open, and
-// must not keep Portler alive.
-async function finishRelay(command: string, streams: readonly (Readable | null)[], closed: Promise<void>[]): Promise<void> {
-  if (closed.length === 0) return;
-  let timer: NodeJS.Timeout | undefined;
-  const drained = await Promise.race([
-    Promise.all(closed).then(() => true),
-    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 500); }),
-  ]);
-  clearTimeout(timer);
-  if (drained) return;
+// Waits for the command's last output, also behind a slow reader. Something it left in the background can hold the
+// pipe open and must not keep Portler alive, so after RELAY_QUIET_MS without waiting on the reader, Portler moves on.
+async function finishRelay(command: string, relays: readonly Relay[]): Promise<void> {
+  if (relays.length === 0) return;
+  const closed = Promise.all(relays.map((entry) => entry.closed)).then(() => true);
+  const quiet = (): Promise<false> => new Promise((resolve) => setTimeout(resolve, RELAY_QUIET_MS, false).unref());
+  do {
+    if (await Promise.race([closed, quiet()])) return;
+  } while (relays.some((entry) => entry.waitingOnReader()));
   process.stderr.write(`[portler] "${command}" left a process that still holds its output; it may stop once Portler exits. Send that output to a file.\n`);
-  for (const stream of streams) (stream as Socket | null)?.unref();
+  for (const entry of relays) {
+    entry.release();
+    entry.stream.unref();
+  }
 }
 
 /** A foreground shell with inherited stdio (or relayed, see `relayOutput`), forwarding signals to its whole tree. */
@@ -114,7 +140,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
       started.once('error', reject);
       started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
-    await finishRelay(command, [started.stdout, started.stderr], relayed);
+    await finishRelay(command, relayed);
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
     if (drainMs !== undefined && started.pid) await drainOwnedProcessGroup(started.pid, drainMs);

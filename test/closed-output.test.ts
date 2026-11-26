@@ -152,18 +152,39 @@ it('setup keeps the order of stdout and stderr lines when both go into one pipe'
   assert.deepEqual(lines, Array.from({ length: 400 }, (_, i) => `line ${i}`));
 });
 
-it('logs exits 1 when its output fails for another reason than a closed reader', { timeout: 30_000 }, async () => {
+it('commands exit 1 when their output fails for another reason than a closed reader', { timeout: 30_000 }, async () => {
   const dir = await project("services:\n  db: {command: 'i=0; while [ $i -lt 5000 ]; do echo \"log line $i\"; i=$((i+1)); done; sleep 600'}\n");
   assert.equal((await portler(dir, 'up', '-d')).status, 0);
   for (let i = 0; i < 100 && (await fs.readFile(path.join(dir, '.portler', 'logs', 'db.log'), 'utf8').catch(() => '')).length < 50_000; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 
-  // A 1-block file size limit makes Portler's writes fail with EFBIG.
-  const child = spawn('sh', ['-c', 'ulimit -f 1; "$@" > out.txt', 'sh', process.execPath, '--experimental-strip-types', cli, 'logs'], { cwd: dir, env: env(dir), stdio: 'ignore' });
-  const [status] = await once(child, 'close');
+  // A file size limit makes Portler's writes fail with EFBIG; with 0 blocks even its only write fails.
+  for (const [limit, args] of [['1', ['logs']], ['0', ['ps']], ['0', ['--version']]] as const) {
+    const child = spawn('sh', ['-c', `ulimit -f ${limit}; "$@" > out.txt`, 'sh', process.execPath, '--experimental-strip-types', cli, ...args], { cwd: dir, env: env(dir), stdio: 'ignore' });
+    const [status] = await once(child, 'close');
+    assert.equal(status, 1, args.join(' '));
+  }
+});
 
-  assert.equal(status, 1);
+// About 200 KB: more than the pipe holds, but little enough that the step exits while the reader still sleeps.
+it('a setup step behind a slow reader keeps its output in order, without a leftover-process warning', { timeout: 30_000 }, async () => {
+  const dir = await project(`setup:
+  - 'i=0; while [ $i -lt 4000 ]; do echo "step-a line $i, padded to about fifty bytes"; i=$((i+1)); done'
+  - 'echo step-b'
+services:
+  db: {command: 'sleep 600'}
+`);
+  const output = path.join(dir, 'slow.txt');
+  const errors = path.join(dir, 'slow-err.txt');
+
+  const child = spawn('sh', ['-c', `"$@" 2> ${JSON.stringify(errors)} | { sleep 2; cat > ${JSON.stringify(output)}; }`, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], { cwd: dir, env: env(dir), stdio: 'ignore' });
+  await once(child, 'close');
+
+  const lines = (await fs.readFile(output, 'utf8')).split('\n');
+  assert.equal(lines.filter((line) => line.startsWith('step-a ')).length, 4000);
+  assert.ok(lines.indexOf('step-b') > lines.findLastIndex((line) => line.startsWith('step-a ')), 'step-b comes after all of step-a');
+  assert.doesNotMatch(await fs.readFile(errors, 'utf8'), /left a process/);
 });
 
 it('logs --follow ends when the reader closes a pipe that only gets container stderr', { timeout: 30_000 }, async () => {

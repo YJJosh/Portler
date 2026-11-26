@@ -8,7 +8,10 @@ let failed = false;
 export function keepRunningWhenOutputCloses(): void {
   for (const stream of [process.stdout, process.stderr]) {
     stream.on('error', (error: NodeJS.ErrnoException) => {
-      if (!readerGone(error)) failed = true;
+      if (readerGone(error)) return;
+      failed = true;
+      // The error of a command's last write arrives after runCli has set the exit code.
+      if (!process.exitCode) process.exitCode = 1;
     });
   }
 }
