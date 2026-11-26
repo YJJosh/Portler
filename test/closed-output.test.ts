@@ -261,3 +261,29 @@ it('logs keeps exit code 1 for its own errors when the output is closed', { time
     assert.equal(result.status, 1, args.join(' '));
   }
 });
+
+it('a setup step stopped by a signal still gets its last lines through a slow reader', { timeout: 30_000 }, async () => {
+  const dir = await project(`setup:
+  - 'trap "seq 1 30000; echo bye-last; exit 130" INT TERM; sleep 30 & echo $! > bg.pid; echo started; wait'
+services:
+  db: {command: 'sleep 600'}
+`);
+  const output = path.join(dir, 'signalled.txt');
+  const pidFile = path.join(dir, 'portler.pid');
+  // A background job of `sh -c` ignores SIGINT, so this sleep outlives the step.
+  cleanup.push(async () => {
+    const pid = Number(await fs.readFile(path.join(dir, 'bg.pid'), 'utf8').catch(() => '0'));
+    if (pid > 0) process.kill(pid, 'SIGKILL');
+  });
+  // The reader pauses after every line, so it pushes back when the step exits.
+  const script = `sh -c 'echo $$ > "$PID_FILE"; exec "$@"' sh "$@" | perl -pe 'BEGIN { $| = 1 } select(undef, undef, undef, 0.00002)' > ${JSON.stringify(output)}`;
+  const child = spawn('sh', ['-c', script, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], { cwd: dir, env: { ...env(dir), PID_FILE: pidFile }, stdio: 'ignore' });
+  for (let i = 0; i < 200 && !/^started$/m.test(await fs.readFile(output, 'utf8').catch(() => '')); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  process.kill(Number(await fs.readFile(pidFile, 'utf8')), 'SIGINT');
+  await once(child, 'close');
+
+  assert.match(await fs.readFile(output, 'utf8'), /^bye-last$/m);
+});
