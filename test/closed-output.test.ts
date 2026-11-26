@@ -275,8 +275,8 @@ services:
     const pid = Number(await fs.readFile(path.join(dir, 'bg.pid'), 'utf8').catch(() => '0'));
     if (pid > 0) process.kill(pid, 'SIGKILL');
   });
-  // The reader pauses after every line, so it pushes back when the step exits.
-  const script = `sh -c 'echo $$ > "$PID_FILE"; exec "$@"' sh "$@" | perl -pe 'BEGIN { $| = 1 } select(undef, undef, undef, 0.00002)' > ${JSON.stringify(output)}`;
+  // The reader takes 4 KiB every 10 ms: it pushes back when the step exits, but never stalls.
+  const script = `sh -c 'echo $$ > "$PID_FILE"; exec "$@"' sh "$@" | perl -e 'while (sysread(STDIN, my $chunk, 4096)) { syswrite(STDOUT, $chunk); select(undef, undef, undef, 0.01) }' > ${JSON.stringify(output)}`;
   const child = spawn('sh', ['-c', script, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], { cwd: dir, env: { ...env(dir), PID_FILE: pidFile }, stdio: 'ignore' });
   for (let i = 0; i < 200 && !/^started$/m.test(await fs.readFile(output, 'utf8').catch(() => '')); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 25));
