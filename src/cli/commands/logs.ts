@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { loadConfig } from '../../config/index.ts';
 import { createLinePrinter, prefixStream, readPids, serviceLogPath } from '../../process/index.ts';
+import { closablePipe } from '../../process/relay.ts';
 import { pathExists } from '../../util/fs.ts';
 import { sleep } from '../../util/sleep.ts';
 import type { ParsedArgs } from '../args.ts';
@@ -102,16 +103,16 @@ async function resolveLogSources(projectDir: string, serviceNames: string[], exp
   return sources;
 }
 
-// Read-only, and `--follow` never ends by itself: stop once nobody reads the output. Container stderr goes to stderr.
+// Read-only, and `--follow` never ends by itself: stop once nobody reads the logs. Container stderr goes to stderr,
+// which counts only when it shares stdout's pipe (`2>&1`); a separate stderr reader may go while stdout is read.
 function exitOnClosedOutput(): void {
-  for (const stream of [process.stdout, process.stderr]) {
-    stream.on('error', (error: NodeJS.ErrnoException) => process.exit(readerGone(error) ? 0 : 1));
-  }
+  const exit = (error: NodeJS.ErrnoException): never => process.exit(readerGone(error) ? 0 : 1);
+  process.stdout.on('error', exit);
+  const out = closablePipe(1);
+  if (out !== undefined && out === closablePipe(2)) process.stderr.on('error', exit);
 }
 
 export async function commandLogs(args: ParsedArgs): Promise<number> {
-  exitOnClosedOutput();
-
   const config = await loadConfig(process.cwd(), args.file);
   const serviceNames = selectServiceNames(config, args.positionals);
   const sources = await resolveLogSources(config.projectDir, serviceNames, args.positionals.length > 0);
@@ -120,6 +121,8 @@ export async function commandLogs(args: ParsedArgs): Promise<number> {
     process.stdout.write('[portler] no logs found. Start services with "portler up -d" first.\n');
     return args.positionals.length > 0 ? 1 : 0;
   }
+  // Only now: an error before this point keeps its exit code 1.
+  exitOnClosedOutput();
 
   if (args.follow) {
     // File followers never resolve; Ctrl+C ends the stream.

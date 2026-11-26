@@ -1,11 +1,9 @@
 import { spawn } from 'node:child_process';
-import type { ChildProcess, StdioOptions } from 'node:child_process';
-import { fstatSync } from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
 import { constants } from 'node:os';
-import type { Socket } from 'node:net';
-import type { Readable } from 'node:stream';
 import type { EnvMap } from '../types/index.ts';
 import { processGroupAlive, processGroupAliveAfterKill } from './pids.ts';
+import { finishRelay, relay, relayPlan } from './relay.ts';
 
 export interface ShellOptions {
   /** Cancel this owned shell tree, with a bounded wait even if it ignores signals. */
@@ -18,102 +16,16 @@ export interface ShellOptions {
   relayOutput?: boolean;
 }
 
-// A pipe or socket can be closed by its reader (`| head`); a terminal, file or /dev/null cannot.
-function closablePipe(fd: number): string | undefined {
-  try {
-    // macOS pipe inodes are kernel addresses, beyond a double's exact range.
-    const stats = fstatSync(fd, { bigint: true });
-    return stats.isFIFO() || stats.isSocket() ? `${stats.dev}:${stats.ino}` : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-interface RelayPlan {
-  command: string;
-  stdio: StdioOptions;
-}
-
-// A command writing to Portler's closed output gets SIGPIPE; through its own pipe, Portler drops the output instead.
-// With `2>&1` both go into one pipe, so the order of stdout and stderr lines stays the same.
-function relayPlan(command: string, relayOutput: boolean | undefined): RelayPlan {
-  if (!relayOutput) return { command, stdio: 'inherit' };
-  const out = closablePipe(1);
-  const err = closablePipe(2);
-  if (out !== undefined && out === err) return { command: `exec 2>&1\n${command}`, stdio: ['inherit', 'pipe', 'inherit'] };
-  return { command, stdio: ['inherit', out ? 'pipe' : 'inherit', err ? 'pipe' : 'inherit'] };
-}
-
-interface Relay {
-  stream: Socket;
-  closed: Promise<void>;
-  /** Paused on a slow reader now, or within the last RELAY_QUIET_MS. */
-  waitingOnReader(): boolean;
-  /** Stops backpressure: later output is passed on without waiting. */
-  release(): void;
-}
-
-const RELAY_QUIET_MS = 500;
-
-// Waits for the reader, as an inherited pipe would. Node never emits 'drain' after a write error on stdout, so an
-// error ends the wait and the rest is dropped.
-function relay(from: Readable | null, to: NodeJS.WriteStream): Relay[] {
-  if (!from) return [];
-  let gone = false;
-  let released = false;
-  let lastPaused = 0;
-  const resume = (): void => { from.resume(); };
-  const drop = (): void => {
-    gone = true;
-    resume();
-  };
-  const release = (): void => {
-    released = true;
-    to.off('drain', resume);
-    to.off('error', drop);
-    resume();
-  };
-  to.on('drain', resume);
-  to.on('error', drop);
-  from.on('data', (chunk: Buffer) => {
-    if (gone || to.write(chunk) || released) return;
-    from.pause();
-    lastPaused = Date.now();
-  });
-  return [{
-    stream: from as Socket,
-    closed: new Promise((resolve) => from.once('close', () => {
-      release();
-      resolve();
-    })),
-    waitingOnReader: () => from.isPaused() || Date.now() - lastPaused < RELAY_QUIET_MS,
-    release,
-  }];
-}
-
-// Waits for the command's last output, also behind a slow reader. Something it left in the background can hold the
-// pipe open and must not keep Portler alive, so after RELAY_QUIET_MS without waiting on the reader, Portler moves on.
-async function finishRelay(command: string, relays: readonly Relay[]): Promise<void> {
-  if (relays.length === 0) return;
-  const closed = Promise.all(relays.map((entry) => entry.closed)).then(() => true);
-  const quiet = (): Promise<false> => new Promise((resolve) => setTimeout(resolve, RELAY_QUIET_MS, false).unref());
-  do {
-    if (await Promise.race([closed, quiet()])) return;
-  } while (relays.some((entry) => entry.waitingOnReader()));
-  process.stderr.write(`[portler] "${command}" left a process that still holds its output; it may stop once Portler exits. Send that output to a file.\n`);
-  for (const entry of relays) {
-    entry.release();
-    entry.stream.unref();
-  }
-}
-
 /** A foreground shell with inherited stdio (or relayed, see `relayOutput`), forwarding signals to its whole tree. */
 export async function runShell(command: string, cwd: string, env: EnvMap, options: ShellOptions = {}): Promise<number> {
   options.signal?.throwIfAborted();
   // Handlers go in before spawn, or a signal during spawn kills Portler and leaves the command
   // running. They only run after this synchronous part, so `child` is set by then.
   let child: ChildProcess | undefined;
+  // A forwarded signal also ends the wait for relayed output, so a stalled reader cannot hold the lifecycle lock.
+  const stopped = new AbortController();
   const forward = (signal: NodeJS.Signals): void => {
+    stopped.abort();
     options.onSignal?.(signal);
     if (child?.pid) signalOwnedProcessGroup(child.pid, signal);
   };
@@ -140,7 +52,7 @@ export async function runShell(command: string, cwd: string, env: EnvMap, option
       started.once('error', reject);
       started.once('exit', (exitCode, signal) => resolve(exitCode ?? (128 + (signal ? constants.signals[signal] : 1))));
     });
-    await finishRelay(command, relayed);
+    await finishRelay(command, relayed, stopped.signal);
     // Signals keep being forwarded while the rest of the group drains.
     const drainMs = options.signal?.aborted ? 2000 : options.drainMs;
     if (drainMs !== undefined && started.pid) await drainOwnedProcessGroup(started.pid, drainMs);

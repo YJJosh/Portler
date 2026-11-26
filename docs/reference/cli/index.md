@@ -57,7 +57,7 @@ portler up k8s         # everything runs in a local Kubernetes cluster
 
 ## Piping output
 
-A command keeps doing its work when the program reading its output stops early, as in `portler restart | head -1`: Portler drops the rest of its output and exits with the command's own status. When a write fails for another reason, such as a full disk, the command still finishes but exits 1. Setup steps keep running too, because Portler passes their output on through its own pipe. A process that a setup step leaves in the background loses that pipe when Portler exits, so Portler warns about it; send its output to a file. `logs` ends quietly instead, and so does `logs --follow` at its next line.
+A command keeps doing its work when the program reading its output stops early, as in `portler restart | head -1`: Portler drops the rest of its output and exits with the command's own status. When a write fails for another reason, such as a full disk, the command still finishes but exits 1. Setup steps keep running too, because Portler passes their output on through its own pipe. When a setup step leaves a process in the background that still holds that pipe, Portler warns, drops that process's output, and the process may stop once Portler exits; send its output to a file. `logs` ends quietly instead, and so does `logs --follow` at its next line.
 
 The command you give `portler run` writes to the pipe directly, so it may stop early, as it would without Portler.
 

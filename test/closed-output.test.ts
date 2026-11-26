@@ -213,3 +213,51 @@ it('setup keeps stdout and stderr apart when they go into different pipes', { ti
   assert.doesNotMatch(setup.stdout, /^err-line$/m);
   assert.match(setup.stderr, /^err-line$/m);
 });
+
+it('logs keeps printing to stdout when only a separate stderr reader goes', { timeout: 30_000 }, async () => {
+  const dir = await project("services:\n  api: {image: 'alpine:3'}\n");
+  const bin = path.join(dir, 'fake-bin');
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\n[ "$1" = logs ] || exit 0\necho diag >&2\nsleep 0.3\necho out-line\n', { mode: 0o755 });
+  const startedAt = new Date().toISOString();
+  await writePids(dir, { version: 1, project: dir, startedAt, services: { api: { pid: 4_194_303, command: 'api', cwd: dir, startedAt, dockerContainer: 'portler-test-api', runMode: 'docker' } } });
+  const output = path.join(dir, 'stdout.txt');
+
+  // stderr goes into a pipe that closes at once; stdout goes to a file.
+  const child = spawn('sh', ['-c', `{ "$@" 2>&1 > ${JSON.stringify(output)}; echo $? > status; } | true`, 'sh', process.execPath, '--experimental-strip-types', cli, 'logs'], {
+    cwd: dir, env: { ...env(dir), PATH: `${bin}:${process.env.PATH}` }, stdio: 'ignore',
+  });
+  await once(child, 'close');
+
+  assert.equal((await fs.readFile(path.join(dir, 'status'), 'utf8')).trim(), '0');
+  assert.match(await fs.readFile(output, 'utf8'), /^\[api\] out-line$/m);
+});
+
+it('a background writer behind a slow reader does not hold setup', { timeout: 60_000 }, async () => {
+  const dir = await project("setup:\n  - '(yes bg-line | head -c 20000000) & echo fg-done'\nservices:\n  db: {command: 'sleep 600'}\n");
+  const status = path.join(dir, 'status');
+
+  // The reader takes 16 KiB every 20 ms, so the background writer keeps the relay waiting on it.
+  const child = spawn('sh', ['-c', `{ "$@"; echo $? > ${JSON.stringify(status)}; } 2>&1 | while dd bs=16384 count=1 > /dev/null 2>&1; do sleep 0.02; done`, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], {
+    cwd: dir, env: env(dir), stdio: 'ignore',
+  });
+  cleanup.push(async () => {
+    if (child.exitCode === null) child.kill('SIGKILL');
+  });
+  let done = '';
+  for (let i = 0; i < 200 && !done; i += 1) {
+    done = await fs.readFile(status, 'utf8').catch(() => '');
+    if (!done) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  assert.equal(done.trim(), '0', 'setup finished within 10 s, long before the background writer');
+});
+
+it('logs keeps exit code 1 for its own errors when the output is closed', { timeout: 30_000 }, async () => {
+  const dir = await project("services:\n  db: {command: 'sleep 600'}\n");
+
+  for (const args of [['logs', 'nope'], ['logs', 'db']]) {
+    const result = await withClosedOutput(dir, args, { both: true });
+    assert.equal(result.status, 1, args.join(' '));
+  }
+});
