@@ -1,4 +1,4 @@
-import type { PortTransport } from './config.ts';
+import type { PortTransport, ShareSettings } from './config.ts';
 
 export interface ServiceAssignment {
   name: string;
@@ -6,6 +6,8 @@ export interface ServiceAssignment {
   desiredPort?: number;
   host: string;
   urlHost: string;
+  /** Set when the port is shared: the url host this machine itself uses. */
+  localUrlHost?: string;
   protocol: string;
   url: string;
   /** Set only for a port that is not plain TCP. */
@@ -44,6 +46,8 @@ export interface PidServiceInfo {
    * mounting a managed volume; absent on such an entry with runMode means the base volumes.
    */
   volumeSet?: string;
+  /** Set when started with `--share`; `restart` and a later `up` keep it. */
+  share?: ShareSettings;
   /** Opaque OS start time of `pid`, re-read before signalling to prove it was not recycled. Absent before 0.2.0. */
   startToken?: string;
   /**

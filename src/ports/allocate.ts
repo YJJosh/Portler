@@ -25,6 +25,7 @@ function makeAssignment(service: ServiceConfig, port: number): ServiceAssignment
     desiredPort: service.port,
     host: service.host,
     urlHost: service.urlHost,
+    ...(service.localUrlHost !== undefined ? { localUrlHost: service.localUrlHost } : {}),
     protocol: service.protocol,
     url: serviceUrl(service, port),
     ...(transport === 'tcp' ? {} : { transport }),
@@ -37,6 +38,16 @@ function servicesToAllocate(config: PortlerConfig): ServiceConfig[] {
   const services = Object.values(config.services).filter((service) => service.port !== undefined);
   if (config.proxy) services.push(proxyServiceConfig(config, config.proxy));
   return services;
+}
+
+// A shared port also needs the shared addresses free: the service's forwarder listens there.
+async function isFreeFor(config: PortlerConfig, service: ServiceConfig, port: number): Promise<boolean> {
+  if (!(await isPortFree(port, service.host, serviceTransport(service)))) return false;
+  if (!config.share || service.localUrlHost === undefined) return true;
+  for (const address of config.share.addresses) {
+    if (!(await isPortFree(port, address, 'tcp'))) return false;
+  }
+  return true;
 }
 
 async function choosePort(
@@ -52,7 +63,7 @@ async function choosePort(
     ownRegisteredPort !== undefined &&
     isPort(ownRegisteredPort) &&
     !reservedPorts.has(ownRegisteredPort) &&
-    (await isPortFree(ownRegisteredPort, service.host, serviceTransport(service)))
+    (await isFreeFor(config, service, ownRegisteredPort))
   ) {
     return ownRegisteredPort;
   }
@@ -67,7 +78,7 @@ async function choosePort(
   for (const candidate of candidates) {
     if (!isPort(candidate)) continue;
     if (reservedPorts.has(candidate)) continue;
-    if (await isPortFree(candidate, service.host, serviceTransport(service))) return candidate;
+    if (await isFreeFor(config, service, candidate)) return candidate;
   }
 
   const { start, end } = config.portRange;
@@ -78,7 +89,7 @@ async function choosePort(
   for (let attempt = 0; attempt < size; attempt += 1) {
     const port = start + ((offset + attempt) % size);
     if (reservedPorts.has(port)) continue;
-    if (await isPortFree(port, service.host, serviceTransport(service))) return port;
+    if (await isFreeFor(config, service, port)) return port;
   }
 
   throw new Error(`no free ports available in range ${start}-${end}`);

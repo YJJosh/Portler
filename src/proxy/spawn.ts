@@ -4,11 +4,13 @@ import type { ChildProcess } from 'node:child_process';
 import { PROXY_SERVICE_NAME } from '../constants.ts';
 import { readProcessStartToken } from '../process/identity.ts';
 import { prefixStream } from '../process/logs.ts';
-import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment } from '../types/index.ts';
+import type { Assignments, PidServiceInfo, PortlerConfig, ProxyConfig, ServiceAssignment, ShareSettings } from '../types/index.ts';
+import { isWildcardHost } from '../share/tailnet.ts';
+import { normalizeIpAddress } from '../util/ip.ts';
 import type { ProxyServerOptions } from './server.ts';
 
 // Only the type-stripping flags a dev checkout needs: flags like --inspect must not be inherited.
-function typeStrippingArgs(): string[] {
+export function typeStrippingArgs(): string[] {
   return process.execArgv.filter((arg) => arg.includes('strip-types') || arg.includes('transform-types'));
 }
 
@@ -17,7 +19,17 @@ function daemonPath(): string {
   return fileURLToPath(new URL(daemonFile, import.meta.url));
 }
 
-export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments): ProxyServerOptions {
+// A proxy host that is a shared address, or every address, already listens there: a second bind would fail.
+function shareListeners(share: ShareSettings, host: string): Pick<ProxyServerOptions, 'shareAddresses' | 'sharedAddresses' | 'tailnetOnly'> {
+  const normalized = normalizeIpAddress(host.replace(/^\[|\]$/g, ''));
+  return {
+    shareAddresses: isWildcardHost(host) ? [] : share.addresses.filter((address) => address !== normalized),
+    sharedAddresses: share.addresses,
+    tailnetOnly: share.tailnetOnly,
+  };
+}
+
+export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignments, share?: ShareSettings): ProxyServerOptions {
   const assignment = assignments[PROXY_SERVICE_NAME];
   if (!assignment) throw new Error('proxy has no assigned port');
 
@@ -27,16 +39,18 @@ export function buildProxyServerOptions(proxy: ProxyConfig, assignments: Assignm
     routes: proxy.routes.map((route) => {
       const target = assignments[route.service];
       if (!target) throw new Error(`proxy route "${route.prefix}" targets service "${route.service}" with no assigned port`);
-      return { prefix: route.prefix, service: route.service, host: target.host, port: target.port };
+      const local = share !== undefined && target.localUrlHost === undefined;
+      return { prefix: route.prefix, service: route.service, host: target.host, port: target.port, ...(local ? { local: true as const } : {}) };
     }),
     // url_host is the name Portler prints; other non-loopback names need proxy.allowed_hosts.
-    allowedHosts: [assignment.urlHost, ...proxy.allowedHosts],
+    allowedHosts: [assignment.urlHost, ...(assignment.localUrlHost ? [assignment.localUrlHost] : []), ...(share?.hostNames ?? []), ...proxy.allowedHosts],
     trustedProxies: proxy.trustedProxies,
+    ...(share ? shareListeners(share, assignment.host) : {}),
   };
 }
 
-export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachLogs: boolean): ChildProcess {
-  const options = buildProxyServerOptions(proxy, assignments);
+export function spawnProxy(proxy: ProxyConfig, assignments: Assignments, attachLogs: boolean, share?: ShareSettings): ChildProcess {
+  const options = buildProxyServerOptions(proxy, assignments, share);
   const child = spawn(process.execPath, [...typeStrippingArgs(), daemonPath(), JSON.stringify(options)], {
     // Its own process group, so stopServices can signal -pid, in foreground mode too (see spawnService).
     detached: true,
@@ -70,6 +84,7 @@ export async function proxyPidInfoFor(
     cwd: config.projectDir,
     port: assignment.port,
     url: assignment.url,
+    ...(config.share ? { share: config.share } : {}),
     startToken: (await readProcessStartToken(child.pid)) ?? undefined,
     startedAt: new Date().toISOString(),
   };

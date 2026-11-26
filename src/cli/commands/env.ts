@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { applyProduction, productionServices } from '../../config/production.ts';
-import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, type RunMode } from '../../config/index.ts';
+import { applyImageOverrides, configForRunMode, loadBaseEnv, loadConfig, proxyServiceConfig, type RunMode } from '../../config/index.ts';
+import { applyShare, liveShare } from '../../share/settings.ts';
 import { PROXY_SERVICE_NAME } from '../../constants.ts';
 import { buildEffectiveEnv, buildGeneratedEnv, buildPrintableEnv, envRequirementProblems, maskSecrets } from '../../env/index.ts';
 import { deployedK8sServices, k8sManifestDir, k8sServiceNames, launchCluster, NAMESPACE_MANIFEST_FILE } from '../../k8s/index.ts';
@@ -29,8 +30,18 @@ function asAllocatedFor(config: PortlerConfig, name: string, assignment: Service
 }
 
 /** Side effect: allocates and writes state.json when it is missing, incomplete, or has stale
- * Docker/transport data. */
-export async function ensureAssignments(config: PortlerConfig): Promise<{ assignments: Assignments; generatedEnv: EnvMap }> {
+ * Docker/transport data. A running shared stack keeps its shared URLs; with `share: false` (and under --prod,
+ * which refuses --share) the assignments are a local view, returned with `view: true` and never written. */
+export async function ensureAssignments(
+  unsharedConfig: PortlerConfig,
+  options: { share?: boolean } = {},
+): Promise<{ assignments: Assignments; generatedEnv: EnvMap; view: boolean }> {
+  const pids = await readPids(unsharedConfig.projectDir);
+  const running = new Set(await liveServiceNames(unsharedConfig.projectDir, pids));
+  const live = liveShare([...running].flatMap((name) => pids?.services[name] ?? []));
+  const share = options.share === false || unsharedConfig.production ? undefined : live;
+  const view = live !== undefined && share === undefined;
+  const config = applyShare(unsharedConfig, share);
   const state = await readState(config.projectDir);
   const configuredWithPorts = servicesWithPorts(config, Object.keys(config.services));
   if (config.proxy) configuredWithPorts.push(PROXY_SERVICE_NAME);
@@ -45,7 +56,12 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
   const hasFreshTransportMetadata = Object.values(config.services).every((service) =>
     service.port === undefined || (state?.services[service.name]?.transport ?? 'tcp') === serviceTransport(service),
   );
-  if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata) {
+  const hasFreshUrlHosts = [...Object.values(config.services), ...(config.proxy ? [proxyServiceConfig(config, config.proxy)] : [])].every(
+    (service) =>
+      (service.port === undefined && service.name !== PROXY_SERVICE_NAME) ||
+      (state?.services[service.name]?.urlHost === service.urlHost && state.services[service.name]?.localUrlHost === service.localUrlHost),
+  );
+  if (state && hasAll && hasFreshDockerMetadata && hasFreshTransportMetadata && hasFreshUrlHosts) {
     // state.json can also hold removed services or ones prod.services leaves out: `env --prod` must
     // not show them, nor `setup --prod` resolve a `${db.url}` that `up --prod` rejects.
     const configured = new Set(configuredWithPorts);
@@ -54,18 +70,16 @@ export async function ensureAssignments(config: PortlerConfig): Promise<{ assign
       Object.create(null) as Assignments,
       Object.fromEntries(cached.map(([name, assignment]) => [name, asAllocatedFor(config, name, assignment)])),
     );
-    return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
+    return { assignments, generatedEnv: buildGeneratedEnv(assignments), view: false };
   }
 
   // Never re-reserve currently-running services: allocateAssignments would
   // re-probe their busy ports and move them away from where they listen.
-  const pids = await readPids(config.projectDir);
-  const running = new Set(await liveServiceNames(config.projectDir, pids));
   const reserveServices = configuredWithPorts.filter((serviceName) => !running.has(serviceName));
 
   const assignments = await allocateAssignments(config, state, reserveServices, running, { recorded: pids?.services });
-  await writeState(config.projectDir, assignments);
-  return { assignments, generatedEnv: buildGeneratedEnv(assignments) };
+  if (!view) await writeState(config.projectDir, assignments);
+  return { assignments, generatedEnv: buildGeneratedEnv(assignments), view };
 }
 
 // Keeps `PORTLER_<SERVICE>_IMAGE` and `${service.image}` naming the running image when state.json
@@ -181,9 +195,9 @@ export async function commandEnv(args: ParsedArgs): Promise<number> {
 
     // `config` carries the running containers' pins, so the assignments name their images.
     // A k8s launch forwards only TCP to this machine, as `up k8s` allocates it.
-    const { assignments, generatedEnv } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
+    const { assignments, generatedEnv, view } = await ensureAssignments(mode === 'k8s' ? k8sForwardConfig(config) : config);
     // Also from cached state, so a deleted runtime.env comes back.
-    await writeRuntimeEnv(config.projectDir, generatedEnv);
+    if (!view) await writeRuntimeEnv(config.projectDir, generatedEnv);
 
     // A missing required value is reported, not fatal: this view is how one finds out.
     const baseEnv = await loadBaseEnv(config, { allowMissing: true, quiet: !prod });

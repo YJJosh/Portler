@@ -134,4 +134,4 @@ proxy:
     /: frontend
 ```
 
-The project's own `url_host` is always allowed automatically. WebSocket upgrades are checked the same way — they are not covered by the same-origin policy, so an unchecked `Host` there would reopen the hole.
+The project's own `url_host` is always allowed automatically, and so are the shared addresses and MagicDNS name of a stack started with [`--share`](/guide/sharing). WebSocket upgrades are checked the same way — they are not covered by the same-origin policy, so an unchecked `Host` there would reopen the hole.

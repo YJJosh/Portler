@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { isShareForwardSpec, startShareForwarder, type ShareForwardSpec } from '../share/forwarder.ts';
 import { sleep } from '../util/sleep.ts';
 
 /** Passed as JSON to the hidden `portler __k8s-forward` command. */
@@ -13,6 +14,8 @@ export interface ForwardSpec {
   address: string;
   /** kubectl context, pinned by the parent so a context switch cannot redirect us. */
   context: string;
+  /** `--share`: the supervisor also listens on the shared addresses, so they stop with the forward. */
+  share?: ShareForwardSpec;
 }
 
 // Give up after this many consecutive quick failures.
@@ -33,7 +36,8 @@ export function isForwardSpec(value: unknown): value is ForwardSpec {
     typeof spec.targetPort === 'number' &&
     typeof spec.address === 'string' &&
     typeof spec.context === 'string' &&
-    spec.context !== ''
+    spec.context !== '' &&
+    (spec.share === undefined || isShareForwardSpec(spec.share))
   );
 }
 
@@ -71,6 +75,15 @@ function runForwardOnce(spec: ForwardSpec): { child: ChildProcess; exited: Promi
  * forwards outlive `up k8s -d`; its pid is the one in pids.json, so `portler down` signals it and kubectl as one group.
  */
 export async function runForwardSupervisor(spec: ForwardSpec): Promise<number> {
+  const shared = spec.share ? startShareForwarder(spec.share) : undefined;
+  try {
+    return await superviseForward(spec);
+  } finally {
+    await shared?.close();
+  }
+}
+
+async function superviseForward(spec: ForwardSpec): Promise<number> {
   let shuttingDown = false;
   let current: ChildProcess | null = null;
 

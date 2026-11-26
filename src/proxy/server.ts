@@ -3,6 +3,7 @@ import net from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isObject, isPort, isString } from '../util/guards.ts';
 import { normalizeIpAddress } from '../util/ip.ts';
+import { isTailnetAddress } from '../share/tailnet.ts';
 
 export interface ProxyTarget {
   /** Normalized route prefix ('/' or '/api' — no trailing slash otherwise). */
@@ -11,6 +12,8 @@ export interface ProxyTarget {
   service: string;
   host: string;
   port: number;
+  /** A `share: false` service: the shared listeners refuse this route. */
+  local?: true;
 }
 
 export interface ProxyServerOptions {
@@ -22,10 +25,19 @@ export interface ProxyServerOptions {
   allowedHosts: string[];
   /** Exact peer IP allowlist; loopback is not implicitly trusted. */
   trustedProxies: string[];
+  /** `--share`: more addresses to listen on, besides `host`. */
+  shareAddresses?: string[];
+  /** `--share`: a connection to one of these local addresses is a shared one, whichever listener took it. */
+  sharedAddresses?: string[];
+  /** Refuse peers outside the tailnet on shared connections. */
+  tailnetOnly?: boolean;
 }
 
 function isProxyTarget(value: unknown): value is ProxyTarget {
-  return isObject(value) && isString(value.prefix) && isString(value.service) && isString(value.host) && isPort(value.port);
+  return (
+    isObject(value) && isString(value.prefix) && isString(value.service) && isString(value.host) && isPort(value.port) &&
+    (value.local === undefined || value.local === true)
+  );
 }
 
 export function isProxyServerOptions(value: unknown): value is ProxyServerOptions {
@@ -39,7 +51,12 @@ export function isProxyServerOptions(value: unknown): value is ProxyServerOption
     Array.isArray(value.allowedHosts) &&
     value.allowedHosts.every(isString) &&
     Array.isArray(value.trustedProxies) &&
-    value.trustedProxies.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined)
+    value.trustedProxies.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined) &&
+    (value.shareAddresses === undefined ||
+      (Array.isArray(value.shareAddresses) && value.shareAddresses.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined))) &&
+    (value.sharedAddresses === undefined ||
+      (Array.isArray(value.sharedAddresses) && value.sharedAddresses.every((ip) => isString(ip) && normalizeIpAddress(ip) !== undefined))) &&
+    (value.tailnetOnly === undefined || typeof value.tailnetOnly === 'boolean')
   );
 }
 
@@ -87,7 +104,7 @@ function hasAllowedRequestHost(req: IncomingMessage, allowedHosts: readonly stri
 function rejectForbiddenHost(hostHeader: string | undefined): string {
   return (
     `portler proxy: refusing request with Host "${hostHeader ?? ''}".\n` +
-    'The proxy only answers for localhost / loopback names (DNS-rebinding protection). ' +
+    'The proxy only answers for localhost / loopback names and, with --share, the shared address (DNS-rebinding protection). ' +
     'If you reach this project under another hostname, set proxy.allowed_hosts in portler.yml.\n'
   );
 }
@@ -205,7 +222,7 @@ function badGatewayMessage(route: ProxyTarget, error: Error): string {
   return `portler proxy: service "${route.service}" is not reachable at ${route.host}:${route.port} (${error.message})\n`;
 }
 
-function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: ServerResponse): void {
+function handleRequest(options: ProxyServerOptions, shared: boolean, req: IncomingMessage, res: ServerResponse): void {
   if (!hasAllowedRequestHost(req, options.allowedHosts)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(rejectForbiddenHost(req.headers.host));
@@ -218,6 +235,11 @@ function handleRequest(options: ProxyServerOptions, req: IncomingMessage, res: S
   if (!route) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(`portler proxy: no route matches ${req.url ?? '/'}\n`);
+    return;
+  }
+  if (shared && route.local) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(`portler proxy: service "${route.service}" is not shared (share: false)\n`);
     return;
   }
 
@@ -267,7 +289,7 @@ function rawUpgradeHead(req: IncomingMessage, options: ProxyServerOptions): stri
   return `${lines.join('\r\n')}\r\n\r\n`;
 }
 
-function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket: net.Socket, head: Buffer): void {
+function handleUpgrade(options: ProxyServerOptions, shared: boolean, req: IncomingMessage, socket: net.Socket, head: Buffer): void {
   socket.on('error', () => {});
 
   // WebSockets are not covered by the same-origin policy, so they need the Host check too.
@@ -279,6 +301,10 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   const route = matchRoute(options.routes, req.url ?? '/');
   if (!route) {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  if (shared && route.local) {
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     return;
   }
 
@@ -305,16 +331,52 @@ function handleUpgrade(options: ProxyServerOptions, req: IncomingMessage, socket
   socket.on('close', () => upstream.destroy());
 }
 
-/** Resolves once the server is listening. */
-export function startProxyServer(options: ProxyServerOptions): Promise<http.Server> {
-  const server = http.createServer((req, res) => handleRequest(options, req, res));
-  server.on('upgrade', (req, socket, head) => handleUpgrade(options, req, socket as net.Socket, head));
+// By the address the connection came in on, so a proxy on 0.0.0.0 treats its tailnet connections as shared too.
+// Decided once per connection; a socket without a local address counts as shared, the stricter side.
+function isSharedConnection(options: ProxyServerOptions, socket: net.Socket): boolean {
+  if (!options.sharedAddresses?.length) return false;
+  const local = normalizeIpAddress(socket.localAddress ?? '');
+  return local === undefined || options.sharedAddresses.includes(local);
+}
 
+function createProxyServer(options: ProxyServerOptions): http.Server {
+  const shared = new WeakSet<net.Socket>();
+  const server = http.createServer((req, res) => handleRequest(options, shared.has(req.socket), req, res));
+  server.on('upgrade', (req, socket, head) => handleUpgrade(options, shared.has(req.socket), req, socket as net.Socket, head));
+  server.on('connection', (socket: net.Socket) => {
+    if (!isSharedConnection(options, socket)) return;
+    if (options.tailnetOnly && !isTailnetAddress(socket.remoteAddress ?? '')) socket.destroy();
+    else shared.add(socket);
+  });
+  return server;
+}
+
+function listen(server: http.Server, port: number, host: string): Promise<http.Server> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(options.port, options.host, () => {
+    server.listen(port, host, () => {
       server.removeListener('error', reject);
       resolve(server);
     });
   });
+}
+
+/** Resolves once the server is listening. */
+export function startProxyServer(options: ProxyServerOptions): Promise<http.Server> {
+  return listen(createProxyServer(options), options.port, options.host);
+}
+
+/** One listener per share address, on the proxy's port. Closing them is up to the caller. */
+export async function startProxyShareServers(options: ProxyServerOptions): Promise<http.Server[]> {
+  const servers: http.Server[] = [];
+  try {
+    for (const address of options.shareAddresses ?? []) {
+      const server = createProxyServer(options);
+      servers.push(await listen(server, options.port, address));
+    }
+  } catch (error) {
+    for (const server of servers) server.close();
+    throw error;
+  }
+  return servers;
 }

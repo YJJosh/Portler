@@ -14,6 +14,7 @@ function isServiceAssignment(value: unknown): value is ServiceAssignment {
     isOptionalPort(value.desiredPort) &&
     isString(value.host) &&
     isString(value.urlHost) &&
+    isOptionalString(value.localUrlHost) &&
     isString(value.protocol) &&
     isString(value.url) &&
     (value.transport === undefined || isPortTransport(value.transport)) &&

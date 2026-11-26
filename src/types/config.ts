@@ -98,6 +98,10 @@ export interface ServiceConfig {
   host: string;
   /** Always set by the loader (service value or root fallback). */
   urlHost: string;
+  /** Set by applyShare: the url host this machine itself uses, while `urlHost` is the shared one. */
+  localUrlHost?: string;
+  /** `share: false`: `--share` leaves this service's port on this machine. */
+  share?: false;
   protocol: string;
   preferDeclaredPort: boolean;
   dependsOn: DependencyConfig[];
@@ -188,6 +192,22 @@ export interface PortlerConfig {
   k8sNamespace: string;
   services: Record<string, ServiceConfig>;
   proxy?: ProxyConfig;
+  /** Set by applyShare for `up --share`. */
+  share?: ShareSettings;
   /** Named commands for `portler run`. */
   tasks?: Record<string, TaskConfig>;
+}
+
+/** Where `--share` makes a stack reachable from other machines; recorded on every pid entry of a shared run. */
+export interface ShareSettings {
+  /** What was asked for: `tailscale`, `tailscale-dns` or an IP address. */
+  target: string;
+  /** Addresses Portler listens on next to each service's own host. */
+  addresses: string[];
+  /** The host in shared URLs. */
+  urlHost: string;
+  /** Host header names the proxy accepts for the shared addresses (IPv6 in brackets). */
+  hostNames: string[];
+  /** Refuse peers outside Tailscale's address ranges: on Linux and macOS a LAN neighbour can route to the tailnet IP. */
+  tailnetOnly: boolean;
 }

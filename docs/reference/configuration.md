@@ -59,6 +59,7 @@ Each entry under `services:` accepts the options below. Service names must be 1â
 | `env` | mapping \| list | `{}` | Service env; wins over root env and `.env` files in development, except `default:` entries. Entries as in [env entries](#env-entries). Alias: `environment` |
 | `host` | string | top-level `host` | Bind/probe host override |
 | `url_host` | string | top-level `url_host` | URL host override |
+| `share` | boolean | `true` | `false` keeps this service's port on this machine under [`up --share`](/guide/sharing#what-is-shared) |
 | `protocol` | string | top-level `protocol` | URL scheme override |
 | `prefer_declared_port` | boolean | top-level value | Try the declared `port:` first when free |
 | `depends_on` | string \| list \| mapping | `[]` | Dependencies; see [depends_on](#depends-on) |
@@ -341,15 +342,15 @@ proxy:
 - Duplicate prefixes are an error.
 - `host` overrides only the proxy bind address (default: root `host`), not backend binds or advertised URLs. Use root `host: 127.0.0.1` with `proxy.host: 0.0.0.0` to expose one app endpoint while retaining loopback backend assignments. The listener remains plain HTTP; terminate TLS at a separate edge.
 - `trusted_proxies` is an array of exact IPv4/IPv6 peer addresses, default `[]`. No hostnames, wildcards, CIDRs, ports, or scope identifiers; loopback is not implicitly trusted. Equivalent IPv6 and IPv4-mapped IPv6 identities match. Only allowlist controlled edges that **sanitize client forwarding headers**. Trusted peers may supply a single `http`/`https` scheme, a valid allowed hostname authority, and an IP-only client chain. Portler validates each independently, appends the socket IP to a valid chain, and otherwise falls back to socket/checked `Host` metadata. Untrusted incoming metadata is discarded. `Forwarded`, `X-Real-IP`, and unsupported `X-Forwarded-*` headers are always removed, identically for HTTP and WebSocket upgrades. See the [full forwarding/trust policy](/guide/proxy#behind-a-tls-edge) before enabling trust.
-- `allowed_hosts` extends the `Host` headers the proxy accepts. Loopback names (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) and the project's `url_host` are always allowed; everything else gets a `403`. See [DNS-rebinding protection](/guide/proxy#allowed-hosts-dns-rebinding-protection).
+- `allowed_hosts` extends the `Host` headers the proxy accepts. Loopback names (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`), the project's `url_host` and, with [`up --share`](/guide/sharing), the shared addresses and MagicDNS name are always allowed; everything else gets a `403`. See [DNS-rebinding protection](/guide/proxy#allowed-hosts-dns-rebinding-protection).
 
 See [Proxy: one project URL](/guide/proxy).
 
 ## Service references
 
-Env values (top-level and per-service) can reference other services, either as the whole value (`backend.url`) or interpolated (`${postgres.port}`). Valid properties: `url`, `port`, `host`, `url_host`, `protocol`, `desired_port`, `container`, `image`, `name`, `address`, `address_host`, `address_port`, plus the service's [exports](#exports). `self` names the service whose env, setup, healthcheck or exports it is (`${self.port}`).
+Env values (top-level and per-service) can reference other services, either as the whole value (`backend.url`) or interpolated (`${postgres.port}`). Valid properties: `url`, `local_url`, `port`, `host`, `url_host`, `protocol`, `desired_port`, `container`, `image`, `name`, `address`, `address_host`, `address_port`, plus the service's [exports](#exports). `self` names the service whose env, setup, healthcheck or exports it is (`${self.port}`).
 
-`address` is `host:port` as the reader sees it: `localhost:<assigned port>` from a process on your machine (including setup steps, healthcheck commands and `portler run`), `<service>:<port>` from a container on the project network or from a pod in [Kubernetes mode](/guide/kubernetes), and `host.docker.internal:<assigned port>` from a container reaching a local process. `url`, `port` and `host` are always the host-side values. See [Services & environment](/guide/services#service-references).
+`address` is `host:port` as the reader sees it: `localhost:<assigned port>` from a process on your machine (including setup steps, healthcheck commands and `portler run`), `<service>:<port>` from a container on the project network or from a pod in [Kubernetes mode](/guide/kubernetes), and `host.docker.internal:<assigned port>` from a container reaching a local process. `url`, `port` and `host` are always the host-side values. With [`up --share`](/guide/sharing#references-between-services), `url` and `url_host` give the shared address and `local_url` the one this machine uses; without it `local_url` equals `url`. See [Services & environment](/guide/services#service-references).
 
 On native Linux Docker, Portler adds a `host.docker.internal:host-gateway` mapping. A local process reached from a container must listen on an interface reachable from the Docker bridge (for example `0.0.0.0`), not only loopback. Keep the host firewall restricted as appropriate. Docker Desktop supplies its own host gateway.
 

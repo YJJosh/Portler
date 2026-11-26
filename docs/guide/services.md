@@ -38,7 +38,8 @@ Available properties:
 
 | Property | Resolves to |
 | --- | --- |
-| `url` | Full URL, e.g. `http://localhost:51235` |
+| `url` | Full URL, e.g. `http://localhost:51235`; the shared one while the stack is [shared](/guide/sharing) |
+| `local_url` | The URL this machine uses: `url` unless the stack is shared |
 | `port` | Assigned host port |
 | `host` | Bind host (default `127.0.0.1`) |
 | `url_host` | Host used in URLs (default `localhost`) |

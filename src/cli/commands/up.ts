@@ -24,7 +24,11 @@ import { DOCKER_TCP_HOLD_MS, logLocationHint, waitForServiceReady } from '../../
 import { readState, writeRuntimeEnv, writeState } from '../../state/index.ts';
 import { withLifecycleLock, withLifecycleLockForTeardown } from '../../state/lock.ts';
 import { missingManagedVolumes, warnMissingVolumeSetVariants } from '../../volumes/index.ts';
-import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig } from '../../types/index.ts';
+import { applyShare, chooseShare } from '../../share/settings.ts';
+import { reportShare } from '../../share/report.ts';
+import { readinessProvesListening, waitForSharedPort } from '../../share/ready.ts';
+import { shareForwardSpec } from '../../share/command.ts';
+import type { Assignments, EnvMap, PidServiceInfo, PidsFile, PortlerConfig, ServiceConfig, ShareSettings } from '../../types/index.ts';
 import type { ParsedArgs } from '../args.ts';
 import { restartAccepts, type RestartRequest } from './restart.ts';
 import { commandUpK8s } from './up-k8s.ts';
@@ -154,6 +158,12 @@ export interface StartOptions {
   skipRunning?: boolean;
   /** `--image <service>=<image>`: run these Docker services from pinned images instead of building them. */
   images?: Readonly<Record<string, string>>;
+  /** `--share <target>` (or `none`); without it a running stack's share is kept. */
+  share?: string;
+  /** PORTLER_SHARE: used only when nothing runs yet. */
+  shareDefault?: string;
+  /** restart: the share its stopped services were started with. */
+  replayShare?: ShareSettings;
   /** restart: the services its plan covers. If what is not running differs, startPhase throws
    * StartSetChangedError before starting anything. */
   expectStart?: readonly string[];
@@ -271,17 +281,25 @@ export async function startPhase(
 ): Promise<StartedStack> {
   options.signal?.throwIfAborted();
   // Under --prod only prod.services run; dependencies on left-out services are dropped.
-  const { raw, modeConfig, config } = launchConfig(rawConfig, mode, { prod: options.prod, images: options.images });
+  const { raw, modeConfig, config: launched } = launchConfig(rawConfig, mode, { prod: options.prod, images: options.images });
   const orderedNames = expandAndOrderServices(raw, requestedRootNames);
   const images = options.images ?? {};
-  const pidsBefore = await readPids(config.projectDir);
+  const pidsBefore = await readPids(rawConfig.projectDir);
   // Running as `ps` reports it: starting a Docker service whose container outlived its `docker run`
   // shell would remove that container. One that cannot be inspected counts as running too.
   const runningNames = new Set(
-    await liveServiceNames(config.projectDir, pidsBefore, (serviceName, message) => {
+    await liveServiceNames(rawConfig.projectDir, pidsBefore, (serviceName, message) => {
       process.stderr.write(`[portler] warning: ${serviceName}: ${message}; treating it as running\n`);
     }),
   );
+
+  // Before the overlap check, whose restart hint would keep the running share.
+  const liveEntries = [...runningNames].flatMap((name) => pidsBefore?.services[name] ?? []);
+  const request = options.share ?? (liveEntries.length === 0 ? options.shareDefault : undefined);
+  const share = await chooseShare(liveEntries, request, options.replayShare);
+  if (share && options.prod) {
+    throw new Error(`this stack is running with --share ${share.target}, which does not apply with --prod; run "portler down" first`);
+  }
 
   let selectedNames: string[];
   if (options.skipRunning) {
@@ -307,6 +325,7 @@ export async function startPhase(
   validateImageOverrideTargets(images, selectedNames, runningNames);
   reportImageOverrides(modeConfig, images);
 
+  const config = applyShare(launched, share);
   checkLaunch(config, mode, selectedNames);
 
   // A proxy that is already running keeps its port and old routing targets;
@@ -332,6 +351,7 @@ export async function startPhase(
   await writeRuntimeEnv(config.projectDir, generatedEnv);
 
   printPortTable(assignments, proxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames);
+  reportShare(config, startProxy ? [...selectedNames, PROXY_SERVICE_NAME] : selectedNames, assignments);
   warnMissingPortEnv(config, selectedNames);
   if (config.volumeSet && config.volumes.length > 0) {
     process.stdout.write(`[portler] volume set: ${config.volumeSet}\n`);
@@ -571,7 +591,12 @@ export async function startPhase(
               logFilePath,
               options.signal,
               hostResolveOptions(config, service, baseEnv, generatedEnv, assignments),
-            ),
+            ).then(async () => {
+              const assignment = assignments[serviceName];
+              if (config.share && assignment && shareForwardSpec(config, service, assignment) && readinessProvesListening(service, assignment)) {
+                await waitForSharedPort(config.share, assignment, () => childExited, options.signal);
+              }
+            }),
           );
         }
       }
@@ -590,7 +615,7 @@ export async function startPhase(
     options.signal?.throwIfAborted();
     if (proxy && startProxy) {
       let proxyExited = false;
-      const child = spawnProxy(proxy, assignments, !options.detach);
+      const child = spawnProxy(proxy, assignments, !options.detach, config.share);
       child.once('exit', () => {
         proxyExited = true;
       });
@@ -613,6 +638,10 @@ export async function startPhase(
         undefined,
         options.signal,
       );
+      if (config.share) {
+        await waitForSharedPort(config.share, assignments[PROXY_SERVICE_NAME]!, () => proxyExited, options.signal);
+        if (proxyExited) throw new Error('the proxy exited while it was opening its shared listeners; run it in the foreground (portler up --share ...) to see why');
+      }
       await assertMembersAlive();
       options.signal?.throwIfAborted();
     }
@@ -729,6 +758,19 @@ export async function startServices(
   }
 }
 
+/** `--share`, refused with --prod, whose ports belong behind the deployment's own edge. */
+export function shareRequest(args: Pick<ParsedArgs, 'share' | 'prod'>): string | undefined {
+  if (args.prod && args.share !== undefined && args.share !== 'none') {
+    throw new Error('--share does not apply with --prod; put a production stack behind its own edge (see "Behind a TLS edge" in the proxy guide)');
+  }
+  return args.share;
+}
+
+/** PORTLER_SHARE: only a default for a stack that is not running yet, and never under --prod. */
+export function shareDefault(args: Pick<ParsedArgs, 'prod'>): string | undefined {
+  return args.prod ? undefined : process.env.PORTLER_SHARE?.trim() || undefined;
+}
+
 export async function commandUp(args: ParsedArgs): Promise<number> {
   const { mode, requested } = parseRunMode(args.positionals);
   if (mode === 'k8s') {
@@ -745,6 +787,8 @@ export async function commandUp(args: ParsedArgs): Promise<number> {
     prod: args.prod,
     setup: args.setup,
     images: args.images,
+    share: shareRequest(args),
+    shareDefault: shareDefault(args),
     // Offered only if the suggested restart would pass its checks and replay nothing this
     // command did not say (a pin on a service it leaves running, a stale entry's --prod or mode).
     restartHint: async (serviceNames, pidsBefore, runningNames) => {

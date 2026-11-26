@@ -21,7 +21,8 @@ export async function commandK8s(args: ParsedArgs): Promise<number> {
   validateK8sMode(config, selectedNames);
 
   return withLifecycleLock(config.projectDir, async () => {
-    const { assignments } = await ensureAssignments(config);
+    // Manifests must not carry this machine's shared URLs.
+    const { assignments } = await ensureAssignments(config, { share: false });
     const rendered = await renderManifests(config, selectedNames, assignments);
     const manifestDir = await writeManifestFiles(config.projectDir, rendered);
 

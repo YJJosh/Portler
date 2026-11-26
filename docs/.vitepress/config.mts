@@ -52,6 +52,7 @@ export default defineConfig({
             { text: 'Volumes', link: '/guide/volumes' },
             { text: 'Databases & presets', link: '/guide/databases' },
             { text: 'Proxy: one project URL', link: '/guide/proxy' },
+            { text: 'Sharing over the network', link: '/guide/sharing' },
             { text: 'Kubernetes mode', link: '/guide/kubernetes' },
           ],
         },

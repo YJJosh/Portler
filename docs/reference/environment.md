@@ -10,6 +10,7 @@ For **every service that has an assigned port**, all services receive (with `<NA
 | --- | --- |
 | `PORTLER_<NAME>_PORT` | Assigned host port |
 | `PORTLER_<NAME>_URL` | Full URL, e.g. `http://localhost:51235` |
+| `PORTLER_<NAME>_LOCAL_URL` | Only for a service whose port is [shared](/guide/sharing) (not `share: false`): the URL this machine uses, e.g. `http://localhost:51235`; `PORTLER_<NAME>_URL` is then the shared one |
 | `PORTLER_<NAME>_HOST` | Bind host (default `127.0.0.1`) |
 | `PORTLER_<NAME>_URL_HOST` | URL host (default `localhost`) |
 | `PORTLER_<NAME>_PROTOCOL` | URL scheme (default `http`) |
@@ -38,6 +39,8 @@ Each name listed in a service's `port_env:` is set to the service's port:
 | Variable | Effect |
 | --- | --- |
 | `PORTLER_VOLUME_SET` | Fallback for `--volume-set`; selects [volume set](/guide/volumes#volume-sets) variants of managed volumes |
+| `PORTLER_SHARE` | Fallback for `up --share` ([sharing](/guide/sharing)); ignored with `--prod` |
+| `PORTLER_TAILSCALE` | Path of the Tailscale CLI that `--share tailscale` reads its status from. Defaults to `tailscale` on `PATH` (on macOS also the CLI inside `Tailscale.app`) |
 | `PORTLER_GLOBAL_DIR` | Location of the shared state directory (the global port registry). Defaults to `~/.portler` |
 | `PORTLER_ALLOW_K8S_CONTEXT` | Allows one specific, otherwise-unrecognized kubectl context for [Kubernetes mode](/guide/kubernetes#local-clusters-only). Must name the exact context |
 | `PORTLER_ALLOW_K8S_ENDPOINT` | Allows one specific Kubernetes API server URL that is not a loopback endpoint — including a **private/LAN** one such as minikube's `https://192.168.49.2:8443`. Must name the exact URL. Separate from the context override on purpose: the [endpoint check](/guide/kubernetes#the-endpoint-is-checked-too-not-just-the-name) is an independent gate, and it does not cover an endpoint Portler cannot read at all |

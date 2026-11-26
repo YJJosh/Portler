@@ -526,6 +526,10 @@
         "url_host": {
           "type": "string"
         },
+        "share": {
+          "type": "boolean",
+          "description": "false keeps this service's port on this machine under \"portler up --share\". Default: true."
+        },
         "protocol": {
           "type": "string"
         },
