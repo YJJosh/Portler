@@ -88,7 +88,7 @@ it('follows equal-length and larger replacements made entirely between polls, an
     return {};
   });
   const errors: unknown[] = [];
-  const oldListeners = process.stdout.rawListeners('error');
+  const oldListeners = [...process.stdout.rawListeners('error'), ...process.stderr.rawListeners('error')];
   void commandLogs(parseArgs(['api', '--follow'], 'logs')).catch((error) => {
     errors.push(error);
     polled();
@@ -123,8 +123,10 @@ it('follows equal-length and larger replacements made entirely between polls, an
     assert.ok(output.endsWith('[api] D\n[api] tail\n[api] EEE\n'));
   } finally {
     // The follower is suspended in a mocked sleep, with no timer or open fd.
-    for (const listener of process.stdout.rawListeners('error')) {
-      if (!oldListeners.includes(listener)) process.stdout.removeListener('error', listener as (error: Error) => void);
+    for (const stream of [process.stdout, process.stderr]) {
+      for (const listener of stream.rawListeners('error')) {
+        if (!oldListeners.includes(listener)) stream.removeListener('error', listener as (error: Error) => void);
+      }
     }
   }
 });

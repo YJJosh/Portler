@@ -5,6 +5,7 @@ import { createLinePrinter, prefixStream, readPids, serviceLogPath } from '../..
 import { pathExists } from '../../util/fs.ts';
 import { sleep } from '../../util/sleep.ts';
 import type { ParsedArgs } from '../args.ts';
+import { readerGone } from '../output.ts';
 import { selectServiceNames } from '../services.ts';
 
 const FOLLOW_POLL_MS = 250;
@@ -101,13 +102,15 @@ async function resolveLogSources(projectDir: string, serviceNames: string[], exp
   return sources;
 }
 
-// Read-only, and `--follow` never ends by itself: stop once nobody reads the output.
-function exitOnClosedStdout(): void {
-  process.stdout.on('error', () => process.exit(0));
+// Read-only, and `--follow` never ends by itself: stop once nobody reads the output. Container stderr goes to stderr.
+function exitOnClosedOutput(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (error: NodeJS.ErrnoException) => process.exit(readerGone(error) ? 0 : 1));
+  }
 }
 
 export async function commandLogs(args: ParsedArgs): Promise<number> {
-  exitOnClosedStdout();
+  exitOnClosedOutput();
 
   const config = await loadConfig(process.cwd(), args.file);
   const serviceNames = selectServiceNames(config, args.positionals);

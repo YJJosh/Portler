@@ -17,7 +17,7 @@ import { commandSetup } from './commands/setup.ts';
 import { commandUp } from './commands/up.ts';
 import { commandVolumes } from './commands/volumes.ts';
 import { printHelp } from './help.ts';
-import { keepRunningWhenOutputCloses } from './output.ts';
+import { keepRunningWhenOutputCloses, outputFailed } from './output.ts';
 
 // `down` needs POSIX process groups and OS process start times; Windows has neither,
 // so `down` would leak processes. See "Supported platforms" in README.
@@ -155,4 +155,6 @@ export async function runCli(): Promise<void> {
     process.stderr.write(`[portler] error: ${(error as Error).message}\n`);
     process.exitCode = 1;
   }
+  // The work is done, but its output is incomplete.
+  if (outputFailed()) process.exitCode ||= 1;
 }

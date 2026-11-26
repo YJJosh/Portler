@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { isPidAlive, readPids } from '../src/process/pids.ts';
+import { isPidAlive, readPids, writePids } from '../src/process/pids.ts';
 
 const cli = fileURLToPath(new URL('../bin/portler.ts', import.meta.url));
 const cleanup: Array<() => Promise<void>> = [];
@@ -45,12 +45,12 @@ async function portler(dir: string, ...args: string[]): Promise<{ status: number
  * Runs Portler in a shell pipeline whose reader stops early, as `portler ... | head -n 1` does. With `both`, stderr
  * goes into the same pipe; otherwise it is returned.
  */
-async function withClosedOutput(dir: string, args: string[], options: { reader?: string; both?: boolean } = {}): Promise<{ status: number; stderr: string }> {
+async function withClosedOutput(dir: string, args: string[], options: { reader?: string; both?: boolean; path?: string } = {}): Promise<{ status: number; stderr: string }> {
   const statusFile = path.join(dir, 'pipeline-status');
   const script = `{ "$@"; echo $? > "$STATUS_FILE"; } ${options.both ? '2>&1 ' : ''}| ${options.reader ?? 'true'}`;
   const child = spawn('sh', ['-c', script, 'sh', process.execPath, '--experimental-strip-types', cli, ...args], {
     cwd: dir,
-    env: { ...env(dir), STATUS_FILE: statusFile },
+    env: { ...env(dir), STATUS_FILE: statusFile, ...(options.path ? { PATH: `${options.path}:${process.env.PATH}` } : {}) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -135,6 +135,60 @@ it('a setup step that leaves a process holding its output does not keep Portler 
   const setup = await portler(dir, 'setup');
 
   assert.equal(setup.status, 0, setup.stderr);
-  assert.match(setup.stdout, /started/);
+  assert.match(setup.stdout, /^started$/m);
+  assert.match(setup.stderr, /left a process that still holds its output/);
   assert.ok(Date.now() - startedAt < 10_000, 'setup returned while the background process still runs');
+});
+
+it('setup keeps the order of stdout and stderr lines when both go into one pipe', { timeout: 30_000 }, async () => {
+  const dir = await project("setup:\n  - 'i=0; while [ $i -lt 400 ]; do echo \"line $i\"; echo \"line $((i+1))\" >&2; i=$((i+2)); done'\nservices:\n  db: {command: 'sleep 600'}\n");
+  const output = path.join(dir, 'merged.txt');
+
+  const child = spawn('sh', ['-c', `"$@" 2>&1 | cat > ${JSON.stringify(output)}`, 'sh', process.execPath, '--experimental-strip-types', cli, 'setup'], { cwd: dir, env: env(dir), stdio: 'ignore' });
+  const [status] = await once(child, 'close');
+
+  assert.equal(status, 0);
+  const lines = (await fs.readFile(output, 'utf8')).split('\n').filter((line) => line.startsWith('line '));
+  assert.deepEqual(lines, Array.from({ length: 400 }, (_, i) => `line ${i}`));
+});
+
+it('logs exits 1 when its output fails for another reason than a closed reader', { timeout: 30_000 }, async () => {
+  const dir = await project("services:\n  db: {command: 'i=0; while [ $i -lt 5000 ]; do echo \"log line $i\"; i=$((i+1)); done; sleep 600'}\n");
+  assert.equal((await portler(dir, 'up', '-d')).status, 0);
+  for (let i = 0; i < 100 && (await fs.readFile(path.join(dir, '.portler', 'logs', 'db.log'), 'utf8').catch(() => '')).length < 50_000; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  // A 1-block file size limit makes Portler's writes fail with EFBIG.
+  const child = spawn('sh', ['-c', 'ulimit -f 1; "$@" > out.txt', 'sh', process.execPath, '--experimental-strip-types', cli, 'logs'], { cwd: dir, env: env(dir), stdio: 'ignore' });
+  const [status] = await once(child, 'close');
+
+  assert.equal(status, 1);
+});
+
+it('logs --follow ends when the reader closes a pipe that only gets container stderr', { timeout: 30_000 }, async () => {
+  const dir = await project("services:\n  api: {image: 'alpine:3'}\n");
+  const bin = path.join(dir, 'fake-bin');
+  await fs.mkdir(bin);
+  // A fake `docker`: the container exists and logs only to stderr, one line every 100 ms.
+  await fs.writeFile(path.join(bin, 'docker'), '#!/bin/sh\n[ "$1" = logs ] || exit 0\ni=0; while [ $i -lt 200 ]; do echo "err $i" >&2; i=$((i+1)); sleep 0.1; done\n', { mode: 0o755 });
+  const startedAt = new Date().toISOString();
+  await writePids(dir, { version: 1, project: dir, startedAt, services: { api: { pid: 4_194_303, command: 'api', cwd: dir, startedAt, dockerContainer: 'portler-test-api', runMode: 'docker' } } });
+
+  const startedMs = Date.now();
+  const result = await withClosedOutput(dir, ['logs', '--follow'], { reader: 'head -n 1', both: true, path: bin });
+
+  assert.equal(result.status, 0);
+  assert.ok(Date.now() - startedMs < 10_000, 'logs stopped long before the fake container did');
+});
+
+it('setup keeps stdout and stderr apart when they go into different pipes', { timeout: 30_000 }, async () => {
+  const dir = await project("setup:\n  - 'echo out-line; echo err-line >&2'\nservices:\n  db: {command: 'sleep 600'}\n");
+
+  const setup = await portler(dir, 'setup');
+
+  assert.equal(setup.status, 0, setup.stderr);
+  assert.match(setup.stdout, /^out-line$/m);
+  assert.doesNotMatch(setup.stdout, /^err-line$/m);
+  assert.match(setup.stderr, /^err-line$/m);
 });
