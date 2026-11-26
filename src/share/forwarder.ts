@@ -78,6 +78,24 @@ function connectUpstream(host: string, port: number, localAddress: string | unde
   });
 }
 
+const SOURCE_PROBE_MS = 1_000;
+
+function sourceTimesOut(host: string, port: number, localAddress: string, track: (socket: net.Socket) => void): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port, localAddress });
+    track(socket);
+    socket.on('error', () => resolve(false));
+    socket.setTimeout(SOURCE_PROBE_MS, () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
 function sameFamily(a: string, b: string): boolean {
   return net.isIPv4(a) === net.isIPv4(b);
 }
@@ -103,8 +121,7 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
   const servers: net.Server[] = [];
   const sockets = new Set<net.Socket>();
   let closed = false;
-  // macOS drops loopback connections from a non-loopback source after a timeout, so it never tries.
-  let localSourceWorks = process.platform !== 'darwin';
+  let localSourceWorks = true;
   const stopped = new AbortController();
   // Aborted by close, so a pending retry does not keep the process alive.
   const sleep = (ms: number): Promise<void> => delay(ms, undefined, { signal: stopped.signal }).catch(() => {});
@@ -144,7 +161,7 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
         client.destroy();
         return;
       }
-      // Only the source address failed.
+      // Only the source address failed, e.g. a source the OS refuses for a loopback service.
       localSourceWorks = false;
       log(spec, `cannot connect from ${source} (${(error as Error).message}); the service sees shared connections as local`);
     }
@@ -179,6 +196,13 @@ export function startShareForwarder(spec: ShareForwardSpec, signal?: AbortSignal
     while (!closed && upstreamHost === undefined) {
       upstreamHost = await firstReachable(upstreamHosts(spec.upstream), spec.port, track);
       if (upstreamHost === undefined) await sleep(UPSTREAM_POLL_MS);
+    }
+    // macOS drops a connection from its Tailscale address to loopback without an answer. Found once here, so the
+    // first visitor does not wait for the timeout.
+    const source = spec.addresses.find((address) => sameFamily(address, upstreamHost!));
+    if (source !== undefined && !closed && (await sourceTimesOut(upstreamHost!, spec.port, source, track))) {
+      localSourceWorks = false;
+      log(spec, `cannot connect from ${source} (connect timed out); the service sees shared connections as local`);
     }
     // In parallel: one address that is missing for a while must not hold up the others.
     await Promise.all(spec.addresses.map(async (address) => {

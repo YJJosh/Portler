@@ -10,23 +10,19 @@ const SELF_PROBE_MS = 500;
 
 const ownAddressChecks = new Map<string, Promise<boolean>>();
 
-// Connects to a throwaway listener on port 0, so it never races a forwarder for the shared port.
-async function reachesOwnAddress(address: string): Promise<boolean> {
-  const server = net.createServer((socket) => socket.destroy());
-  server.unref();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen({ host: address, port: 0 }, resolve);
-    });
-  } catch {
-    return true;
-  }
-  try {
-    return await isTcpReady(address, (server.address() as net.AddressInfo).port, SELF_PROBE_MS);
-  } finally {
-    server.close();
-  }
+// Port 1, where nothing listens: a refusal proves the path works, only silence that it does not. It binds no
+// port, so it never takes one a forwarder is about to listen on.
+function reachesOwnAddress(address: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: address, port: 1 });
+    const done = (reached: boolean): void => {
+      socket.destroy();
+      resolve(reached);
+    };
+    socket.setTimeout(SELF_PROBE_MS, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(true));
+  });
 }
 
 /**
