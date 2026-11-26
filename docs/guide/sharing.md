@@ -100,7 +100,7 @@ Portler records the share with the running stack:
 - Changing it needs a fresh start: `--share` on a stack running without it (or another target, or `none` on a shared one) is refused with "run `portler down` first". Running services already hold env with their URLs.
 - After a full `portler down`, a plain `portler up` is private again.
 
-`portler ps` adds a `SHARED` column: `yes` when the shared address answers on that port, `not reachable` when it does not (for example while Tailscale restarts). macOS cannot connect to its own Tailscale IPv6 address (other devices can), so on a Mac `ps` and `up` check only the IPv4 one.
+`portler ps` adds a `SHARED` column: `yes` when the shared address answers on that port, `not reachable` when it does not (for example while Tailscale restarts), `unknown` when this machine cannot connect to the shared address itself. macOS cannot connect to its own Tailscale IPv6 address (other devices can), so on a Mac `ps` and `up` check only the IPv4 one.
 
 ## Docker and Kubernetes
 
