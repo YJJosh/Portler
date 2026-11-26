@@ -3,7 +3,7 @@
 Manage this project's Portler-managed Docker volumes. See the [Volumes guide](/guide/volumes) for concepts and the worktree workflow.
 
 ```bash
-portler volumes [list] [--prod]
+portler volumes [list] [--prod] [--json]
 portler volumes fork <volume> <new-set> [--force] [--prod]
 portler volumes remove <volume> [--force] [--prod]
 ```
@@ -13,6 +13,8 @@ All volume commands need the Docker daemon; when it is not running they fail wit
 ## `volumes` / `volumes list`
 
 Lists this project's volumes with their volume set, declaring services, size, and the containers using them.
+
+`--json` prints the same as JSON for other tools: `prefix` (the Docker name prefix), `owner` (the `portler.project` label value a tool must put on volumes it creates for this project, so Portler mounts them), the active `volumeSet`, and one entry per volume (`name`, `fullName`, `volumeSet`, `services`, `exists`, `size`, `usedBy`).
 
 ## `volumes fork <volume> <new-set>`
 

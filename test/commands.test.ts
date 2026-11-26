@@ -61,6 +61,8 @@ describe('CLI command contracts', () => {
     await assert.rejects(main(['ports', 'api']), /ports does not accept positional arguments/);
     await assert.rejects(main(['init', 'extra']), /init does not accept positional arguments/);
     await assert.rejects(main(['volumes', 'list', '--force']), /--force only applies to "portler volumes remove"/);
+    await assert.rejects(main(['up', '--json']), /--json does not apply to "portler up"/);
+    await assert.rejects(main(['volumes', 'fork', 'a', 'b', '--json']), /--json only applies to "portler volumes list"/);
     await assert.rejects(commandClean(parseArgs(['--global', '--file', 'other.yml'], 'clean')), /--file does not apply/);
   });
 
